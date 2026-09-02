@@ -307,7 +307,7 @@ async def get_card_handler(message: Message):
             seconds = remaining % 60
 
             await message.reply(
-                f"<blockquote>⏳ <b>Следующую карточку можно будет получить через: {hours}ч {minutes}м {seconds}с</b></blockquote>"
+                f"<blockquote>⏳ Следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>"
             )
             return
 
@@ -360,10 +360,9 @@ async def get_card_handler(message: Message):
 
     rarity_title = RARITIES[selected_rarity]["name"]
     caption = (
-        f"<blockquote><b>💙 {message.from_user.first_name}, тебе выпала новая карточка: {card_name}\n\n"
-        f"🎲 Редкость: {rarity_title}\n"
-        f"💰 Получено монет: {coins_earned}\n"
-        f"💎 Баланс: {balance}</b></blockquote>"
+        f"<blockquote><b>💙 {message.from_user.first_name}</b>, тебе выпала новая карточка: <b>{card_name}</b>\n\n"
+        f"🎲 Редкость: <b>{rarity_title}</b>\n"
+        f"💰 Монеты: <b>+{coins_earned} [{balance}]</b></blockquote>"
     )
     await message.reply_photo(photo=photo_id, caption=caption)
 
