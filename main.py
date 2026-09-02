@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 # ================= КОНФИГУРАЦИЯ =================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_NAME = "cards_game.db"
+DB_NAME = "/app/data/cards_game.db"
 COOLDOWN_SECONDS = 3 * 3600  # 3 часа в секундах
 
 # Редкости и их шансы (сумма весов может быть любой, тут 60+25+10+5 = 100%)
