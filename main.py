@@ -320,7 +320,7 @@ def get_card_action_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для действий с карточкой при кулдауне"""
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="✨ Получить сейчас (5000💰)", 
+        text="✨ Получить сейчас [5 000]", 
         callback_data=CardActionCallback(action="instant", user_id=user_id).pack()
     )
     builder.button(
@@ -335,7 +335,7 @@ def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Клавиатура после получения карточки"""
     builder = InlineKeyboardBuilder()
     builder.button(
-        text="🃏 Получить ещё одну (5000💰)", 
+        text="✨ Получить ещё одну [5 000]", 
         callback_data=CardActionCallback(action="another", user_id=user_id).pack()
     )
     builder.button(
@@ -619,8 +619,7 @@ async def get_card_handler(message: Message):
             seconds = remaining % 60
             
             await message.reply(
-                f"<blockquote>⏳ Следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b>\n\n"
-                f"Или получи сейчас за <b>{INSTANT_COST} монет</b> (у тебя <b>{balance}</b> монет)</blockquote>",
+                f"<blockquote>⏳ Следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>",
                 reply_markup=get_card_action_keyboard(user_id)
             )
             return
@@ -657,9 +656,8 @@ async def get_card_handler(message: Message):
         streak, bonus, new_balance = await check_and_update_streak(user_id)
         if bonus > 0 and streak > 0:
             await message.reply(
-                f"<blockquote><b>🔥 Стрик {streak} день!\n"
-                f"💰 Бонус за стрик: +{bonus} монет\n"
-                f"💳 Баланс: {new_balance} монет</b></blockquote>"
+                f"<blockquote>🔥 Стрик <b>{streak} день</b>\n"
+                f"💰 Бонус за стрик: <b>+{bonus} [{new_balance}]</b></blockquote>"
             )
             
     except Exception as e:
@@ -1095,7 +1093,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 balance = row["coins"] if row else 0
             
             if balance < INSTANT_COST:
-                await callback.answer(f"❗️ Недостаточно монет. Нужно {INSTANT_COST}, у тебя {balance}", show_alert=True)
+                await callback.answer(f"❗️ Не хватает монет. Для получения ещё одной карточки тоебуется {INSTANT_COST}, на Вашем балансе — {balance}", show_alert=True)
                 return
             
             await callback.answer("⏳ Получаем карточку...")
@@ -1154,10 +1152,9 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             
             rarity_title = RARITIES[card_data["rarity"]]["name"]
             caption = (
-                f"<blockquote><b>💙 {callback.from_user.first_name}</b>, ты получил новую карточку за {INSTANT_COST} монет!\n"
-                f"🃏 <b>{card_data['name']}</b>\n\n"
+                f"<blockquote><b>💙 {callback.from_user.first_name}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
                 f"🎲 Редкость: <b>{rarity_title}</b>\n"
-                f"💰 Монеты: <b>+{card_data['coins_earned']} (осталось {card_data['balance']})</b></blockquote>"
+                f"💰 Монеты: <b>+{card_data['coins_earned']} [{card_data['balance']}]</b></blockquote>"
             )
             
             await callback.message.answer_photo(
