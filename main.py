@@ -1357,9 +1357,10 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
         elif action == "collection":
             # Проверка, что запрос из личного чата
             if callback.message.chat.type != "private":
-                await callback.answer()
-                await callback.message.answer(
-                    "❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot"
+
+                await callback.answer(
+                    text="❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot",
+                    show_alert=True
                 )
                 return
             
