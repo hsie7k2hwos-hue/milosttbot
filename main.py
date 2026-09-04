@@ -347,13 +347,17 @@ def get_card_action_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
     """Клавиатура после получения карточки"""
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✨ Получить ещё одну [5 000]", 
-        callback_data=CardActionCallback(action="another", user_id=user_id).pack()
-    )
+    
+    # Показываем кнопку "Получить ещё" только если хватает монет
+    if balance >= INSTANT_COST:
+        builder.button(
+            text="✨ Получить ещё одну [5 000]", 
+            callback_data=CardActionCallback(action="another", user_id=user_id).pack()
+        )
+    
     builder.button(
         text="📦 Моя коллекция", 
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack()
@@ -668,7 +672,7 @@ async def get_card_handler(message: Message):
         await message.reply_photo(
             photo=card_data["photo_id"], 
             caption=caption, 
-            reply_markup=get_after_card_keyboard(user_id)
+            reply_markup=get_after_card_keyboard(user_id, card_data["balance"])
         )
         
         # Проверяем стрик
@@ -973,8 +977,27 @@ async def get_collection_main_keyboard(user_id: int):
         return None, 0, 0
 
 
+async def get_user_profile_photo(bot: Bot, user_id: int) -> Optional[str]:
+    """Получает file_id фото профиля пользователя или None если фото нет"""
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count > 0:
+            return photos.photos[0][-1].file_id
+    except Exception as e:
+        logger.error(f"Ошибка получения фото профиля: {e}")
+    return None
+
+
 @router.callback_query(F.data == "collection")
 async def show_collection(callback: CallbackQuery):
+    # Проверка, что запрос из личного чата
+    if callback.message.chat.type != "private":
+        await callback.answer()
+        await callback.message.answer(
+            "<blockquote><b>📦 Коллекцию можно просмотреть только в личных сообщениях с ботом. Перейдите в ЛС: @ваш_бот</b></blockquote>"
+        )
+        return
+    
     user_id = callback.from_user.id
     keyboard, total_cards, total_cards_in_game = await get_collection_main_keyboard(user_id)
     
@@ -987,23 +1010,28 @@ async def show_collection(callback: CallbackQuery):
     
     # Получаем ник для аватарки
     nickname = await get_user_nickname(user_id)
-    initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
     
-    # Создаем аватар-заглушку
-    avatar = await create_avatar_photo(initials)
+    # Пытаемся получить фото профиля
+    photo_id = await get_user_profile_photo(callback.message.bot, user_id)
+    
+    # Если фото профиля нет, создаем аватар-заглушку
+    if not photo_id:
+        initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+        avatar = await create_avatar_photo(initials)
+        photo_id = avatar
     
     text = f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>"
     
     # Проверяем, есть ли уже фото в сообщении
     if callback.message.photo:
         await callback.message.edit_media(
-            media=InputMediaPhoto(media=avatar, caption=text),
+            media=InputMediaPhoto(media=photo_id, caption=text),
             reply_markup=keyboard
         )
     else:
         await callback.message.delete()
         await callback.message.answer_photo(
-            photo=avatar,
+            photo=photo_id,
             caption=text,
             reply_markup=keyboard
         )
@@ -1123,22 +1151,27 @@ async def process_back_to_main(callback: CallbackQuery):
     
     # Получаем ник для аватарки
     nickname = await get_user_nickname(user_id)
-    initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
     
-    # Создаем аватар-заглушку
-    avatar = await create_avatar_photo(initials)
+    # Пытаемся получить фото профиля
+    photo_id = await get_user_profile_photo(callback.message.bot, user_id)
+    
+    # Если фото профиля нет, создаем аватар-заглушку
+    if not photo_id:
+        initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+        avatar = await create_avatar_photo(initials)
+        photo_id = avatar
     
     text = f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>"
     
     if callback.message.photo:
         await callback.message.edit_media(
-            media=InputMediaPhoto(media=avatar, caption=text),
+            media=InputMediaPhoto(media=photo_id, caption=text),
             reply_markup=keyboard
         )
     else:
         await callback.message.delete()
         await callback.message.answer_photo(
-            photo=avatar,
+            photo=photo_id,
             caption=text,
             reply_markup=keyboard
         )
@@ -1177,41 +1210,35 @@ async def process_back_to_profile(callback: CallbackQuery):
         reg_date = datetime.fromtimestamp(registration).strftime("%d.%m.%Y %H:%M")
         
         # Пытаемся получить фото профиля пользователя
-        try:
-            photos = await callback.message.bot.get_user_profile_photos(user_id, limit=1)
-            if photos.total_count > 0:
-                photo = photos.photos[0][-1]
-                await callback.message.delete()
-                await callback.message.answer_photo(
-                    photo=photo.file_id,
-                    caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
-                            f"🆔 ID: <code>{user_id}</code>\n"
-                            f"💰 Баланс: <b>{coins} монет</b>\n"
-                            f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
-                            f"📅 Регистрация: <b>{reg_date}</b>\n"
-                            f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
-                    reply_markup=get_profile_kb()
-                )
-                await callback.answer()
-                return
-        except:
-            pass
+        photo_id = await get_user_profile_photo(callback.message.bot, user_id)
         
-        # Если нет фото профиля, создаем аватарку с инициалами
-        initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
-        avatar = await create_avatar_photo(initials)
+        # Если фото профиля нет, создаем аватарку с инициалами
+        if not photo_id:
+            initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+            avatar = await create_avatar_photo(initials)
+            photo_id = avatar
         
-        await callback.message.delete()
-        await callback.message.answer_photo(
-            photo=avatar,
-            caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
-                    f"🆔 ID: <code>{user_id}</code>\n"
-                    f"💰 Баланс: <b>{coins} монет</b>\n"
-                    f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
-                    f"📅 Регистрация: <b>{reg_date}</b>\n"
-                    f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
-            reply_markup=get_profile_kb()
-        )
+        caption = f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n" \
+                  f"🆔 ID: <code>{user_id}</code>\n" \
+                  f"💰 Баланс: <b>{coins} монет</b>\n" \
+                  f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n" \
+                  f"📅 Регистрация: <b>{reg_date}</b>\n" \
+                  f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>"
+        
+        # Если сообщение уже с фото - редактируем
+        if callback.message.photo:
+            await callback.message.edit_media(
+                media=InputMediaPhoto(media=photo_id, caption=caption),
+                reply_markup=get_profile_kb()
+            )
+        else:
+            # Если сообщение без фото - удаляем и отправляем новое
+            await callback.message.delete()
+            await callback.message.answer_photo(
+                photo=photo_id,
+                caption=caption,
+                reply_markup=get_profile_kb()
+            )
         
         await callback.answer()
     except Exception as e:
@@ -1315,7 +1342,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             await callback.message.answer_photo(
                 photo=card_data["photo_id"], 
                 caption=caption, 
-                reply_markup=get_after_card_keyboard(user_id)
+                reply_markup=get_after_card_keyboard(user_id, card_data["balance"])
             )
             
             # Проверяем стрик
@@ -1328,6 +1355,14 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 )
         
         elif action == "collection":
+            # Проверка, что запрос из личного чата
+            if callback.message.chat.type != "private":
+                await callback.answer()
+                await callback.message.answer(
+                    "❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot"
+                )
+                return
+            
             keyboard, total_cards, total_cards_in_game = await get_collection_main_keyboard(user_id)
             
             if total_cards == 0:
@@ -1337,12 +1372,17 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 await callback.answer()
                 return
             
-            # Создаем аватар-заглушку
-            initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
-            avatar = await create_avatar_photo(initials)
+            # Пытаемся получить фото профиля
+            photo_id = await get_user_profile_photo(callback.message.bot, user_id)
+            
+            # Если фото профиля нет, создаем аватар-заглушку
+            if not photo_id:
+                initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+                avatar = await create_avatar_photo(initials)
+                photo_id = avatar
             
             await callback.message.answer_photo(
-                photo=avatar,
+                photo=photo_id,
                 caption=f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>",
                 reply_markup=keyboard
             )
