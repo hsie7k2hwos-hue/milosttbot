@@ -79,6 +79,10 @@ class MainMenuCallback(CallbackData, prefix="coll_main"):
     pass
 
 
+class BackToProfileCallback(CallbackData, prefix="back_to_profile"):
+    pass
+
+
 class AdminRarityCallback(CallbackData, prefix="admin_rarity"):
     card_id: int
     rarity: str
@@ -216,6 +220,18 @@ async def get_or_create_user(user_id: int, username: str = None, full_name: str 
     except Exception as e:
         logger.error(f"Ошибка получения/создания пользователя: {e}")
         raise
+
+
+async def get_user_nickname(user_id: int) -> str:
+    """Получает ник пользователя из базы данных"""
+    try:
+        async with get_db() as db:
+            cursor = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (user_id,))
+            row = await cursor.fetchone()
+            return row["nickname"] if row and row["nickname"] else f"User{user_id}"
+    except Exception as e:
+        logger.error(f"Ошибка получения ника: {e}")
+        return f"User{user_id}"
 
 
 async def create_avatar_photo(initials: str) -> BufferedInputFile:
@@ -604,6 +620,9 @@ async def get_card_handler(message: Message):
             message.from_user.full_name
         )
         
+        # Получаем ник из базы данных
+        nickname = await get_user_nickname(user_id)
+        
         # Проверка кулдауна
         async with get_db() as db:
             cursor = await db.execute("SELECT last_claim, coins FROM users WHERE user_id = ?", (user_id,))
@@ -619,7 +638,7 @@ async def get_card_handler(message: Message):
             seconds = remaining % 60
             
             await message.reply(
-                f"<blockquote>⏳ Следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>",
+                f"<blockquote>⏳ <b>{nickname}</b>, следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>",
                 reply_markup=get_card_action_keyboard(user_id)
             )
             return
@@ -629,7 +648,7 @@ async def get_card_handler(message: Message):
         
         if status == "all_collected":
             await message.reply(
-                "<blockquote><b>🎉 Ты собрал все доступные карточки! Ожидай добавления новых.</b></blockquote>"
+                f"<blockquote><b>🎉 {nickname}, ты собрал все доступные карточки! Ожидай добавления новых.</b></blockquote>"
             )
             return
         elif status == "error" or card_data is None:
@@ -641,7 +660,7 @@ async def get_card_handler(message: Message):
         # Отправляем карточку
         rarity_title = RARITIES[card_data["rarity"]]["name"]
         caption = (
-            f"<blockquote><b>💙 {message.from_user.first_name}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
+            f"<blockquote><b>💙 {nickname}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
             f"🎲 Редкость: <b>{rarity_title}</b>\n"
             f"💰 Монеты: <b>+{card_data['coins_earned']} [{card_data['balance']}]</b></blockquote>"
         )
@@ -656,7 +675,7 @@ async def get_card_handler(message: Message):
         streak, bonus, new_balance = await check_and_update_streak(user_id)
         if bonus > 0 and streak > 0:
             await message.reply(
-                f"<blockquote>🔥 Стрик <b>{streak} день</b>\n"
+                f"<blockquote>🔥 <b>{nickname}</b>, стрик <b>{streak} день</b>\n"
                 f"💰 Бонус за стрик: <b>+{bonus} [{new_balance}]</b></blockquote>"
             )
             
@@ -867,6 +886,28 @@ async def show_top_players(message: Message):
     await message.reply(text)
 
 
+@router.callback_query(F.data == "top_players")
+async def show_top_players_callback(callback: CallbackQuery):
+    top_players = await get_top_players(10)
+    
+    if not top_players:
+        await callback.message.answer("<blockquote><b>📊 Топ пока пуст</b></blockquote>")
+        await callback.answer()
+        return
+    
+    text = "<blockquote><b>🏆 Топ игроков по монетам:</b>\n\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (nickname, coins, user_id) in enumerate(top_players, 1):
+        medal = medals[i - 1] if i <= 3 else f"{i}."
+        text += f"{medal} {nickname} — {coins} 💰\n"
+    
+    text += "</blockquote>"
+    
+    await callback.message.answer(text)
+    await callback.answer()
+
+
 # Просмотр коллекции
 async def get_collection_main_keyboard(user_id: int):
     """Генерирует клавиатуру главного меню коллекции с подсчетом карточек"""
@@ -911,6 +952,16 @@ async def get_collection_main_keyboard(user_id: int):
                     ]
                 )
             
+            # Добавляем кнопку "Назад в профиль"
+            inline_keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="👤 Назад в профиль",
+                        callback_data=BackToProfileCallback().pack()
+                    )
+                ]
+            )
+            
             keyboard = (
                 InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
                 if inline_keyboard
@@ -934,10 +985,28 @@ async def show_collection(callback: CallbackQuery):
         await callback.message.edit_text(text)
         return
     
-    text = f"<blockquote><b>📦 Твоя коллекция ({total_cards}/{total_cards_in_game})</b></blockquote>"
-    await callback.message.edit_text(
-        text, reply_markup=keyboard
-    )
+    # Получаем ник для аватарки
+    nickname = await get_user_nickname(user_id)
+    initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+    
+    # Создаем аватар-заглушку
+    avatar = await create_avatar_photo(initials)
+    
+    text = f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>"
+    
+    # Проверяем, есть ли уже фото в сообщении
+    if callback.message.photo:
+        await callback.message.edit_media(
+            media=InputMediaPhoto(media=avatar, caption=text),
+            reply_markup=keyboard
+        )
+    else:
+        await callback.message.delete()
+        await callback.message.answer_photo(
+            photo=avatar,
+            caption=text,
+            reply_markup=keyboard
+        )
 
 
 @router.callback_query(RaritySelectCallback.filter())
@@ -1052,19 +1121,102 @@ async def process_back_to_main(callback: CallbackQuery):
     user_id = callback.from_user.id
     keyboard, total_cards, total_cards_in_game = await get_collection_main_keyboard(user_id)
     
-    text = f"<blockquote><b>📦 Твоя коллекция ({total_cards}/{total_cards_in_game})</b></blockquote>"
+    # Получаем ник для аватарки
+    nickname = await get_user_nickname(user_id)
+    initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+    
+    # Создаем аватар-заглушку
+    avatar = await create_avatar_photo(initials)
+    
+    text = f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>"
     
     if callback.message.photo:
-        await callback.message.delete()
-        await callback.message.answer(
-            text, reply_markup=keyboard
+        await callback.message.edit_media(
+            media=InputMediaPhoto(media=avatar, caption=text),
+            reply_markup=keyboard
         )
     else:
-        await callback.message.edit_text(
-            text, reply_markup=keyboard
+        await callback.message.delete()
+        await callback.message.answer_photo(
+            photo=avatar,
+            caption=text,
+            reply_markup=keyboard
         )
     
     await callback.answer()
+
+
+@router.callback_query(BackToProfileCallback.filter())
+async def process_back_to_profile(callback: CallbackQuery):
+    """Обработчик возврата в профиль из коллекции"""
+    user_id = callback.from_user.id
+    
+    try:
+        # Получаем данные пользователя
+        async with get_db() as db:
+            cursor = await db.execute("""
+                SELECT u.nickname, u.coins, u.registration, u.streak, u.streak_bonus,
+                       COUNT(i.card_id) as cards_count
+                FROM users u
+                LEFT JOIN inventory i ON u.user_id = i.user_id
+                WHERE u.user_id = ?
+                GROUP BY u.user_id
+            """, (user_id,))
+            row = await cursor.fetchone()
+            
+            cursor = await db.execute("SELECT COUNT(*) FROM cards")
+            total_cards = (await cursor.fetchone())[0]
+        
+        nickname = row["nickname"] or f"User{user_id}"
+        coins = row["coins"]
+        registration = row["registration"] or int(time.time())
+        streak = row["streak"]
+        streak_bonus = row["streak_bonus"]
+        cards_count = row["cards_count"]
+        
+        reg_date = datetime.fromtimestamp(registration).strftime("%d.%m.%Y %H:%M")
+        
+        # Пытаемся получить фото профиля пользователя
+        try:
+            photos = await callback.message.bot.get_user_profile_photos(user_id, limit=1)
+            if photos.total_count > 0:
+                photo = photos.photos[0][-1]
+                await callback.message.delete()
+                await callback.message.answer_photo(
+                    photo=photo.file_id,
+                    caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
+                            f"🆔 ID: <code>{user_id}</code>\n"
+                            f"💰 Баланс: <b>{coins} монет</b>\n"
+                            f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
+                            f"📅 Регистрация: <b>{reg_date}</b>\n"
+                            f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
+                    reply_markup=get_profile_kb()
+                )
+                await callback.answer()
+                return
+        except:
+            pass
+        
+        # Если нет фото профиля, создаем аватарку с инициалами
+        initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+        avatar = await create_avatar_photo(initials)
+        
+        await callback.message.delete()
+        await callback.message.answer_photo(
+            photo=avatar,
+            caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
+                    f"🆔 ID: <code>{user_id}</code>\n"
+                    f"💰 Баланс: <b>{coins} монет</b>\n"
+                    f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
+                    f"📅 Регистрация: <b>{reg_date}</b>\n"
+                    f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
+            reply_markup=get_profile_kb()
+        )
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка возврата в профиль: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
 
 
 @router.callback_query(F.data == "ignore")
@@ -1085,6 +1237,9 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
         return
     
     try:
+        # Получаем ник из базы данных
+        nickname = await get_user_nickname(user_id)
+        
         if action == "instant" or action == "another":
             # Проверяем баланс
             async with get_db() as db:
@@ -1093,7 +1248,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 balance = row["coins"] if row else 0
             
             if balance < INSTANT_COST:
-                await callback.answer(f"❗️ Не хватает монет. Для получения ещё одной карточки тоебуется {INSTANT_COST}, на Вашем балансе — {balance}", show_alert=True)
+                await callback.answer(f"❗️ Не хватает монет. Для получения ещё одной карточки требуется {INSTANT_COST}, на Вашем балансе — {balance}", show_alert=True)
                 return
             
             await callback.answer("⏳ Получаем карточку...")
@@ -1133,7 +1288,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                         (INSTANT_COST, user_id)
                     )
                 await callback.message.answer(
-                    "<blockquote><b>🎉 Ты собрал все доступные карточки! Монеты возвращены.</b></blockquote>"
+                    f"<blockquote><b>🎉 {nickname}, ты собрал все доступные карточки! Монеты возвращены.</b></blockquote>"
                 )
                 await callback.answer()
                 return
@@ -1152,7 +1307,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             
             rarity_title = RARITIES[card_data["rarity"]]["name"]
             caption = (
-                f"<blockquote><b>💙 {callback.from_user.first_name}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
+                f"<blockquote><b>💙 {nickname}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
                 f"🎲 Редкость: <b>{rarity_title}</b>\n"
                 f"💰 Монеты: <b>+{card_data['coins_earned']} [{card_data['balance']}]</b></blockquote>"
             )
@@ -1167,9 +1322,9 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             streak, bonus, new_balance = await check_and_update_streak(user_id)
             if bonus > 0 and streak > 0:
                 await callback.message.answer(
-                    f"<blockquote><b>🔥 Стрик {streak} день!\n"
+                    f"<blockquote><b>🔥 {nickname}, стрик {streak} день!</b>\n"
                     f"💰 Бонус за стрик: +{bonus} монет\n"
-                    f"💳 Баланс: {new_balance} монет</b></blockquote>"
+                    f"💳 Баланс: {new_balance} монет</blockquote>"
                 )
         
         elif action == "collection":
@@ -1177,13 +1332,18 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             
             if total_cards == 0:
                 await callback.message.answer(
-                    "<blockquote><b>📦 Твоя коллекция пока пуста. Отправь команду «милость», чтобы получить первую карточку</b></blockquote>"
+                    f"<blockquote><b>📦 {nickname}, твоя коллекция пока пуста. Отправь команду «милость», чтобы получить первую карточку</b></blockquote>"
                 )
                 await callback.answer()
                 return
             
-            await callback.message.answer(
-                f"<blockquote><b>📦 Твоя коллекция ({total_cards}/{total_cards_in_game})</b></blockquote>",
+            # Создаем аватар-заглушку
+            initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
+            avatar = await create_avatar_photo(initials)
+            
+            await callback.message.answer_photo(
+                photo=avatar,
+                caption=f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>",
                 reply_markup=keyboard
             )
             await callback.answer()
