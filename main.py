@@ -992,9 +992,9 @@ async def get_user_profile_photo(bot: Bot, user_id: int) -> Optional[str]:
 async def show_collection(callback: CallbackQuery):
     # Проверка, что запрос из личного чата
     if callback.message.chat.type != "private":
-        await callback.answer()
-        await callback.message.answer(
-            "<blockquote><b>📦 Коллекцию можно просмотреть только в личных сообщениях с ботом. Перейдите в ЛС: @ваш_бот</b></blockquote>"
+        await callback.answer(
+            text="<❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot",
+            show_alert=True
         )
         return
     
