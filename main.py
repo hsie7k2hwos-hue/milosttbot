@@ -311,7 +311,6 @@ def get_profile_kb():
     builder = InlineKeyboardBuilder()
     builder.button(text="📦 Моя коллекция", callback_data="collection")
     builder.button(text="✏️ Изменить ник", callback_data=NicknameCallback(action="change").pack())
-    builder.button(text="🏆 Топ игроков", callback_data="top_players")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -335,10 +334,13 @@ def get_main_km():
 def get_card_action_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для действий с карточкой при кулдауне"""
     builder = InlineKeyboardBuilder()
-    builder.button(
-        text="✨ Получить сейчас [5 000]", 
-        callback_data=CardActionCallback(action="instant", user_id=user_id).pack()
-    )
+
+    if balance >= INSTANT_COST:
+        builder.button(
+            text="✨ Получить сейчас (5 000 🩷)",
+            callback_data=CardActionCallback(action="instant", user_id=user_id).pack()
+        )
+        
     builder.button(
         text="📦 Моя коллекция", 
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack()
@@ -354,7 +356,7 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
     # Показываем кнопку "Получить ещё" только если хватает монет
     if balance >= INSTANT_COST:
         builder.button(
-            text="✨ Получить ещё одну [5 000]", 
+            text="✨ Получить ещё одну (5 000 🩷)", 
             callback_data=CardActionCallback(action="another", user_id=user_id).pack()
         )
     
@@ -600,7 +602,7 @@ async def cmd_start(message: Message):
         sticker_file_id = "CAACAgIAAxkBAALL7WqWuuWDYuQk4iqY7tNu_-7zLZqyAAJengACoj5pSQH9iX-5QhicPQQ"
         await message.answer_sticker(sticker=sticker_file_id)
         await message.reply(
-            "<blockquote><b>👋 Привет! Отправь команду «милость», чтобы получить милую карточку</b></blockquote>",
+            "<blockquote><b>👋 Привет!</b> Отправь команду «милость», чтобы получить милую карточку</blockquote>",
             reply_markup=get_main_km()
         )
         logger.info(f"Пользователь {message.from_user.id} запустил бота")
@@ -652,7 +654,7 @@ async def get_card_handler(message: Message):
         
         if status == "all_collected":
             await message.reply(
-                f"<blockquote><b>🎉 {nickname}, ты собрал все доступные карточки! Ожидай добавления новых.</b></blockquote>"
+                f"<blockquote><b>🎉 {nickname}, вы собрали все доступные карточки на данный момент!</b> Пожалуйста, дождитесь добавления новых</blockquote>"
             )
             return
         elif status == "error" or card_data is None:
@@ -664,9 +666,9 @@ async def get_card_handler(message: Message):
         # Отправляем карточку
         rarity_title = RARITIES[card_data["rarity"]]["name"]
         caption = (
-            f"<blockquote><b>💙 {nickname}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
+            f"<blockquote><b>🎉 {nickname}</b>, вам выпала новая карточка: <b>{card_data['name']}</b>!</blockquote>!\n\n"
             f"🎲 Редкость: <b>{rarity_title}</b>\n"
-            f"💰 Монеты: <b>+{card_data['coins_earned']} [{card_data['balance']}]</b></blockquote>"
+            f"🩷 Милота: <b>+{card_data['coins_earned']} (всего: {card_data['balance']})</b>"
         )
         
         await message.reply_photo(
@@ -679,8 +681,8 @@ async def get_card_handler(message: Message):
         streak, bonus, new_balance = await check_and_update_streak(user_id)
         if bonus > 0 and streak > 0:
             await message.reply(
-                f"<blockquote>🔥 <b>{nickname}</b>, стрик <b>{streak} день</b>\n"
-                f"💰 Бонус за стрик: <b>+{bonus} [{new_balance}]</b></blockquote>"
+                f"<blockquote>🔥 <b>{nickname}</b>, ваш стрик <b>{streak} день</b>\n"
+                f"🩷 Бонус за стрик: <b>+{bonus} милоты [{new_balance}]</b></blockquote>"
             )
             
     except Exception as e:
@@ -734,7 +736,7 @@ async def show_profile(message: Message):
                     photo=photo.file_id,
                     caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
                             f"🆔 ID: <code>{user_id}</code>\n"
-                            f"💰 Баланс: <b>{coins} монет</b>\n"
+                            f"🩷 Баланс: <b>{coins} милоты</b>\n"
                             f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
                             f"📅 Регистрация: <b>{reg_date}</b>\n"
                             f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
@@ -752,7 +754,7 @@ async def show_profile(message: Message):
             photo=avatar,
             caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
                     f"🆔 ID: <code>{user_id}</code>\n"
-                    f"💰 Баланс: <b>{coins} монет</b>\n"
+                    f"🩷 Баланс: <b>{coins} милоты</b>\n"
                     f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
                     f"📅 Регистрация: <b>{reg_date}</b>\n"
                     f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
@@ -768,7 +770,7 @@ async def show_profile(message: Message):
 @router.callback_query(NicknameCallback.filter(F.action == "change"))
 async def change_nickname_start(callback: CallbackQuery, state: FSMContext):
     if callback.message.chat.type != "private":
-        await callback.answer("❗️ Изменить ник можно только в личных сообщениях с ботом", show_alert=True)
+        await callback.answer("❗️ Для изменения ника, пожалуйста, перейдите в бота: @milosttbot", show_alert=True)
         return
     
     await state.set_state(NicknameSG.new_nickname)
@@ -788,7 +790,7 @@ async def change_nickname_start(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(NicknameCallback.filter(F.action == "from_telegram"))
 async def change_nickname_from_telegram(callback: CallbackQuery, state: FSMContext):
     if callback.message.chat.type != "private":
-        await callback.answer("❗️ Изменить ник можно только в личных сообщениях с ботом", show_alert=True)
+        await callback.answer("❗️ Для изменения ника, пожалуйста, перейдите в бота: @milosttbot", show_alert=True)
         return
     
     user = callback.from_user
@@ -878,38 +880,18 @@ async def show_top_players(message: Message):
         await message.reply("<blockquote><b>📊 Топ пока пуст</b></blockquote>")
         return
     
-    text = "<blockquote><b>🏆 Топ игроков по монетам:</b>\n\n"
+    text = "<b>🏆 Топ игроков по милоте:</b>\n\n"
+
+    text += "<blockquote>"
     
     medals = ["🥇", "🥈", "🥉"]
     for i, (nickname, coins, user_id) in enumerate(top_players, 1):
         medal = medals[i - 1] if i <= 3 else f"{i}."
-        text += f"{medal} {nickname} — {coins} 💰\n"
+        text += f"{medal} <b>{nickname}</b> — <b>{coins}</b> 🩷\n"
     
     text += "</blockquote>"
     
     await message.reply(text)
-
-
-@router.callback_query(F.data == "top_players")
-async def show_top_players_callback(callback: CallbackQuery):
-    top_players = await get_top_players(10)
-    
-    if not top_players:
-        await callback.message.answer("<blockquote><b>📊 Топ пока пуст</b></blockquote>")
-        await callback.answer()
-        return
-    
-    text = "<blockquote><b>🏆 Топ игроков по монетам:</b>\n\n"
-    
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (nickname, coins, user_id) in enumerate(top_players, 1):
-        medal = medals[i - 1] if i <= 3 else f"{i}."
-        text += f"{medal} {nickname} — {coins} 💰\n"
-    
-    text += "</blockquote>"
-    
-    await callback.message.answer(text)
-    await callback.answer()
 
 
 # Просмотр коллекции
@@ -960,7 +942,7 @@ async def get_collection_main_keyboard(user_id: int):
             inline_keyboard.append(
                 [
                     InlineKeyboardButton(
-                        text="👤 Назад в профиль",
+                        text="👤 Перейти в профиль",
                         callback_data=BackToProfileCallback().pack()
                     )
                 ]
@@ -993,7 +975,7 @@ async def show_collection(callback: CallbackQuery):
     # Проверка, что запрос из личного чата
     if callback.message.chat.type != "private":
         await callback.answer(
-            text="<❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot",
+            text="❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot",
             show_alert=True
         )
         return
@@ -1083,7 +1065,6 @@ async def process_rarity_view(
             caption = (
                 f"<blockquote><b>🃏 {card_name}\n\n"
                 f"🎲 Редкость: {rarity_name}\n"
-                f"📊 Прогресс: {page + 1}/{total_pages} в этой категории\n"
                 f"📅 Получена: {claim_date}</b></blockquote>"
             )
             
@@ -1220,7 +1201,7 @@ async def process_back_to_profile(callback: CallbackQuery):
         
         caption = f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n" \
                   f"🆔 ID: <code>{user_id}</code>\n" \
-                  f"💰 Баланс: <b>{coins} монет</b>\n" \
+                  f"🩷 Баланс: <b>{coins} милоты</b>\n" \
                   f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n" \
                   f"📅 Регистрация: <b>{reg_date}</b>\n" \
                   f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>"
@@ -1334,9 +1315,9 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             
             rarity_title = RARITIES[card_data["rarity"]]["name"]
             caption = (
-                f"<blockquote><b>💙 {nickname}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
+                f"<blockquote><b>🎉 {nickname}</b>, вам выпала новая карточка: <b>{card_data['name']}</b>!\n\n"
                 f"🎲 Редкость: <b>{rarity_title}</b>\n"
-                f"💰 Монеты: <b>+{card_data['coins_earned']} [{card_data['balance']}]</b></blockquote>"
+                f"🩷 Милота: <b>+{card_data['coins_earned']} (всего: {card_data['balance']})</b></blockquote>"
             )
             
             await callback.message.answer_photo(
@@ -1349,9 +1330,8 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             streak, bonus, new_balance = await check_and_update_streak(user_id)
             if bonus > 0 and streak > 0:
                 await callback.message.answer(
-                    f"<blockquote><b>🔥 {nickname}, стрик {streak} день!</b>\n"
-                    f"💰 Бонус за стрик: +{bonus} монет\n"
-                    f"💳 Баланс: {new_balance} монет</blockquote>"
+                    f"<blockquote><b>🔥 {nickname}, ваш стрик {streak} день!</b>\n"
+                    f"🩷 Бонус за стрик: +{bonus} милоты (всего: {new_balance})</blockquote>"
                 )
         
         elif action == "collection":
