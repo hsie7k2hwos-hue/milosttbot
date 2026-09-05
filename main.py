@@ -331,7 +331,7 @@ def get_main_km():
     return keyboard
 
 
-def get_card_action_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def get_card_action_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
     """Клавиатура для действий с карточкой при кулдауне"""
     builder = InlineKeyboardBuilder()
 
@@ -645,7 +645,7 @@ async def get_card_handler(message: Message):
             
             await message.reply(
                 f"<blockquote>⏳ <b>{nickname}</b>, следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>",
-                reply_markup=get_card_action_keyboard(user_id)
+                reply_markup=get_card_action_keyboard(user_id, balance)
             )
             return
         
