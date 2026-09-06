@@ -644,7 +644,7 @@ async def get_card_handler(message: Message):
             seconds = remaining % 60
             
             await message.reply(
-                f"<blockquote>⏳ <b>{nickname}</b>, следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>",
+                f"<blockquote><tg-emoji emoji-id='{5451646226975955576}'>⏳</tg-emoji> <b>{nickname}</b>, следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>",
                 reply_markup=get_card_action_keyboard(user_id, balance)
             )
             return
