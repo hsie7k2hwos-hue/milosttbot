@@ -42,10 +42,10 @@ INSTANT_COST = 5000  # Стоимость мгновенного получен�
 
 # Редкости и их шансы
 RARITIES = {
-    "common": {"name": "<tg-emoji emoji-id='{5451714942157724312}'>🤍</tg-emoji> Обычная", "weight": 60, "coins": 100},
-    "rare": {"name": "<tg-emoji emoji-id='{5449759615346548186}'>💙</tg-emoji> Редкая", "weight": 25, "coins": 200},
-    "epic": {"name": "<tg-emoji emoji-id='{5449468596952507859}'>💜</tg-emoji> Эпическая", "weight": 10, "coins": 300},
-    "legendary": {"name": "<tg-emoji emoji-id='{5449366943666543715}'>💛</tg-emoji> Легендарная", "weight": 5, "coins": 500},
+    "common": {"name": "🤍 Обычная", "weight": 60, "coins": 100},
+    "rare": {"name": "💙 Редкая", "weight": 25, "coins": 200},
+    "epic": {"name": "💜 Эпическая", "weight": 10, "coins": 300},
+    "legendary": {"name": "💛 Легендарная", "weight": 5, "coins": 500},
 }
 
 # Бонусы за стрик (день, бонус)
@@ -337,7 +337,7 @@ def get_card_action_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMa
 
     if balance >= INSTANT_COST:
         builder.button(
-            text="<tg-emoji emoji-id='{5472164874886846699}'>✨</tg-emoji> Получить сейчас (5 000 <tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji>)",
+            text="✨ Получить сейчас (5 000 🎀)",
             callback_data=CardActionCallback(action="instant", user_id=user_id).pack()
         )
         
@@ -356,7 +356,7 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
     # Показываем кнопку "Получить ещё" только если хватает монет
     if balance >= INSTANT_COST:
         builder.button(
-            text="<tg-emoji emoji-id='{5472164874886846699}'>✨</tg-emoji> Получить ещё одну (5 000 <tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji>)", 
+            text="✨ Получить ещё одну (5 000 🎀)", 
             callback_data=CardActionCallback(action="another", user_id=user_id).pack()
         )
     
