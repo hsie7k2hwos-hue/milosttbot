@@ -667,8 +667,8 @@ async def get_card_handler(message: Message):
         rarity_title = RARITIES[card_data["rarity"]]["name"]
         caption = (
             f"<blockquote><b><tg-emoji emoji-id='{5436040291507247633}'>🎉</tg-emoji> {nickname}</b>, вам выпала новая карточка: <b>{card_data['name']}</b>\n\n"
-            f"🎲 Редкость: <b>{rarity_title}</b>\n"
-            f"<tg-emoji emoji-id='{5434031913260035048}'>🩷</tg-emoji> Милота: <b>+{card_data['coins_earned']} (всего: {card_data['balance']})</b></blockquote>"
+            f"<tg-emoji emoji-id='{5375152498656961898}'>🔮</tg-emoji> Редкость: <b>{rarity_title}</b>\n"
+            f"<tg-emoji emoji-id='{5361837567463399422}'>🎀</tg-emoji> Милота: <b>+{card_data['coins_earned']} (всего: {card_data['balance']})</b></blockquote>"
         )
         
         await message.reply_photo(
@@ -681,8 +681,8 @@ async def get_card_handler(message: Message):
         streak, bonus, new_balance = await check_and_update_streak(user_id)
         if bonus > 0 and streak > 0:
             await message.reply(
-                f"<blockquote>🔥 <b>{nickname}</b>, ваш стрик <b>{streak} день</b>\n"
-                f"<tg-emoji emoji-id='{5434031913260035048}'>🩷</tg-emoji> Бонус за стрик: <b>+{bonus} милоты (всего: {new_balance})</b></blockquote>"
+                f"<blockquote><tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> <b>{nickname}</b>, ваш стрик <b>{streak} день</b>\n"
+                f"<tg-emoji emoji-id='{5361837567463399422}'>🎀</tg-emoji> Милота: <b>+{bonus} (всего: {new_balance})</b></blockquote>"
             )
             
     except Exception as e:
@@ -736,10 +736,10 @@ async def show_profile(message: Message):
                     photo=photo.file_id,
                     caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
                             f"🆔 ID: <code>{user_id}</code>\n"
-                            f"🩷 Баланс: <b>{coins} милоты</b>\n"
+                            f"<tg-emoji emoji-id='{5361837567463399422}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
                             f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
                             f"📅 Регистрация: <b>{reg_date}</b>\n"
-                            f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
+                            f"<tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus})</blockquote>",
                     reply_markup=get_profile_kb()
                 )
                 return
@@ -754,10 +754,10 @@ async def show_profile(message: Message):
             photo=avatar,
             caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
                     f"🆔 ID: <code>{user_id}</code>\n"
-                    f"🩷 Баланс: <b>{coins} милоты</b>\n"
+                    f"<tg-emoji emoji-id='{5361837567463399422}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
                     f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
                     f"📅 Регистрация: <b>{reg_date}</b>\n"
-                    f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>",
+                    f"<tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus})</blockquote>",
             reply_markup=get_profile_kb()
         )
         
