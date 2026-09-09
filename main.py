@@ -42,10 +42,10 @@ INSTANT_COST = 5000  # Стоимость мгновенного получен�
 
 # Редкости и их шансы
 RARITIES = {
-    "common": {"name": "⚪ Обычная", "weight": 60, "coins": 100},
-    "rare": {"name": "🔵 Редкая", "weight": 25, "coins": 200},
-    "epic": {"name": "🟣 Эпическая", "weight": 10, "coins": 300},
-    "legendary": {"name": "🟡 Легендарная", "weight": 5, "coins": 500},
+    "common": {"name": "<tg-emoji emoji-id='{5451714942157724312}'>🤍</tg-emoji> Обычная", "weight": 60, "coins": 100},
+    "rare": {"name": "<tg-emoji emoji-id='{5449759615346548186}'>💙</tg-emoji> Редкая", "weight": 25, "coins": 200},
+    "epic": {"name": "<tg-emoji emoji-id='{5449468596952507859}'>💜</tg-emoji> Эпическая", "weight": 10, "coins": 300},
+    "legendary": {"name": "<tg-emoji emoji-id='{5449366943666543715}'>💛</tg-emoji> Легендарная", "weight": 5, "coins": 500},
 }
 
 # Бонусы за стрик (день, бонус)
@@ -654,7 +654,7 @@ async def get_card_handler(message: Message):
         
         if status == "all_collected":
             await message.reply(
-                f"<blockquote><b><tg-emoji emoji-id='{5436040291507247633}'>🎉</tg-emoji> {nickname}, вы собрали все доступные карточки на данный момент!</b> Пожалуйста, дождитесь добавления новых</blockquote>"
+                f"<blockquote><b><tg-emoji emoji-id='{5436040291507247633}'>🎉</tg-emoji> {nickname}, ты собрал(-а) все доступные карточки на данный момент!</b> Пожалуйста, дождитесь добавления новых</blockquote>"
             )
             return
         elif status == "error" or card_data is None:
@@ -666,7 +666,7 @@ async def get_card_handler(message: Message):
         # Отправляем карточку
         rarity_title = RARITIES[card_data["rarity"]]["name"]
         caption = (
-            f"<blockquote><b><tg-emoji emoji-id='{5436040291507247633}'>🎉</tg-emoji> {nickname}</b>, вам выпала новая карточка: <b>{card_data['name']}</b>\n\n"
+            f"<blockquote><b><tg-emoji emoji-id='{5436040291507247633}'>🎉</tg-emoji> {nickname}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
             f"<tg-emoji emoji-id='{5361837567463399422}'>🔮</tg-emoji> Редкость: <b>{rarity_title}</b>\n"
             f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>+{card_data['coins_earned']} (всего: {card_data['balance']})</b></blockquote>"
         )
@@ -681,7 +681,7 @@ async def get_card_handler(message: Message):
         streak, bonus, new_balance = await check_and_update_streak(user_id)
         if bonus > 0 and streak > 0:
             await message.reply(
-                f"<blockquote><tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> <b>{nickname}</b>, ваш стрик <b>{streak} день</b>\n"
+                f"<blockquote><tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> <b>{nickname}</b>, твой стрик <b>{streak} день</b>\n"
                 f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>+{bonus} (всего: {new_balance})</b></blockquote>"
             )
             
