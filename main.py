@@ -754,7 +754,7 @@ async def show_profile(message: Message):
             photo=avatar,
             caption=f"<blockquote><tg-emoji emoji-id='{5373012449597335010}'>👤</tg-emoji> Тебя зовут <b>{nickname}</b>\n\n"
                     f"🆔 ID: <code>{user_id}</code>\n"
-                    f"<tg-emoji emoji-id='{5361837567463399422}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
+                    f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
                     f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
                     f"📅 Регистрация: <b>{reg_date}</b>\n"
                     f"<tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus})</blockquote>",
