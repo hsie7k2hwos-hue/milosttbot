@@ -337,7 +337,7 @@ def get_card_action_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMa
 
     if balance >= INSTANT_COST:
         builder.button(
-            text="✨ Получить сейчас (5 000 🩷)",
+            text="<tg-emoji emoji-id='{5472164874886846699}'>✨</tg-emoji> Получить сейчас (5 000 <tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji>)",
             callback_data=CardActionCallback(action="instant", user_id=user_id).pack()
         )
         
@@ -356,7 +356,7 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
     # Показываем кнопку "Получить ещё" только если хватает монет
     if balance >= INSTANT_COST:
         builder.button(
-            text="✨ Получить ещё одну (5 000 🩷)", 
+            text="<tg-emoji emoji-id='{5472164874886846699}'>✨</tg-emoji> Получить ещё одну (5 000 <tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji>)", 
             callback_data=CardActionCallback(action="another", user_id=user_id).pack()
         )
     
@@ -602,7 +602,7 @@ async def cmd_start(message: Message):
         sticker_file_id = "CAACAgIAAxkBAALL7WqWuuWDYuQk4iqY7tNu_-7zLZqyAAJengACoj5pSQH9iX-5QhicPQQ"
         await message.answer_sticker(sticker=sticker_file_id)
         await message.reply(
-            "<blockquote><b>👋 Привет!</b> Отправь команду «милость», чтобы получить милую карточку</blockquote>",
+            "<blockquote><b><tg-emoji emoji-id='{5472055112702629499}'>👋</tg-emoji> Привет!</b> Отправь команду «милость», чтобы получить милую карточку</blockquote>",
             reply_markup=get_main_km()
         )
         logger.info(f"Пользователь {message.from_user.id} запустил бота")
