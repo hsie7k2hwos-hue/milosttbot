@@ -734,7 +734,7 @@ async def show_profile(message: Message):
                 photo = photos.photos[0][-1]
                 await message.reply_photo(
                     photo=photo.file_id,
-                    caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
+                    caption=f"<blockquote><tg-emoji emoji-id='{5373012449597335010}'>👤</tg-emoji> Тебя зовут <b>{nickname}</b>\n\n"
                             f"🆔 ID: <code>{user_id}</code>\n"
                             f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
                             f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
@@ -752,7 +752,7 @@ async def show_profile(message: Message):
         
         await message.reply_photo(
             photo=avatar,
-            caption=f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n"
+            caption=f"<blockquote><tg-emoji emoji-id='{5373012449597335010}'>👤</tg-emoji> Тебя зовут <b>{nickname}</b>\n\n"
                     f"🆔 ID: <code>{user_id}</code>\n"
                     f"<tg-emoji emoji-id='{5361837567463399422}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
                     f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
