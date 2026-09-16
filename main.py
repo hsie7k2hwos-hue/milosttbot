@@ -1537,12 +1537,14 @@ async def rp_handler(message: Message):
     if not message.text:
         return
 
-    text = message.text.strip().lower()
-    if not text.startswith("мр"):
+    text = message.text.strip()
+    low = text.lower()
+
+    # проверяем именно "мр " (с пробелом), чтобы не ловить "мразь", "мрачно" и т.п.
+    if not (low == "мр" or low.startswith("мр ")):
         return
 
-    # Отрезаем "мряу " и разбираем действие
-    rest = message.text.strip()[4:].strip()
+    rest = text[2:].strip()   # ← отрезаем ровно "мр"
     if not rest:
         return
 
