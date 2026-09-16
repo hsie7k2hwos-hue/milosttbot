@@ -55,6 +55,163 @@ RARITIES = {
 # п.2 — стрик начисляется со 2-го дня
 STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
 
+# ================= РП-КОМАНДЫ =================
+# Действие -> (эмодзи, [варианты текста])
+# {a} — автор, {b} — цель
+RP_ACTIONS = {
+    "обнять": (
+        "🤗",
+        [
+            "{a} крепко обнял(а) {b} 🫂",
+            "{a} заключает {b} в тёплые объятия",
+            "{a} обнимает {b} и не отпускает",
+        ],
+    ),
+    "поцеловать": (
+        "😘",
+        [
+            "{a} нежно поцеловал(а) {b} 💋",
+            "{a} оставляет лёгкий поцелуй на щеке {b}",
+            "{a} целует {b} в макушку",
+        ],
+    ),
+    "ударить": (
+        "👊",
+        [
+            "{a} отвесил(а) {b} звонкую оплеуху 💥",
+            "{a} бьёт {b} по голове",
+            "{a} отвесил(а) {b} подзатыльник",
+        ],
+    ),
+    "укусить": (
+        "🦷",
+        [
+            "{a} кусает {b} за плечо 😼",
+            "{a} вцепился(ась) зубами в {b}",
+            "{a} нежно прикусил(а) {b} за ушко",
+        ],
+    ),
+    "погладить": (
+        "🤚",
+        [
+            "{a} ласково погладил(а) {b} по голове ✨",
+            "{a} треплет {b} по волосам",
+            "{a} гладит {b} по спинке",
+        ],
+    ),
+    "дать пять": (
+        "🙌",
+        [
+            "{a} даёт пять {b} ✋",
+            "{a} и {b} дали пять друг другу",
+            "{a} хлопнул(а) по ладони {b}",
+        ],
+    ),
+    "потанцевать": (
+        "💃",
+        [
+            "{a} приглашает {b} на танец 💫",
+            "{a} и {b} кружатся в вальсе",
+            "{a} тянет {b} танцевать",
+        ],
+    ),
+    "обнять крепко": (
+        "🫂",
+        [
+            "{a} сжал(а) {b} в медвежьих объятиях 🐻",
+            "{a} душит {b} в объятиях",
+        ],
+    ),
+    "шлёпнуть": (
+        "🍑",
+        [
+            "{a} шлёпнул(а) {b} по попе 😳",
+            "{a} отвесил(а) {b} звонкий шлепок",
+        ],
+    ),
+    "покормить": (
+        "🍰",
+        [
+            "{a} покормил(а) {b} вкусняшкой 🍪",
+            "{a} угощает {b} пироженкой",
+            "{a} протягивает {b} бутерброд",
+        ],
+    ),
+    "напоить чаем": (
+        "🍵",
+        [
+            "{a} налил(а) {b} чашечку чая ☕️",
+            "{a} угощает {b} горячим чаем с печеньками",
+        ],
+    ),
+    "укутать": (
+        "🧣",
+        [
+            "{a} укутал(а) {b} в тёплый плед 🛌",
+            "{a} заботливо укрывает {b} одеялом",
+        ],
+    ),
+    "похвалить": (
+        "🌟",
+        [
+            "{a} хвалит {b}: «Ты молодец!» 👏",
+            "{a} восхищается {b}",
+        ],
+    ),
+    "успокоить": (
+        "🫂",
+        [
+            "{a} успокаивает {b} и гладит по спинке",
+            "{a} шепчет {b}: «Всё будет хорошо»",
+        ],
+    ),
+    "пожать руку": (
+        "🤝",
+        [
+            "{a} пожал(а) руку {b} 🤝",
+            "{a} и {b} скрепили договор рукопожатием",
+        ],
+    ),
+    "ущипнуть": (
+        "🤏",
+        [
+            "{a} ущипнул(а) {b} за бочок 😼",
+            "{a} щиплет {b} за щёчку",
+        ],
+    ),
+    "пощекотать": (
+        "🪶",
+        [
+            "{a} щекочет {b} 😂",
+            "{a} напал(а) на {b} с щекоткой",
+        ],
+    ),
+    "сфоткать": (
+        "📸",
+        [
+            "{a} сфоткал(а) {b} 📷",
+            "{a} сделал(а) совместное селфи с {b} 🤳",
+        ],
+    ),
+    "станцевать ламбаду": (
+        "🕺",
+        [
+            "{a} и {b} танцуют ламбаду 💃🕺",
+            "{a} заставляет {b} танцевать ламбаду",
+        ],
+    ),
+    "предложить дружбу": (
+        "🤝",
+        [
+            "{a} предлагает {b} дружбу 🤝",
+            "{a} протягивает {b} руку дружбы",
+        ],
+    ),
+}
+
+RP_COOLDOWN = 15  # секунд между РП-действиями одного автора
+_rp_bucket: dict = {}
+
 # п.5.2 — валидация ника
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
@@ -1326,6 +1483,123 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
     except Exception as e:
         logger.error(f"Ошибка обработки действия: {e}")
         await callback.answer("Произошла ошибка", show_alert=True)
+
+
+# ================= РП-КОМАНДЫ =================
+def _rp_rate_limited(user_id: int) -> bool:
+    now = time.monotonic()
+    last = _rp_bucket.get(user_id, 0)
+    if now - last < RP_COOLDOWN:
+        return True
+    _rp_bucket[user_id] = now
+    return False
+
+
+async def _resolve_rp_target(message: Message):
+    """
+    Определяет цель РП-действия:
+    1) reply на сообщение -> автор того сообщения
+    2) упоминание @username в тексте
+    3) текстовое упоминание через entities (text_mention)
+    Возвращает (user_id, full_name, username) или None.
+    """
+    # 1) reply
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        if u.id != message.from_user.id:
+            return u.id, u.full_name, u.username
+
+    # 2) entities (упоминания @user и text_mention)
+    if message.entities:
+        for ent in message.entities:
+            if ent.type == "text_mention" and ent.user:
+                u = ent.user
+                if u.id != message.from_user.id:
+                    return u.id, u.full_name, u.username
+            if ent.type == "mention":
+                # @username — у нас нет прямого user_id, пробуем найти в БД
+                uname = message.text[ent.offset + 1: ent.offset + ent.length].lstrip("@")
+                async with get_db() as db:
+                    cur = await db.execute(
+                        "SELECT user_id, nickname FROM users WHERE nickname = ? COLLATE NOCASE",
+                        (uname,),
+                    )
+                    row = await cur.fetchone()
+                if row and row["user_id"] != message.from_user.id:
+                    return row["user_id"], row["nickname"], uname
+
+    return None
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def rp_handler(message: Message):
+    """Обработчик РП-команд в группах: 'мр <действие>'."""
+    if not message.text:
+        return
+
+    text = message.text.strip().lower()
+    if not text.startswith("мр"):
+        return
+
+    # Отрезаем "мряу " и разбираем действие
+    rest = message.text.strip()[4:].strip()
+    if not rest:
+        return
+
+    action_key = rest.lower()
+    if action_key not in RP_ACTIONS:
+        return
+
+    # rate limit
+    if _rp_rate_limited(message.from_user.id):
+        return
+
+    # ищем цель
+    target = await _resolve_rp_target(message)
+    if not target:
+        await message.reply(
+            "🤔 Укажи, к кому применить действие: ответь на сообщение "
+            "или упомяни @username."
+        )
+        return
+
+    target_id, target_name, target_username = target
+
+    # защита от самого себя
+    if target_id == message.from_user.id:
+        await message.reply("😅 Нельзя применить РП-действие к самому себе.")
+        return
+
+    # ники (из БД, если есть)
+    author_nick = await get_user_nickname(message.from_user.id)
+    target_nick = await get_user_nickname(target_id)
+
+    author_mention = user_mention(message.from_user.id, author_nick, message.from_user.username)
+    target_mention = user_mention(target_id, target_nick, target_username)
+
+    emoji, variants = RP_ACTIONS[action_key]
+    template = random.choice(variants)
+    body = template.format(a=author_mention, b=target_mention)
+
+    try:
+        await message.reply(f"{emoji} {body}")
+    except TelegramBadRequest as e:
+        logger.error(f"rp reply error: {e}")
+
+@router.message(Command("rp"))
+@router.message(F.text.lower().strip() == "мр рп")
+async def rp_help(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        # в ЛК тоже можно показать
+        pass
+    actions = ", ".join(f"<code>мряу {k}</code>" for k in RP_ACTIONS.keys())
+    text = (
+        "🎭 <b>РП-команды</b>\n\n"
+        "Использование: <code>мряу &lt;действие&gt;</code> в ответ на сообщение "
+        "или с упоминанием <code>@username</code>.\n\n"
+        f"<b>Доступные действия:</b>\n{actions}"
+    )
+    await message.reply(text)
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
