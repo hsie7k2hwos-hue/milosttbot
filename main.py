@@ -119,7 +119,7 @@ def user_mention(user_id: int, nickname: str, username: Optional[str] = None) ->
     safe = esc(nickname)
     if username:
         return f'<a href="https://t.me/{esc(username)}">{safe}</a>'
-    return f'<a href="https://t.me/user?id={user_id}">{safe}</a>'
+    return f'<a href="tg://user?id={user_id}">{safe}</a>'
 
 
 # ================= CALLBACK DATA =================
