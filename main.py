@@ -23,7 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BufferedInputFile, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
-    ReplyKeyboardMarkup,
+    ReplyKeyboardMarkup, LinkPreviewOptions,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
@@ -38,18 +38,18 @@ DB_NAME = "/app/data/cards_game.db"
 COOLDOWN_SECONDS = 4 * 3600
 INSTANT_COST = 150
 NICKNAME_COST = 100
-DUPLICATE_CHANCE = 0.25          # п.7 — шанс дубликата
-DUPLICATE_REFUND = 0.5           # 50% от стоимости
+DUPLICATE_CHANCE = 0.25  # п.7 — шанс дубликата
+DUPLICATE_REFUND = 0.5  # 50% от стоимости
 
 # п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 RARITIES = {
-    "common":    {"icon": "⚪️", "name": "Обычная",     "weight": 50, "coins": 10},
-    "rare":      {"icon": "🔵", "name": "Редкая",      "weight": 20, "coins": 25},
-    "epic":      {"icon": "🟣", "name": "Эпическая",   "weight": 15, "coins": 50},
-    "mythical":  {"icon": "🔴", "name": "Мифическая",  "weight": 10, "coins": 75},
-    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5,  "coins": 100},
+    "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "coins": 10},
+    "rare": {"icon": "🔵", "name": "Редкая", "weight": 20, "coins": 25},
+    "epic": {"icon": "🟣", "name": "Эпическая", "weight": 15, "coins": 50},
+    "mythical": {"icon": "🔴", "name": "Мифическая", "weight": 10, "coins": 75},
+    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5, "coins": 100},
 }
 
 # п.2 — стрик начисляется со 2-го дня
@@ -71,6 +71,47 @@ logger = logging.getLogger(__name__)
 def esc(text) -> str:
     """п.5.3 — экранирование любого пользовательского текста."""
     return html.escape(str(text), quote=False)
+
+
+def fmt_num(n) -> str:
+    """123456 -> '123 456'. Разделитель — неразрывный пробел (U+00A0)."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    # f"{n:,}" даёт '123,456' с запятыми — заменяем на неразрывный пробел
+    return f"{n:,}".replace(",", "\u00a0")
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """
+    Русское склонение: plural(1, 'день', 'дня', 'дней') -> 'день'
+    Правила: 1, 21, 31 -> one; 2-4, 22-24 -> few; 0, 5-20, 25-30 -> many
+    """
+    n = abs(int(n))
+    if n % 100 in (11, 12, 13, 14):
+        return many
+    last = n % 10
+    if last == 1:
+        return one
+    if last in (2, 3, 4):
+        return few
+    return many
+
+
+def fmt_days(n: int) -> str:
+    """1 день, 2 дня, 5 дней."""
+    return f"{fmt_num(n)} {plural(n, 'день', 'дня', 'дней')}"
+
+
+def fmt_cards(n: int) -> str:
+    """1 карточка, 2 карточки, 5 карточек."""
+    return f"{fmt_num(n)} {plural(n, 'карточка', 'карточки', 'карточек')}"
+
+
+def fmt_coins(n: int) -> str:
+    """1 монета, 2 монеты, 5 монет."""
+    return f"{fmt_num(n)} {plural(n, 'монета', 'монеты', 'монет')}"
 
 
 def user_mention(user_id: int, nickname: str, username: Optional[str] = None) -> str:
@@ -114,8 +155,8 @@ class TopCallback(CallbackData, prefix="top"):
 
 
 class NickConfirmCallback(CallbackData, prefix="nickconf"):
-    action: str          # apply | reset | cancel
-    value: str = ""      # для apply — новый ник (url-safe? используем как есть)
+    action: str  # apply | reset | cancel
+    value: str = ""  # для apply — новый ник (url-safe? используем как есть)
 
 
 # ================= БАЗА ДАННЫХ =================
@@ -140,42 +181,45 @@ async def get_db():
 async def init_db():
     async with get_db() as db:
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS cards (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                rarity TEXT NOT NULL,
-                photo_id TEXT NOT NULL
-            )
-        """)
+                         CREATE TABLE IF NOT EXISTS cards
+                         (
+                             id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                             name     TEXT NOT NULL,
+                             rarity   TEXT NOT NULL,
+                             photo_id TEXT NOT NULL
+                         )
+                         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                last_claim INTEGER DEFAULT 0,
-                role TEXT DEFAULT 'user',
-                nickname TEXT,
-                coins INTEGER DEFAULT 0,
-                registration INTEGER DEFAULT 0,
-                streak INTEGER DEFAULT 0,
-                last_streak_date INTEGER DEFAULT 0,
-                streak_bonus INTEGER DEFAULT 0
-            )
-        """)
+                         CREATE TABLE IF NOT EXISTS users
+                         (
+                             user_id          INTEGER PRIMARY KEY,
+                             last_claim       INTEGER DEFAULT 0,
+                             role             TEXT    DEFAULT 'user',
+                             nickname         TEXT,
+                             coins            INTEGER DEFAULT 0,
+                             registration     INTEGER DEFAULT 0,
+                             streak           INTEGER DEFAULT 0,
+                             last_streak_date INTEGER DEFAULT 0,
+                             streak_bonus     INTEGER DEFAULT 0
+                         )
+                         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS inventory (
-                user_id INTEGER,
-                card_id INTEGER,
-                claim_time INTEGER DEFAULT 0,
-                amount INTEGER DEFAULT 1,
-                PRIMARY KEY (user_id, card_id),
-                FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
-            )
-        """)
+                         CREATE TABLE IF NOT EXISTS inventory
+                         (
+                             user_id    INTEGER,
+                             card_id    INTEGER,
+                             claim_time INTEGER DEFAULT 0,
+                             amount     INTEGER DEFAULT 1,
+                             PRIMARY KEY (user_id, card_id),
+                             FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
+                         )
+                         """)
         for sql in (
-            "CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)",
-            "CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_inventory_claim_time ON inventory(claim_time)",
-            "CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins)",
-            "CREATE INDEX IF NOT EXISTS idx_users_streak ON users(streak)",
+                "CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)",
+                "CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory(user_id)",
+                "CREATE INDEX IF NOT EXISTS idx_inventory_claim_time ON inventory(claim_time)",
+                "CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins)",
+                "CREATE INDEX IF NOT EXISTS idx_users_streak ON users(streak)",
         ):
             await db.execute(sql)
 
@@ -301,7 +345,7 @@ def get_main_km():
 
 def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str, action: str):
     b.button(
-        text=f"{label} ({INSTANT_COST} 🪙)",
+        text=f"{label} ({fmt_num(INSTANT_COST)} 🪙)",
         callback_data=CardActionCallback(action=action, user_id=user_id).pack(),
     )
 
@@ -354,13 +398,17 @@ async def get_user_photo(bot: Bot, user_id: int, nickname: str):
 async def render_profile(bot: Bot, user_id: int):
     async with get_db() as db:
         cur = await db.execute("""
-            SELECT u.nickname, u.coins, u.registration, u.streak, u.streak_bonus,
-                   COALESCE(SUM(i.amount), 0) AS cards_count
-            FROM users u
-            LEFT JOIN inventory i ON u.user_id = i.user_id
-            WHERE u.user_id = ?
-            GROUP BY u.user_id
-        """, (user_id,))
+                               SELECT u.nickname,
+                                      u.coins,
+                                      u.registration,
+                                      u.streak,
+                                      u.streak_bonus,
+                                      COALESCE(SUM(i.amount), 0) AS cards_count
+                               FROM users u
+                                        LEFT JOIN inventory i ON u.user_id = i.user_id
+                               WHERE u.user_id = ?
+                               GROUP BY u.user_id
+                               """, (user_id,))
         row = await cur.fetchone()
         cur = await db.execute("SELECT COUNT(*) FROM cards")
         total_cards = (await cur.fetchone())[0]
@@ -371,9 +419,9 @@ async def render_profile(bot: Bot, user_id: int):
         f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
         f"🆔 ID • <code>{user_id}</code>\n"
         f"📅 Регистрация • <b>{reg_date}</b>\n\n"
-        f"🃏 Карточек • <b>{row['cards_count']} из {total_cards}</b>\n"
-        f"🪙 Монеты • <b>{row['coins']}</b>\n"
-        f"🔥 Стрик • <b>{row['streak']} дней</b>"
+        f"🃏 Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
+        f"🪙 Монеты • <b>{fmt_num(row['coins'])}</b>\n"
+        f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
     )
     return await get_user_photo(bot, user_id, nickname), caption, get_profile_kb()
 
@@ -384,7 +432,7 @@ async def render_collection(bot: Bot, user_id: int):
     photo = await get_user_photo(bot, user_id, nickname)
     caption = (
         f"🃏 <b>Ваши карточки</b>\n"
-        f"Всего: {total} из {total_in_game}"
+        f"Всего: {fmt_num(total)} из {fmt_num(total_in_game)}"
     )
     return photo, caption, keyboard, total
 
@@ -440,9 +488,12 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 
             if want_duplicate:
                 cur = await db.execute(
-                    """SELECT c.id, c.name, c.photo_id, c.rarity FROM inventory i
-                       JOIN cards c ON i.card_id = c.id
-                       WHERE i.user_id = ? ORDER BY RANDOM() LIMIT 1""",
+                    """SELECT c.id, c.name, c.photo_id, c.rarity
+                       FROM inventory i
+                                JOIN cards c ON i.card_id = c.id
+                       WHERE i.user_id = ?
+                       ORDER BY RANDOM()
+                       LIMIT 1""",
                     (user_id,),
                 )
                 card = await cur.fetchone()
@@ -455,10 +506,13 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                 for _ in range(10):
                     selected_rarity = random.choices(rarities_list, weights=weights, k=1)[0]
                     cur = await db.execute(
-                        """SELECT id, name, photo_id, rarity FROM cards
-                           WHERE rarity = ? AND id NOT IN
-                               (SELECT card_id FROM inventory WHERE user_id = ?)
-                           ORDER BY RANDOM() LIMIT 1""",
+                        """SELECT id, name, photo_id, rarity
+                           FROM cards
+                           WHERE rarity = ?
+                             AND id NOT IN
+                                 (SELECT card_id FROM inventory WHERE user_id = ?)
+                           ORDER BY RANDOM()
+                           LIMIT 1""",
                         (selected_rarity, user_id),
                     )
                     card = await cur.fetchone()
@@ -468,9 +522,11 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                 if not card:
                     # fallback — любая не в инвентаре
                     cur = await db.execute(
-                        """SELECT id, name, photo_id, rarity FROM cards
+                        """SELECT id, name, photo_id, rarity
+                           FROM cards
                            WHERE id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
-                           ORDER BY RANDOM() LIMIT 1""",
+                           ORDER BY RANDOM()
+                           LIMIT 1""",
                         (user_id,),
                     )
                     card = await cur.fetchone()
@@ -480,9 +536,12 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
             if not card:
                 # всё собрано — берём случайную из инвентаря
                 cur = await db.execute(
-                    """SELECT c.id, c.name, c.photo_id, c.rarity FROM inventory i
-                       JOIN cards c ON i.card_id = c.id
-                       WHERE i.user_id = ? ORDER BY RANDOM() LIMIT 1""",
+                    """SELECT c.id, c.name, c.photo_id, c.rarity
+                       FROM inventory i
+                                JOIN cards c ON i.card_id = c.id
+                       WHERE i.user_id = ?
+                       ORDER BY RANDOM()
+                       LIMIT 1""",
                     (user_id,),
                 )
                 card = await cur.fetchone()
@@ -498,9 +557,10 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 
             if check_cooldown:
                 await db.execute(
-                    """INSERT INTO users (user_id, last_claim, coins) VALUES (?, ?, ?)
-                       ON CONFLICT(user_id) DO UPDATE SET
-                           last_claim = ?, coins = coins + ?""",
+                    """INSERT INTO users (user_id, last_claim, coins)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(user_id) DO UPDATE SET last_claim = ?,
+                                                          coins      = coins + ?""",
                     (user_id, now, coins_earned, now, coins_earned),
                 )
             else:
@@ -511,9 +571,10 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 
             # п.7.2 — учитываем количество
             await db.execute(
-                """INSERT INTO inventory (user_id, card_id, claim_time, amount) VALUES (?, ?, ?, 1)
-                   ON CONFLICT(user_id, card_id) DO UPDATE SET
-                       amount = amount + 1, claim_time = ?""",
+                """INSERT INTO inventory (user_id, card_id, claim_time, amount)
+                   VALUES (?, ?, ?, 1)
+                   ON CONFLICT(user_id, card_id) DO UPDATE SET amount     = amount + 1,
+                                                               claim_time = ?""",
                 (user_id, card_id, now, now),
             )
 
@@ -533,9 +594,13 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 # ================= СТРИК =================
 async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
     """
-    п.2.1 — вызывается при любом взаимодействии с получением карточки,
-    в т.ч. при кулдауне. Возвращает (стрик, бонус, баланс).
-    Бонус = 0, если сегодня уже было; для 1-го дня возвращает (1, 0, balance).
+    Обновляет стрик по факту захода (вызывается при любом получении карточки,
+    в т.ч. на кулдауне). Возвращает (streak, bonus, balance):
+
+      - первый заход за сегодня и streak стал 1  -> (1, 0, balance)
+      - первый заход за сегодня и streak >= 2    -> (new_streak, new_bonus, new_balance)
+      - заход уже был сегодня                    -> (current_streak, 0, balance)
+      - пользователь не найден / ошибка          -> (0, 0, 0)
     """
     try:
         now = datetime.now()
@@ -546,31 +611,38 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
 
         async with get_db() as db:
             cur = await db.execute(
-                "SELECT streak, last_streak_date, streak_bonus, coins FROM users WHERE user_id = ?",
+                "SELECT streak, last_streak_date, streak_bonus, coins "
+                "FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cur.fetchone()
             if not row:
                 return 0, 0, 0
 
-            streak, last_date = row["streak"], row["last_streak_date"]
-            balance = row["coins"]
+            streak = row["streak"] or 0
+            last_date = row["last_streak_date"] or 0
+            balance = row["coins"] or 0
 
+            # Сегодня уже заходил — просто возвращаем текущий стрик, без бонуса.
+            # last_date == today означает, что стрик уже учтён сегодня.
             if today_start <= last_date <= today_end:
-                return 0, 0, 0
+                return streak, 0, balance
 
-            # Определяем новый стрик
-            new_streak = streak + 1 if streak > 0 and yesterday_start <= last_date <= yesterday_end else 1
+            # Новый день. Считаем новый стрик.
+            new_streak = (
+                streak + 1
+                if streak > 0 and yesterday_start <= last_date <= yesterday_end
+                else 1
+            )
 
             # п.2 — за 1-й день бонус не начисляется
-            if new_streak == 1:
-                new_bonus = 0
-            else:
-                new_bonus = next(b for d, b in STREAK_BONUSES if new_streak <= d)
+            new_bonus = 0 if new_streak == 1 else next(
+                b for d, b in STREAK_BONUSES if new_streak <= d
+            )
 
             await db.execute(
-                """UPDATE users SET streak = ?, last_streak_date = ?,
-                   streak_bonus = ?, coins = coins + ? WHERE user_id = ?""",
+                "UPDATE users SET streak = ?, last_streak_date = ?, "
+                "streak_bonus = ?, coins = coins + ? WHERE user_id = ?",
                 (new_streak, int(time.time()), new_bonus, new_bonus, user_id),
             )
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
@@ -621,23 +693,23 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     # п.3 — команда /help
     text = (
-        "📖 <b>Помощь</b>\n\n"
-        "<b>Основные команды:</b>\n"
-        "/start — запуск бота\n"
-        "/meow или «мяу» — получить карточку\n"
-        "/profile — профиль\n"
-        "/collection — коллекция\n"
-        "/top — топ игроков\n"
-        f"/nickname [ник] — сменить ник ({NICKNAME_COST} 🪙)\n"
-        "/nickname reset — сбросить ник (бесплатно)\n"
-        "/help — эта справка\n\n"
-        "<b>Редкости карточек:</b>\n"
-        + "\n".join(
-            f"{v['icon']} {v['name']} — {v['coins']} 🪙"
-            for v in RARITIES.values()
-        )
-        + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно за 150 🪙.\n"
-        "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты."
+            "📖 <b>Помощь</b>\n\n"
+            "<b>Основные команды:</b>\n"
+            "/start — запуск бота\n"
+            "/meow или «мяу» — получить карточку\n"
+            "/profile — профиль\n"
+            "/collection — коллекция\n"
+            "/top — топ игроков\n"
+            f"/nickname [ник] — сменить ник ({NICKNAME_COST} 🪙)\n"
+            "/nickname reset — сбросить ник (бесплатно)\n"
+            "/help — эта справка\n\n"
+            "<b>Редкости карточек:</b>\n"
+            + "\n".join(
+        f"{v['icon']} {v['name']} — {v['coins']} 🪙"
+        for v in RARITIES.values()
+    )
+            + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно за 150 🪙.\n"
+              "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты."
     )
     await message.reply(text, reply_markup=get_main_km())
 
@@ -673,26 +745,16 @@ async def get_card_handler(message: Message):
 
         time_passed = now - last_claim
         if time_passed < COOLDOWN_SECONDS:
-            # п.2.1 — стрик обновляем даже при кулдауне
             streak, bonus, new_balance = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             h, m = remaining // 3600, (remaining % 3600) // 60
+
             text = (
                 f"🕘 <b>{mention}</b>, придётся немного подождать!\n\n"
                 f"Следующую карточку можно будет получить через <b>{h} ч {m} мин</b>"
             )
-            if bonus > 0 and streak > 0:
-                text += (
-                    f"\n\n<blockquote>🔥 Стрик • <b>{streak} дней</b>\n"
-                    f"🪙 Бонус • +{bonus} (баланс: {new_balance})</blockquote>"
-                )
-            elif streak == 1:
-                text += (
-                    "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
-                    "Это значит, что вы начали серию ежедневных заходов. "
-                    "Со 2-го дня за стрик начисляются бонусные монеты — "
-                    "не пропускайте дни, чтобы увеличить награду.</blockquote>"
-                )
+            text += _streak_text(streak, bonus, new_balance)
+
             await message.reply(text, reply_markup=get_card_action_keyboard(user_id, balance))
             return
 
@@ -701,23 +763,10 @@ async def get_card_handler(message: Message):
             await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
             return
 
-        # Стрик
         streak, bonus, new_balance = await check_and_update_streak(user_id)
 
-        # п.9 — стрик как blockquote внутри сообщения о карточке
         caption = _card_caption(mention, card)
-        if bonus > 0 and streak > 0:
-            caption += (
-                f"\n\n<blockquote>🔥 Стрик • <b>{streak} дней</b>\n"
-                f"🪙 Бонус • +{bonus} (баланс: {new_balance})</blockquote>"
-            )
-        elif streak == 1:
-            caption += (
-                "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
-                "Это значит, что вы начали серию ежедневных заходов. "
-                "Со 2-го дня за стрик начисляются бонусные монеты — "
-                "не пропускайте дни, чтобы увеличить награду.</blockquote>"
-            )
+        caption += _streak_text(streak, bonus, new_balance)
 
         try:
             await message.reply_photo(
@@ -733,13 +782,29 @@ async def get_card_handler(message: Message):
         await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
+def _streak_text(streak: int, bonus: int, new_balance: int) -> str:
+    """Формирует текст про стрик для сообщения."""
+    if streak == 1 and bonus == 0:
+        return (
+            "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n\n"
+            "💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
+        )
+    if bonus > 0 and streak >= 2:
+        return (
+            f"\n\n<blockquote>🔥 Стрик • <b>{fmt_num(streak)} дней</b>\n\n"
+            f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]\n"
+            f"💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
+        )
+    return ""
+
+
 def _card_caption(mention: str, card: dict) -> str:
     r = RARITIES[card["rarity"]]
     title = "✨ Новая карточка" if not card.get("is_duplicate") else "🔁 Дубликат"
     return (
         f"{title} • <b>{esc(card['name'])}</b>\n\n"
         f"{r['icon']} Редкость • <b>{r['name']}</b>\n"
-        f"🪙 Монеты • <b>+{card['coins_earned']}</b> [{card['balance']}]"
+        f"🪙 Монеты • <b>+{fmt_num(card['coins_earned'])}</b> [{fmt_num(card['balance'])}]"
     )
 
 
@@ -830,7 +895,7 @@ async def nickname_cmd(message: Message, command: Command):
     balance = row["coins"] if row else 0
     if balance < NICKNAME_COST:
         await message.reply(
-            f"⚠️ Недостаточно монет. Нужно <b>{NICKNAME_COST} 🪙</b>, у вас <b>{balance} 🪙</b>."
+            f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, у вас <b>{fmt_num(balance)} 🪙</b>."
         )
         return
 
@@ -882,7 +947,7 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
             balance = row["coins"] if row else 0
             if balance < NICKNAME_COST:
                 await callback.message.edit_text(
-                    f"⚠️ Недостаточно монет (нужно {NICKNAME_COST} 🪙)."
+                    f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, у вас <b>{fmt_num(balance)} 🪙</b>."
                 )
                 await callback.answer()
                 return
@@ -916,7 +981,8 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             # топ по сумме amount
             cur = await db.execute(
                 """SELECT u.user_id, u.nickname, COALESCE(SUM(i.amount), 0) AS value
-                   FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
+                   FROM users u
+                            LEFT JOIN inventory i ON u.user_id = i.user_id
                    GROUP BY u.user_id
                    ORDER BY value DESC, u.user_id ASC
                    LIMIT ?""",
@@ -924,21 +990,23 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             )
             top = await cur.fetchall()
             cur = await db.execute(
-                """SELECT value FROM (
-                       SELECT u.user_id, COALESCE(SUM(i.amount), 0) AS value
-                       FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
-                       GROUP BY u.user_id
-                   ) WHERE user_id = ?""",
+                """SELECT value
+                   FROM (SELECT u.user_id, COALESCE(SUM(i.amount), 0) AS value
+                         FROM users u
+                                  LEFT JOIN inventory i ON u.user_id = i.user_id
+                         GROUP BY u.user_id)
+                   WHERE user_id = ?""",
                 (current_user_id,),
             )
             my_row = await cur.fetchone()
             my_value = my_row["value"] if my_row else 0
             cur = await db.execute(
-                """SELECT COUNT(*) + 1 FROM (
-                       SELECT u.user_id, COALESCE(SUM(i.amount), 0) AS value
-                       FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
-                       GROUP BY u.user_id
-                   ) WHERE value > ?""",
+                """SELECT COUNT(*) + 1
+                   FROM (SELECT u.user_id, COALESCE(SUM(i.amount), 0) AS value
+                         FROM users u
+                                  LEFT JOIN inventory i ON u.user_id = i.user_id
+                         GROUP BY u.user_id)
+                   WHERE value > ?""",
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
@@ -987,9 +1055,9 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
         nick = row["nickname"] or f"User{row['user_id']}"
         # п.8 — упоминание. username у нас нет в БД, даём ссылку по id.
         mention = user_mention(row["user_id"], nick, None)
-        text += f"{medal} {mention} • <b>{row['value']}</b> {unit}\n"
+        text += f"{medal} {mention} • <b>{fmt_num(row['value'])}</b> {unit}\n"
 
-    text += f"\n📌 Ваше место: <b>#{my_rank}</b> — {esc(my_nick)} • <b>{my_value}</b> {unit}"
+    text += f"\n📌 Ваше место: <b>#{fmt_num(my_rank)}</b> — {esc(my_nick)} • <b>{fmt_num(my_value)}</b> {unit}"
     return text
 
 
@@ -1031,9 +1099,11 @@ async def switch_top(callback: CallbackQuery, callback_data: TopCallback):
 async def get_collection_main_keyboard(user_id: int):
     async with get_db() as db:
         cur = await db.execute(
-            """SELECT c.rarity, COALESCE(SUM(i.amount), 0) FROM inventory i
-               JOIN cards c ON i.card_id = c.id
-               WHERE i.user_id = ? GROUP BY c.rarity""",
+            """SELECT c.rarity, COALESCE(SUM(i.amount), 0)
+               FROM inventory i
+                        JOIN cards c ON i.card_id = c.id
+               WHERE i.user_id = ?
+               GROUP BY c.rarity""",
             (user_id,),
         )
         stats = dict(await cur.fetchall())
@@ -1047,7 +1117,7 @@ async def get_collection_main_keyboard(user_id: int):
             total_of_rarity = (await cur.fetchone())[0]
             rows.append([
                 InlineKeyboardButton(
-                    text=f"{r_info['name']} ({stats.get(r_key, 0)}/{total_of_rarity})",
+                    text=f"{r_info['name']} ({fmt_num(stats.get(r_key, 0))}/{fmt_num(total_of_rarity)})",
                     callback_data=RaritySelectCallback(rarity=r_key, page=0).pack(),
                 )
             ])
@@ -1095,8 +1165,9 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
             cur = await db.execute(
                 """SELECT c.name, c.photo_id, i.claim_time, c.id, i.amount
                    FROM inventory i
-                   JOIN cards c ON i.card_id = c.id
-                   WHERE i.user_id = ? AND c.rarity = ?
+                            JOIN cards c ON i.card_id = c.id
+                   WHERE i.user_id = ?
+                     AND c.rarity = ?
                    ORDER BY i.claim_time DESC""",
                 (user_id, rarity),
             )
@@ -1113,9 +1184,9 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         # п.7.2 — количество
         caption = (
             f"🃏 <b>{esc(card['name'])}</b>\n\n"
-            f"{info.get('icon', '')} Редкость: <b>{info.get('name', rarity)}</b>\n"
-            f"🪙 Монеты: <b>+{info.get('coins', 0)}</b>\n"
-            f"🔢 Количество: <b>{card['amount']}</b>"
+            f"{info.get('icon', '')} Редкость • <b>{info.get('name', rarity)}</b>\n"
+            f"🪙 Монеты • <b>+{fmt_num(info.get('coins', 0))}</b>\n"
+            f"🔢 Количество • <b>{fmt_num(card['amount'])}</b>"
         )
 
         nav = []
@@ -1210,8 +1281,8 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             caption = _card_caption(mention, card)
             if bonus > 0 and streak > 0:
                 caption += (
-                    f"\n\n<blockquote>🔥 Стрик • <b>{streak} дней</b>\n"
-                    f"🪙 Бонус • +{bonus} (баланс: {new_balance})</blockquote>"
+                    f"\n\n<blockquote>🔥 Стрик • <b>{fmt_days(streak)}</b>\n"
+                    f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]</blockquote>"
                 )
             elif streak == 1:
                 caption += (
@@ -1519,13 +1590,46 @@ async def test_promote_to_mythical(message: Message):
     await message.answer(f"✅ <b>[TEST] Переведено в мифические:</b> {len(ids)} карточек")
 
 
+# [TEST] Получить file_id отправленной картинки (для DEFAULT_AVATAR_FILE_ID)
+@router.message(Command("getfileid"), admin_filter, F.photo)
+async def test_get_file_id(message: Message):
+    # Берём самое большое по размеру фото
+    file_id = message.photo[-1].file_id
+    await message.reply(
+        f"🆔 <b>file_id:</b>\n<code>{esc(file_id)}</code>"
+    )
+
+
+# [TEST] Деноминация: урезать баланс каждого пользователя в 10 раз
+@router.message(Command("denominate_coins"), admin_filter)
+async def test_denominate_coins(message: Message):
+    async with get_db() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        total = (await cur.fetchone())[0]
+
+        # Целочисленное деление на 10 (округление вниз).
+        # Если нужно округление к ближайшему — замените на
+        # CAST(ROUND(coins / 10.0) AS INTEGER).
+        await db.execute("UPDATE users SET coins = coins / 10")
+
+        cur = await db.execute("SELECT COALESCE(SUM(coins), 0) FROM users")
+        new_total_coins = (await cur.fetchone())[0]
+
+    await message.answer(
+        f"✅ <b>[TEST] Деноминация выполнена</b>\n\n"
+        f"👥 Пользователей: <b>{total}</b>\n"
+        f"🪙 Суммарный баланс после: <b>{new_total_coins}</b>"
+    )
+
+
 # ================= ЗАПУСК =================
 async def main():
     try:
         await init_db()
         logger.info("База данных инициализирована")
 
-        bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML,
+                                                                link_preview=LinkPreviewOptions(is_disabled=True), ))
         dp = Dispatcher(storage=MemoryStorage())
         dp.include_router(router)
 
