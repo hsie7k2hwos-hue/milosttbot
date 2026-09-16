@@ -715,7 +715,8 @@ async def cmd_help(message: Message):
 
 
 @router.message(F.text == "🃏 Получить карточку")
-@router.message(F.text.lower().strip() == "мяу")
+@router.message(F.text.lower().strip() == "мряу")
+@router.message(F.text.lower().strip() == "милость")
 @router.message(Command("meow"))
 async def get_card_handler(message: Message):
     user_id = message.from_user.id
