@@ -42,7 +42,7 @@ DUPLICATE_CHANCE = 0.25  # п.7 — шанс дубликата
 DUPLICATE_REFUND = 0.5  # 50% от стоимости
 
 # п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
-DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 
 RARITIES = {
     "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "coins": 10},
