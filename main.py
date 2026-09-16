@@ -1,75 +1,87 @@
 import asyncio
+import html
 import logging
 import os
 import random
+import re
 import time
-from datetime import datetime, timedelta
-from typing import Optional, Tuple
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from io import BytesIO
+from typing import Optional, Tuple
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-    InputMediaPhoto,
+    BufferedInputFile, CallbackQuery, InlineKeyboardButton,
+    InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
     ReplyKeyboardMarkup,
-    KeyboardButton,
-    UserProfilePhotos,
-    BufferedInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
-import aiohttp
-from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+
+# PIL больше не нужен — заглушка через file_id (п.12)
+# from PIL import Image, ImageDraw, ImageFont
 
 # ================= КОНФИГУРАЦИЯ =================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_NAME = "/app/data/cards_game.db"
-COOLDOWN_SECONDS = 3 * 3600  # 3 часа в секундах
-INSTANT_COST = 5000  # Стоимость мгновенного получения карточки
+COOLDOWN_SECONDS = 4 * 3600
+INSTANT_COST = 150
+NICKNAME_COST = 100
+DUPLICATE_CHANCE = 0.25          # п.7 — шанс дубликата
+DUPLICATE_REFUND = 0.5           # 50% от стоимости
 
-# Редкости и их шансы
+# п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
+DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
 RARITIES = {
-    "common": {"name": "🤍 Обычная", "weight": 60, "coins": 100},
-    "rare": {"name": "💙 Редкая", "weight": 25, "coins": 200},
-    "epic": {"name": "💜 Эпическая", "weight": 10, "coins": 300},
-    "legendary": {"name": "💛 Легендарная", "weight": 5, "coins": 500},
+    "common":    {"icon": "⚪️", "name": "Обычная",     "weight": 50, "coins": 10},
+    "rare":      {"icon": "🔵", "name": "Редкая",      "weight": 20, "coins": 25},
+    "epic":      {"icon": "🟣", "name": "Эпическая",   "weight": 15, "coins": 50},
+    "mythical":  {"icon": "🔴", "name": "Мифическая",  "weight": 10, "coins": 75},
+    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5,  "coins": 100},
 }
 
-# Бонусы за стрик (день, бонус)
-STREAK_BONUSES = [
-    (1, 100),   # до 7 дней
-    (7, 100),
-    (14, 200),
-    (30, 300),
-    (float('inf'), 500)  # от 30 дней
-]
+# п.2 — стрик начисляется со 2-го дня
+STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
 
-# Настройка логирования
+# п.5.2 — валидация ника
+NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
+URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/app/data/bot.log'),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("/app/data/bot.log"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
 
-# --- CallbackData для обработки нажатий ---
+# ================= ХЕЛПЕРЫ =================
+def esc(text) -> str:
+    """п.5.3 — экранирование любого пользовательского текста."""
+    return html.escape(str(text), quote=False)
+
+
+def user_mention(user_id: int, nickname: str, username: Optional[str] = None) -> str:
+    """п.8 — ссылка на пользователя с экранированным ником."""
+    safe = esc(nickname)
+    if username:
+        return f'<a href="https://t.me/{esc(username)}">{safe}</a>'
+    return f'<a href="https://t.me/user?id={user_id}">{safe}</a>'
+
+
+# ================= CALLBACK DATA =================
 class RaritySelectCallback(CallbackData, prefix="coll_rarity"):
     rarity: str
     page: int = 0
@@ -93,18 +105,22 @@ class NicknameCallback(CallbackData, prefix="nickname"):
 
 
 class CardActionCallback(CallbackData, prefix="card_action"):
-    action: str  # "instant" или "collection" или "another"
-    user_id: int = 0  # ID пользователя, которому адресовано сообщение
+    action: str
+    user_id: int = 0
 
 
-class StreakCallback(CallbackData, prefix="streak"):
-    pass
+class TopCallback(CallbackData, prefix="top"):
+    kind: str  # coins | cards | streak
 
 
-# ================= РАБОТА С БАЗОЙ ДАННЫХ =================
+class NickConfirmCallback(CallbackData, prefix="nickconf"):
+    action: str          # apply | reset | cancel
+    value: str = ""      # для apply — новый ник (url-safe? используем как есть)
+
+
+# ================= БАЗА ДАННЫХ =================
 @asynccontextmanager
 async def get_db():
-    """Контекстный менеджер для работы с БД (одно соединение на операцию)"""
     db = await aiosqlite.connect(DB_NAME)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys = ON;")
@@ -122,154 +138,117 @@ async def get_db():
 
 
 async def init_db():
-    """Инициализация базы данных с индексами"""
     async with get_db() as db:
-        # Таблица карточек
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS cards
-            (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                name     TEXT NOT NULL,
-                rarity   TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                rarity TEXT NOT NULL,
                 photo_id TEXT NOT NULL
             )
         """)
-        
-        # Таблица пользователей с ролью
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS users
-            (
-                user_id          INTEGER PRIMARY KEY,
-                last_claim       INTEGER DEFAULT 0,
-                role             TEXT    DEFAULT 'user',
-                nickname         TEXT,
-                coins            INTEGER DEFAULT 0,
-                registration     INTEGER DEFAULT 0,
-                streak           INTEGER DEFAULT 0,
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                last_claim INTEGER DEFAULT 0,
+                role TEXT DEFAULT 'user',
+                nickname TEXT,
+                coins INTEGER DEFAULT 0,
+                registration INTEGER DEFAULT 0,
+                streak INTEGER DEFAULT 0,
                 last_streak_date INTEGER DEFAULT 0,
-                streak_bonus     INTEGER DEFAULT 0
+                streak_bonus INTEGER DEFAULT 0
             )
         """)
-        
-        # Инвентарь пользователей
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS inventory
-            (
-                user_id    INTEGER,
-                card_id    INTEGER,
+            CREATE TABLE IF NOT EXISTS inventory (
+                user_id INTEGER,
+                card_id INTEGER,
                 claim_time INTEGER DEFAULT 0,
+                amount INTEGER DEFAULT 1,
                 PRIMARY KEY (user_id, card_id),
                 FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
             )
         """)
-        
-        # Индексы для оптимизации запросов
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory(user_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_inventory_claim_time ON inventory(claim_time)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_streak ON users(streak)")
-        
-        # Миграции
-        migrations = [
+        for sql in (
+            "CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)",
+            "CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_inventory_claim_time ON inventory(claim_time)",
+            "CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins)",
+            "CREATE INDEX IF NOT EXISTS idx_users_streak ON users(streak)",
+        ):
+            await db.execute(sql)
+
+        # Безопасные миграции (п."важно" — не ломаем прод)
+        for table, column, definition in [
             ("users", "registration", "INTEGER DEFAULT 0"),
             ("users", "streak", "INTEGER DEFAULT 0"),
             ("users", "last_streak_date", "INTEGER DEFAULT 0"),
             ("users", "streak_bonus", "INTEGER DEFAULT 0"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
-        ]
-        
-        for table, column, definition in migrations:
+            ("inventory", "amount", "INTEGER DEFAULT 1"),
+        ]:
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-                logger.info(f"Миграция: добавлена колонка {column} в {table}")
             except aiosqlite.OperationalError:
                 pass
 
 
 async def is_admin(user_id: int) -> bool:
-    """Проверка, является ли пользователь админом"""
     try:
         async with get_db() as db:
-            cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
-            row = await cursor.fetchone()
-            return row is not None and row[0] == 'admin'
+            cur = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+            row = await cur.fetchone()
+            return row is not None and row[0] == "admin"
     except Exception as e:
         logger.error(f"Ошибка проверки админа: {e}")
         return False
 
 
+def default_nickname(username: Optional[str], full_name: Optional[str], user_id: int) -> str:
+    """п.5.1 — приоритет: имя -> username -> ID."""
+    if full_name and full_name.strip():
+        return full_name.strip()[:32]
+    if username and username.strip():
+        return username.strip()[:32]
+    return str(user_id)
+
+
 async def get_or_create_user(user_id: int, username: str = None, full_name: str = None):
-    """Получение или создание пользователя"""
-    try:
-        async with get_db() as db:
-            cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-            user = await cursor.fetchone()
-
-            if not user:
-                nickname = username or full_name or f"User{user_id}"
-                now = int(time.time())
-                await db.execute(
-                    "INSERT INTO users (user_id, nickname, registration, streak, last_streak_date) VALUES (?, ?, ?, ?, ?)",
-                    (user_id, nickname, now, 0, 0)
-                )
-                cursor = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-                user = await cursor.fetchone()
-
-            return user
-    except Exception as e:
-        logger.error(f"Ошибка получения/создания пользователя: {e}")
-        raise
+    async with get_db() as db:
+        cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        user = await cur.fetchone()
+        if not user:
+            nickname = default_nickname(username, full_name, user_id)
+            now = int(time.time())
+            await db.execute(
+                "INSERT INTO users (user_id, nickname, registration, streak, last_streak_date) "
+                "VALUES (?, ?, ?, 0, 0)",
+                (user_id, nickname, now),
+            )
+            cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+            user = await cur.fetchone()
+        return user
 
 
 async def get_user_nickname(user_id: int) -> str:
-    """Получает ник пользователя из базы данных"""
     try:
         async with get_db() as db:
-            cursor = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (user_id,))
-            row = await cursor.fetchone()
+            cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (user_id,))
+            row = await cur.fetchone()
             return row["nickname"] if row and row["nickname"] else f"User{user_id}"
     except Exception as e:
         logger.error(f"Ошибка получения ника: {e}")
         return f"User{user_id}"
 
 
-async def create_avatar_photo(initials: str) -> BufferedInputFile:
-    """Создает квадратное изображение с инициалами на цветном фоне"""
-    size = 200
-    colors = [
-        (66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53),
-        (156, 39, 176), (0, 188, 212), (255, 152, 0), (233, 30, 99)
-    ]
-    
-    color_index = sum(ord(c) for c in initials) % len(colors)
-    bg_color = colors[color_index]
-    
-    image = Image.new('RGB', (size, size), bg_color)
-    draw = ImageDraw.Draw(image)
-    
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 80)
-    except:
-        font = ImageFont.load_default()
-    
-    text = initials.upper()[:2]
-    text_bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = text_bbox[2] - text_bbox[0]
-    text_height = text_bbox[3] - text_bbox[1]
-    x = (size - text_width) // 2
-    y = (size - text_height) // 2 - 10
-    
-    draw.text((x, y), text, fill=(255, 255, 255), font=font)
-    
-    buffer = BytesIO()
-    image.save(buffer, format='PNG')
-    buffer.seek(0)
-    
-    return BufferedInputFile(buffer.read(), filename="avatar.png")
+async def get_user_row(user_id: int):
+    async with get_db() as db:
+        cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        return await cur.fetchone()
 
 
-# ================= FSM (СОСТОЯНИЯ ДЛЯ АДМИНКИ) =================
+# ================= FSM =================
 class AddCardSG(StatesGroup):
     photo = State()
     name = State()
@@ -281,228 +260,282 @@ class EditCardSG(StatesGroup):
     new_name = State()
 
 
-class NicknameSG(StatesGroup):
-    new_nickname = State()
-
-
-# ================= РОУТЕРЫ =================
 router = Router()
 
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ КЛАВИАТУРЫ =================
+# ================= КЛАВИАТУРЫ =================
 def get_rarity_keyboard():
-    builder = InlineKeyboardBuilder()
+    b = InlineKeyboardBuilder()
     for key, val in RARITIES.items():
-        builder.button(text=val["name"], callback_data=f"set_rarity:{key}")
-    builder.button(text="❌ Отмена", callback_data="cancel_add_card")
-    builder.adjust(2)
-    return builder.as_markup()
+        b.button(text=val["name"], callback_data=f"set_rarity:{key}")
+    b.button(text="❌ Отмена", callback_data="cancel_add_card")
+    b.adjust(2)
+    return b.as_markup()
 
 
 def get_admin_main_kb():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Добавить карточку", callback_data="admin_add_card")
-    builder.button(text="📜 Список карточек", callback_data="admin_list_cards")
-    builder.adjust(1)
-    return builder.as_markup()
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Добавить карточку", callback_data="admin_add_card")
+    b.button(text="📜 Список карточек", callback_data="admin_list_cards")
+    b.adjust(1)
+    return b.as_markup()
 
 
 def get_profile_kb():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📦 Моя коллекция", callback_data="collection")
-    builder.button(text="✏️ Изменить ник", callback_data=NicknameCallback(action="change").pack())
-    builder.adjust(1)
-    return builder.as_markup()
+    b = InlineKeyboardBuilder()
+    b.button(text="📦 Моя коллекция", callback_data="collection")
+    b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)", callback_data=NicknameCallback(action="change").pack())
+    b.adjust(1)
+    return b.as_markup()
 
 
 def get_main_km():
-    keyboard = ReplyKeyboardMarkup(
+    return ReplyKeyboardMarkup(
         keyboard=[
-            [
-                KeyboardButton(text="🃏 Получить карточку"),
-                KeyboardButton(text="👤 Профиль"),
-            ],
-            [
-                KeyboardButton(text="🏆 Топ игроков"),
-            ]
+            [KeyboardButton(text="🃏 Получить карточку"), KeyboardButton(text="👤 Профиль")],
+            [KeyboardButton(text="🏆 Топ игроков"), KeyboardButton(text="❓ Помощь")],
         ],
         resize_keyboard=True,
     )
-    return keyboard
+
+
+def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str, action: str):
+    b.button(
+        text=f"{label} ({INSTANT_COST} 🪙)",
+        callback_data=CardActionCallback(action=action, user_id=user_id).pack(),
+    )
 
 
 def get_card_action_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
-    """Клавиатура для действий с карточкой при кулдауне"""
-    builder = InlineKeyboardBuilder()
-
+    b = InlineKeyboardBuilder()
     if balance >= INSTANT_COST:
-        builder.button(
-            text="✨ Получить сейчас (5 000 🎀)",
-            callback_data=CardActionCallback(action="instant", user_id=user_id).pack()
-        )
-        
-    builder.button(
-        text="📦 Моя коллекция", 
-        callback_data=CardActionCallback(action="collection", user_id=user_id).pack()
-    )
-    builder.adjust(1)
-    return builder.as_markup()
+        _instant_button(b, user_id, "✨ Получить сейчас", "instant")
+    b.adjust(1)
+    return b.as_markup()
 
 
 def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
-    """Клавиатура после получения карточки"""
-    builder = InlineKeyboardBuilder()
-    
-    # Показываем кнопку "Получить ещё" только если хватает монет
+    b = InlineKeyboardBuilder()
     if balance >= INSTANT_COST:
-        builder.button(
-            text="✨ Получить ещё одну (5 000 🎀)", 
-            callback_data=CardActionCallback(action="another", user_id=user_id).pack()
-        )
-    
-    builder.button(
-        text="📦 Моя коллекция", 
-        callback_data=CardActionCallback(action="collection", user_id=user_id).pack()
+        _instant_button(b, user_id, "✨ Получить ещё одну", "another")
+    b.button(
+        text="🃏 Мои карточки",
+        callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
     )
-    builder.adjust(1)
-    return builder.as_markup()
+    b.adjust(1)
+    return b.as_markup()
 
 
-# ================= ФУНКЦИЯ ВЫДАЧИ КАРТОЧКИ =================
-async def issue_card(user_id: int, username: str = None, check_cooldown: bool = True) -> Tuple[dict, str]:
-    """
-    Выдача случайной карточки пользователю.
-    Возвращает (карточка, редкость) или None если все карточки собраны.
-    """
+def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
+    """п.6 — быстрое переключение топов."""
+    b = InlineKeyboardBuilder()
+    b.button(text=("✅ " if kind == "coins" else "") + "🪙 Монеты",
+             callback_data=TopCallback(kind="coins").pack())
+    b.button(text=("✅ " if kind == "cards" else "") + "🃏 Карточки",
+             callback_data=TopCallback(kind="cards").pack())
+    b.button(text=("✅ " if kind == "streak" else "") + "🔥 Стрик",
+             callback_data=TopCallback(kind="streak").pack())
+    b.adjust(3)
+    return b.as_markup()
+
+
+# ================= ХЕЛПЕРЫ ОТОБРАЖЕНИЯ =================
+async def get_user_photo(bot: Bot, user_id: int, nickname: str):
+    """п.12/п.13 — фото профиля или file_id-заглушка (без генерации)."""
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count > 0:
+            return photos.photos[0][-1].file_id
+    except Exception as e:
+        logger.error(f"Не удалось получить фото профиля: {e}")
+    return DEFAULT_AVATAR_FILE_ID
+
+
+async def render_profile(bot: Bot, user_id: int):
+    async with get_db() as db:
+        cur = await db.execute("""
+            SELECT u.nickname, u.coins, u.registration, u.streak, u.streak_bonus,
+                   COALESCE(SUM(i.amount), 0) AS cards_count
+            FROM users u
+            LEFT JOIN inventory i ON u.user_id = i.user_id
+            WHERE u.user_id = ?
+            GROUP BY u.user_id
+        """, (user_id,))
+        row = await cur.fetchone()
+        cur = await db.execute("SELECT COUNT(*) FROM cards")
+        total_cards = (await cur.fetchone())[0]
+
+    nickname = row["nickname"] or f"User{user_id}"
+    reg_date = datetime.fromtimestamp(row["registration"] or time.time()).strftime("%d.%m.%Y")
+    caption = (
+        f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
+        f"🆔 ID • <code>{user_id}</code>\n"
+        f"📅 Регистрация • <b>{reg_date}</b>\n\n"
+        f"🃏 Карточек • <b>{row['cards_count']} из {total_cards}</b>\n"
+        f"🪙 Монеты • <b>{row['coins']}</b>\n"
+        f"🔥 Стрик • <b>{row['streak']} дней</b>"
+    )
+    return await get_user_photo(bot, user_id, nickname), caption, get_profile_kb()
+
+
+async def render_collection(bot: Bot, user_id: int):
+    keyboard, total, total_in_game = await get_collection_main_keyboard(user_id)
+    nickname = await get_user_nickname(user_id)
+    photo = await get_user_photo(bot, user_id, nickname)
+    caption = (
+        f"🃏 <b>Ваши карточки</b>\n"
+        f"Всего: {total} из {total_in_game}"
+    )
+    return photo, caption, keyboard, total
+
+
+async def show_or_edit_photo(message: Message, photo, caption: str, keyboard=None):
+    """п.13 — устойчиво к отсутствующим file_id."""
+    if message.photo:
+        try:
+            await message.edit_media(
+                media=InputMediaPhoto(media=photo, caption=caption),
+                reply_markup=keyboard,
+            )
+            return
+        except TelegramBadRequest:
+            pass
+        except Exception as e:
+            logger.error(f"edit_media error: {e}")
+    try:
+        await message.answer_photo(photo=photo, caption=caption, reply_markup=keyboard)
+    except TelegramBadRequest as e:
+        logger.error(f"answer_photo bad request: {e}")
+        try:
+            await message.answer(caption, reply_markup=keyboard)
+        except Exception:
+            pass
+
+
+# ================= ВЫДАЧА КАРТОЧКИ =================
+async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optional[dict], str]:
+    """п.7 — допускаем дубликаты, но с меньшим шансом."""
     try:
         async with get_db() as db:
-            # Проверяем, все ли карточки уже получены
-            cursor = await db.execute("SELECT COUNT(*) FROM cards")
-            total_cards = (await cursor.fetchone())[0]
-            
-            cursor = await db.execute(
-                "SELECT COUNT(DISTINCT card_id) FROM inventory WHERE user_id = ?",
-                (user_id,)
+            cur = await db.execute("SELECT COUNT(*) FROM cards")
+            total_cards = (await cur.fetchone())[0]
+            if total_cards == 0:
+                return None, "no_cards"
+
+            cur = await db.execute(
+                "SELECT COUNT(DISTINCT card_id) FROM inventory WHERE user_id = ?", (user_id,)
             )
-            user_cards_count = (await cursor.fetchone())[0]
-            
-            if user_cards_count >= total_cards:
-                return None, "all_collected"
-            
-            # Выбор редкости на основе весов
+            owned_unique = (await cur.fetchone())[0]
+            all_collected = owned_unique >= total_cards
+
             rarities_list = list(RARITIES.keys())
             weights = [RARITIES[r]["weight"] for r in rarities_list]
-            
-            # Пытаемся найти карточку выбранной редкости
+
+            is_duplicate = False
             card = None
             selected_rarity = None
-            
-            for _ in range(10):  # До 10 попыток найти карточку
-                selected_rarity = random.choices(rarities_list, weights=weights, k=1)[0]
-                
-                cursor = await db.execute(
-                    """
-                    SELECT id, name, photo_id, rarity 
-                    FROM cards 
-                    WHERE rarity = ? AND id NOT IN (
-                        SELECT card_id FROM inventory WHERE user_id = ?
-                    )
-                    ORDER BY RANDOM() 
-                    LIMIT 1
-                    """,
-                    (selected_rarity, user_id)
+
+            # п.7 — если не всё собрано, стараемся дать новую, но с шансом DUPLICATE_CHANCE — дубликат
+            want_duplicate = all_collected or (random.random() < DUPLICATE_CHANCE and owned_unique > 0)
+
+            if want_duplicate:
+                cur = await db.execute(
+                    """SELECT c.id, c.name, c.photo_id, c.rarity FROM inventory i
+                       JOIN cards c ON i.card_id = c.id
+                       WHERE i.user_id = ? ORDER BY RANDOM() LIMIT 1""",
+                    (user_id,),
                 )
-                card = await cursor.fetchone()
-                
+                card = await cur.fetchone()
                 if card:
-                    break
-            
-            # Если не нашли по редкости, берем любую доступную
+                    selected_rarity = card["rarity"]
+                    is_duplicate = True
+
             if not card:
-                cursor = await db.execute(
-                    """
-                    SELECT id, name, photo_id, rarity 
-                    FROM cards 
-                    WHERE id NOT IN (
-                        SELECT card_id FROM inventory WHERE user_id = ?
+                # ищем новую карточку (не в инвентаре)
+                for _ in range(10):
+                    selected_rarity = random.choices(rarities_list, weights=weights, k=1)[0]
+                    cur = await db.execute(
+                        """SELECT id, name, photo_id, rarity FROM cards
+                           WHERE rarity = ? AND id NOT IN
+                               (SELECT card_id FROM inventory WHERE user_id = ?)
+                           ORDER BY RANDOM() LIMIT 1""",
+                        (selected_rarity, user_id),
                     )
-                    ORDER BY RANDOM() 
-                    LIMIT 1
-                    """,
-                    (user_id,)
-                )
-                card = await cursor.fetchone()
-                if card:
-                    selected_rarity = card[3]
-            
+                    card = await cur.fetchone()
+                    if card:
+                        break
+
+                if not card:
+                    # fallback — любая не в инвентаре
+                    cur = await db.execute(
+                        """SELECT id, name, photo_id, rarity FROM cards
+                           WHERE id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
+                           ORDER BY RANDOM() LIMIT 1""",
+                        (user_id,),
+                    )
+                    card = await cur.fetchone()
+                    if card:
+                        selected_rarity = card["rarity"]
+
             if not card:
-                return None, "all_collected"
-            
+                # всё собрано — берём случайную из инвентаря
+                cur = await db.execute(
+                    """SELECT c.id, c.name, c.photo_id, c.rarity FROM inventory i
+                       JOIN cards c ON i.card_id = c.id
+                       WHERE i.user_id = ? ORDER BY RANDOM() LIMIT 1""",
+                    (user_id,),
+                )
+                card = await cur.fetchone()
+                if not card:
+                    return None, "no_cards"
+                selected_rarity = card["rarity"]
+                is_duplicate = True
+
             card_id, card_name, photo_id = card[0], card[1], card[2]
-            coins_earned = RARITIES[selected_rarity]["coins"]
+            base_coins = RARITIES[selected_rarity]["coins"]
+            coins_earned = int(base_coins * DUPLICATE_REFUND) if is_duplicate else base_coins
             now = int(time.time())
-            
-            # Транзакция: обновляем пользователя и добавляем карточку
-            await db.execute("BEGIN TRANSACTION")
-            try:
-                if check_cooldown:
-                    # Обычная выдача с обновлением last_claim
-                    await db.execute(
-                        """
-                        INSERT INTO users (user_id, last_claim, coins) 
-                        VALUES (?, ?, ?) 
-                        ON CONFLICT(user_id) DO UPDATE SET 
-                            last_claim = ?, 
-                            coins = coins + ?
-                        """,
-                        (user_id, now, coins_earned, now, coins_earned)
-                    )
-                else:
-                    # Мгновенная выдача без обновления last_claim (уже обновлен)
-                    await db.execute(
-                        """
-                        UPDATE users SET coins = coins + ? WHERE user_id = ?
-                        """,
-                        (coins_earned, user_id)
-                    )
-                
+
+            if check_cooldown:
                 await db.execute(
-                    "INSERT INTO inventory (user_id, card_id, claim_time) VALUES (?, ?, ?)",
-                    (user_id, card_id, now)
+                    """INSERT INTO users (user_id, last_claim, coins) VALUES (?, ?, ?)
+                       ON CONFLICT(user_id) DO UPDATE SET
+                           last_claim = ?, coins = coins + ?""",
+                    (user_id, now, coins_earned, now, coins_earned),
                 )
-                await db.execute("COMMIT")
-            except Exception as e:
-                await db.execute("ROLLBACK")
-                logger.error(f"Ошибка транзакции выдачи карточки: {e}")
-                raise
-            
-            # Получаем обновленный баланс
-            cursor = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-            balance_row = await cursor.fetchone()
-            balance = balance_row[0] if balance_row else 0
-            
-            card_data = {
-                "id": card_id,
-                "name": card_name,
-                "photo_id": photo_id,
-                "rarity": selected_rarity,
-                "coins_earned": coins_earned,
-                "balance": balance
-            }
-            
-            return card_data, "success"
-            
+            else:
+                await db.execute(
+                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                    (coins_earned, user_id),
+                )
+
+            # п.7.2 — учитываем количество
+            await db.execute(
+                """INSERT INTO inventory (user_id, card_id, claim_time, amount) VALUES (?, ?, ?, 1)
+                   ON CONFLICT(user_id, card_id) DO UPDATE SET
+                       amount = amount + 1, claim_time = ?""",
+                (user_id, card_id, now, now),
+            )
+
+            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+            balance = (await cur.fetchone())[0]
+
+            return {
+                "id": card_id, "name": card_name, "photo_id": photo_id,
+                "rarity": selected_rarity, "coins_earned": coins_earned,
+                "balance": balance, "is_duplicate": is_duplicate,
+            }, "success"
     except Exception as e:
         logger.error(f"Ошибка выдачи карточки: {e}")
         return None, "error"
 
 
-# ================= ФУНКЦИЯ ОБНОВЛЕНИЯ СТРИКА =================
+# ================= СТРИК =================
 async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
     """
-    Проверяет и обновляет стрик пользователя.
-    Возвращает (текущий_стрик, бонус_за_стрик, баланс)
-    Если бонус уже был начислен сегодня, возвращает (0, 0, 0)
+    п.2.1 — вызывается при любом взаимодействии с получением карточки,
+    в т.ч. при кулдауне. Возвращает (стрик, бонус, баланс).
+    Бонус = 0, если сегодня уже было; для 1-го дня возвращает (1, 0, balance).
     """
     try:
         now = datetime.now()
@@ -510,616 +543,600 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
         today_end = today_start + 86400 - 1
         yesterday_start = int((now - timedelta(days=1)).replace(hour=0, minute=0, second=0).timestamp())
         yesterday_end = yesterday_start + 86400 - 1
-        
+
         async with get_db() as db:
-            cursor = await db.execute(
+            cur = await db.execute(
                 "SELECT streak, last_streak_date, streak_bonus, coins FROM users WHERE user_id = ?",
-                (user_id,)
+                (user_id,),
             )
-            row = await cursor.fetchone()
-            
+            row = await cur.fetchone()
             if not row:
                 return 0, 0, 0
-            
-            streak = row["streak"]
-            last_streak_date = row["last_streak_date"]
-            streak_bonus = row["streak_bonus"]
+
+            streak, last_date = row["streak"], row["last_streak_date"]
             balance = row["coins"]
-            
-            # Если сегодня уже начисляли бонус - не уведомляем повторно
-            if today_start <= last_streak_date <= today_end:
+
+            if today_start <= last_date <= today_end:
                 return 0, 0, 0
-            
-            # Проверяем, получал ли пользователь карточку сегодня
-            cursor = await db.execute(
-                "SELECT MAX(claim_time) FROM inventory WHERE user_id = ?",
-                (user_id,)
-            )
-            last_claim_row = await cursor.fetchone()
-            last_claim = last_claim_row[0] if last_claim_row[0] else 0
-            
-            # Если пользователь получал карточку сегодня
-            if last_claim >= today_start:
-                # Определяем новый стрик
-                if streak > 0 and yesterday_start <= last_streak_date <= yesterday_end:
-                    # Продолжаем стрик
-                    new_streak = streak + 1
-                else:
-                    # Начинаем новый стрик (или после перерыва)
-                    new_streak = 1
-                
-                # Рассчитываем бонус за стрик
+
+            # Определяем новый стрик
+            new_streak = streak + 1 if streak > 0 and yesterday_start <= last_date <= yesterday_end else 1
+
+            # п.2 — за 1-й день бонус не начисляется
+            if new_streak == 1:
                 new_bonus = 0
-                for days, bonus in STREAK_BONUSES:
-                    if new_streak <= days:
-                        new_bonus = bonus
-                        break
-                
-                # Обновляем стрик и начисляем бонус
-                await db.execute(
-                    """
-                    UPDATE users 
-                    SET streak = ?, 
-                        last_streak_date = ?, 
-                        streak_bonus = ?,
-                        coins = coins + ?
-                    WHERE user_id = ?
-                    """,
-                    (new_streak, int(time.time()), new_bonus, new_bonus, user_id)
-                )
-                
-                # Получаем обновленный баланс
-                cursor = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-                balance_row = await cursor.fetchone()
-                new_balance = balance_row[0] if balance_row else balance
-                
-                return new_streak, new_bonus, new_balance
             else:
-                # Если не получал сегодня - сбрасываем стрик
-                if streak > 0:
-                    await db.execute(
-                        "UPDATE users SET streak = 0, streak_bonus = 0 WHERE user_id = ?",
-                        (user_id,)
-                    )
-                return 0, 0, 0
-                
+                new_bonus = next(b for d, b in STREAK_BONUSES if new_streak <= d)
+
+            await db.execute(
+                """UPDATE users SET streak = ?, last_streak_date = ?,
+                   streak_bonus = ?, coins = coins + ? WHERE user_id = ?""",
+                (new_streak, int(time.time()), new_bonus, new_bonus, user_id),
+            )
+            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+            new_balance = (await cur.fetchone())[0]
+            return new_streak, new_bonus, new_balance
     except Exception as e:
         logger.error(f"Ошибка обновления стрика: {e}")
         return 0, 0, 0
 
 
-# ================= ПОЛЬЗОВАТЕЛЬСКАЯ ЛОГИКА =================
+# ================= RATE LIMIT (п.11) =================
+_rate_bucket: dict = {}
 
+
+def rate_limited(key: str, limit: int, window: float) -> bool:
+    now = time.monotonic()
+    bucket = _rate_bucket.setdefault(key, [])
+    bucket[:] = [t for t in bucket if now - t < window]
+    if len(bucket) >= limit:
+        return True
+    bucket.append(now)
+    return False
+
+
+# ================= ПОЛЬЗОВАТЕЛЬСКИЕ ХЕНДЛЕРЫ =================
 @router.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: Message):
     try:
         await get_or_create_user(
-            message.from_user.id,
-            message.from_user.username,
-            message.from_user.full_name
+            message.from_user.id, message.from_user.username, message.from_user.full_name
         )
-
-        sticker_file_id = "CAACAgIAAxkBAALL7WqWuuWDYuQk4iqY7tNu_-7zLZqyAAJengACoj5pSQH9iX-5QhicPQQ"
-        await message.answer_sticker(sticker=sticker_file_id)
+        try:
+            await message.answer_sticker(
+                sticker="CAACAgIAAxkBAALL7WqWuuWDYuQk4iqY7tNu_-7zLZqyAAJengACoj5pSQH9iX-5QhicPQQ"
+            )
+        except Exception as e:
+            logger.warning(f"sticker error: {e}")
         await message.reply(
-            "<blockquote><b><tg-emoji emoji-id='{5472055112702629499}'>👋</tg-emoji> Привет!</b> Отправь команду «милость», чтобы получить милую карточку</blockquote>",
-            reply_markup=get_main_km()
+            "👋 Привет! Отправьте команду «мяу», чтобы получить милую карточку",
+            reply_markup=get_main_km(),
         )
-        logger.info(f"Пользователь {message.from_user.id} запустил бота")
     except Exception as e:
         logger.error(f"Ошибка в cmd_start: {e}")
 
 
+@router.message(Command("help"))
+@router.message(F.text == "❓ Помощь")
+async def cmd_help(message: Message):
+    # п.3 — команда /help
+    text = (
+        "📖 <b>Помощь</b>\n\n"
+        "<b>Основные команды:</b>\n"
+        "/start — запуск бота\n"
+        "/meow или «мяу» — получить карточку\n"
+        "/profile — профиль\n"
+        "/collection — коллекция\n"
+        "/top — топ игроков\n"
+        f"/nickname [ник] — сменить ник ({NICKNAME_COST} 🪙)\n"
+        "/nickname reset — сбросить ник (бесплатно)\n"
+        "/help — эта справка\n\n"
+        "<b>Редкости карточек:</b>\n"
+        + "\n".join(
+            f"{v['icon']} {v['name']} — {v['coins']} 🪙"
+            for v in RARITIES.values()
+        )
+        + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно за 150 🪙.\n"
+        "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты."
+    )
+    await message.reply(text, reply_markup=get_main_km())
+
+
 @router.message(F.text == "🃏 Получить карточку")
-@router.message(F.text.lower().strip() == "милость")
-@router.message(F.text.lower().strip() == "мряу")
-@router.message(Command("card"))
+@router.message(F.text.lower().strip() == "мяу")
+@router.message(Command("meow"))
 async def get_card_handler(message: Message):
     user_id = message.from_user.id
     now = int(time.time())
-    
+
+    # п.11 — rate limit для групп
+    if message.chat.type != "private":
+        if rate_limited(f"card:{message.chat.id}", limit=5, window=10):
+            return
+    if rate_limited(f"card-user:{user_id}", limit=10, window=10):
+        return
+
     try:
-        # Получаем или создаем пользователя
         await get_or_create_user(
-            user_id,
-            message.from_user.username,
-            message.from_user.full_name
+            user_id, message.from_user.username, message.from_user.full_name
         )
-        
-        # Получаем ник из базы данных
         nickname = await get_user_nickname(user_id)
-        
-        # Проверка кулдауна
+        mention = user_mention(user_id, nickname, message.from_user.username)
+
         async with get_db() as db:
-            cursor = await db.execute("SELECT last_claim, coins FROM users WHERE user_id = ?", (user_id,))
-            row = await cursor.fetchone()
+            cur = await db.execute(
+                "SELECT last_claim, coins FROM users WHERE user_id = ?", (user_id,)
+            )
+            row = await cur.fetchone()
             last_claim = row["last_claim"] if row else 0
             balance = row["coins"] if row else 0
-        
+
         time_passed = now - last_claim
         if time_passed < COOLDOWN_SECONDS:
+            # п.2.1 — стрик обновляем даже при кулдауне
+            streak, bonus, new_balance = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
-            hours = remaining // 3600
-            minutes = (remaining % 3600) // 60
-            seconds = remaining % 60
-            
-            await message.reply(
-                f"<blockquote><tg-emoji emoji-id='{5451646226975955576}'>⏳</tg-emoji> <b>{nickname}</b>, следующую карточку можно будет получить через: <b>{hours}ч {minutes}м {seconds}с</b></blockquote>",
-                reply_markup=get_card_action_keyboard(user_id, balance)
+            h, m = remaining // 3600, (remaining % 3600) // 60
+            text = (
+                f"🕘 <b>{mention}</b>, придётся немного подождать!\n\n"
+                f"Следующую карточку можно будет получить через <b>{h} ч {m} мин</b>"
             )
+            if bonus > 0 and streak > 0:
+                text += (
+                    f"\n\n<blockquote>🔥 Стрик • <b>{streak} дней</b>\n"
+                    f"🪙 Бонус • +{bonus} (баланс: {new_balance})</blockquote>"
+                )
+            elif streak == 1:
+                text += (
+                    "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
+                    "Это значит, что вы начали серию ежедневных заходов. "
+                    "Со 2-го дня за стрик начисляются бонусные монеты — "
+                    "не пропускайте дни, чтобы увеличить награду.</blockquote>"
+                )
+            await message.reply(text, reply_markup=get_card_action_keyboard(user_id, balance))
             return
-        
-        # Выдача карточки
-        card_data, status = await issue_card(user_id, message.from_user.username, check_cooldown=True)
-        
-        if status == "all_collected":
-            await message.reply(
-                f"<blockquote><b><tg-emoji emoji-id='{5436040291507247633}'>🎉</tg-emoji> {nickname}, ты собрал(-а) все доступные карточки на данный момент!</b> Пожалуйста, дождитесь добавления новых</blockquote>"
-            )
+
+        card, status = await issue_card(user_id, check_cooldown=True)
+        if status != "success" or card is None:
+            await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
             return
-        elif status == "error" or card_data is None:
-            await message.reply(
-                "<blockquote><b>❌ Произошла ошибка. Попробуйте позже.</b></blockquote>"
-            )
-            return
-        
-        # Отправляем карточку
-        rarity_title = RARITIES[card_data["rarity"]]["name"]
-        caption = (
-            f"<blockquote><b><tg-emoji emoji-id='{5436040291507247633}'>🎉</tg-emoji> {nickname}</b>, тебе выпала новая карточка: <b>{card_data['name']}</b>\n\n"
-            f"<tg-emoji emoji-id='{5361837567463399422}'>🔮</tg-emoji> Редкость: <b>{rarity_title}</b>\n"
-            f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>+{card_data['coins_earned']} (всего: {card_data['balance']})</b></blockquote>"
-        )
-        
-        await message.reply_photo(
-            photo=card_data["photo_id"], 
-            caption=caption, 
-            reply_markup=get_after_card_keyboard(user_id, card_data["balance"])
-        )
-        
-        # Проверяем стрик
+
+        # Стрик
         streak, bonus, new_balance = await check_and_update_streak(user_id)
+
+        # п.9 — стрик как blockquote внутри сообщения о карточке
+        caption = _card_caption(mention, card)
         if bonus > 0 and streak > 0:
-            await message.reply(
-                f"<blockquote><tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> <b>{nickname}</b>, твой стрик <b>{streak} день</b>\n"
-                f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>+{bonus} (всего: {new_balance})</b></blockquote>"
+            caption += (
+                f"\n\n<blockquote>🔥 Стрик • <b>{streak} дней</b>\n"
+                f"🪙 Бонус • +{bonus} (баланс: {new_balance})</blockquote>"
             )
-            
+        elif streak == 1:
+            caption += (
+                "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
+                "Это значит, что вы начали серию ежедневных заходов. "
+                "Со 2-го дня за стрик начисляются бонусные монеты — "
+                "не пропускайте дни, чтобы увеличить награду.</blockquote>"
+            )
+
+        try:
+            await message.reply_photo(
+                photo=card["photo_id"],
+                caption=caption,
+                reply_markup=get_after_card_keyboard(user_id, card["balance"]),
+            )
+        except TelegramBadRequest as e:
+            logger.error(f"reply_photo bad request: {e}")
+            await message.reply(caption, reply_markup=get_after_card_keyboard(user_id, card["balance"]))
     except Exception as e:
         logger.error(f"Ошибка в get_card_handler: {e}")
-        await message.reply("<blockquote><b>❌ Произошла ошибка. Попробуйте позже.</b></blockquote>")
+        await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
+def _card_caption(mention: str, card: dict) -> str:
+    r = RARITIES[card["rarity"]]
+    title = "✨ Новая карточка" if not card.get("is_duplicate") else "🔁 Дубликат"
+    return (
+        f"{title} • <b>{esc(card['name'])}</b>\n\n"
+        f"{r['icon']} Редкость • <b>{r['name']}</b>\n"
+        f"🪙 Монеты • <b>+{card['coins_earned']}</b> [{card['balance']}]"
+    )
+
+
+# ---------- Профиль ----------
 @router.message(F.text == "👤 Профиль")
 @router.message(F.text.lower().strip() == "профиль")
 @router.message(Command("profile"))
 async def show_profile(message: Message):
-    user_id = message.from_user.id
-    
     try:
-        user = await get_or_create_user(
-            user_id,
-            message.from_user.username,
-            message.from_user.full_name
+        await get_or_create_user(
+            message.from_user.id, message.from_user.username, message.from_user.full_name
         )
-        
-        # Получаем данные пользователя
-        async with get_db() as db:
-            cursor = await db.execute("""
-                SELECT u.nickname, u.coins, u.registration, u.streak, u.streak_bonus,
-                       COUNT(i.card_id) as cards_count
-                FROM users u
-                LEFT JOIN inventory i ON u.user_id = i.user_id
-                WHERE u.user_id = ?
-                GROUP BY u.user_id
-            """, (user_id,))
-            row = await cursor.fetchone()
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM cards")
-            total_cards = (await cursor.fetchone())[0]
-        
-        nickname = row["nickname"] or message.from_user.full_name
-        coins = row["coins"]
-        registration = row["registration"] or int(time.time())
-        streak = row["streak"]
-        streak_bonus = row["streak_bonus"]
-        cards_count = row["cards_count"]
-        
-        reg_date = datetime.fromtimestamp(registration).strftime("%d.%m.%Y %H:%M")
-        
-        # Пытаемся получить фото профиля пользователя
+        photo, caption, kb = await render_profile(message.bot, message.from_user.id)
         try:
-            photos = await message.bot.get_user_profile_photos(user_id, limit=1)
-            if photos.total_count > 0:
-                photo = photos.photos[0][-1]
-                await message.reply_photo(
-                    photo=photo.file_id,
-                    caption=f"<blockquote><tg-emoji emoji-id='{5373012449597335010}'>👤</tg-emoji> Тебя зовут <b>{nickname}</b>\n\n"
-                            f"🆔 ID: <code>{user_id}</code>\n"
-                            f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
-                            f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
-                            f"📅 Регистрация: <b>{reg_date}</b>\n"
-                            f"<tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus})</blockquote>",
-                    reply_markup=get_profile_kb()
-                )
-                return
-        except:
-            pass
-        
-        # Если нет фото профиля, создаем аватарку с инициалами
-        initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
-        avatar = await create_avatar_photo(initials)
-        
-        await message.reply_photo(
-            photo=avatar,
-            caption=f"<blockquote><tg-emoji emoji-id='{5373012449597335010}'>👤</tg-emoji> Тебя зовут <b>{nickname}</b>\n\n"
-                    f"🆔 ID: <code>{user_id}</code>\n"
-                    f"<tg-emoji emoji-id='{5375152498656961898}'>🎀</tg-emoji> Милота: <b>{coins}</b>\n"
-                    f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n"
-                    f"📅 Регистрация: <b>{reg_date}</b>\n"
-                    f"<tg-emoji emoji-id='{5420315771991497307}'>🔥</tg-emoji> Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus})</blockquote>",
-            reply_markup=get_profile_kb()
-        )
-        
+            await message.reply_photo(photo=photo, caption=caption, reply_markup=kb)
+        except TelegramBadRequest as e:
+            logger.error(f"profile photo bad request: {e}")
+            await message.reply(caption, reply_markup=kb)
     except Exception as e:
         logger.error(f"Ошибка в show_profile: {e}")
-        await message.reply("<blockquote><b>❌ Произошла ошибка. Попробуйте позже.</b></blockquote>")
+        await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
-# Изменение ника
-@router.callback_query(NicknameCallback.filter(F.action == "change"))
-async def change_nickname_start(callback: CallbackQuery, state: FSMContext):
-    if callback.message.chat.type != "private":
-        await callback.answer("❗️ Для изменения ника, пожалуйста, перейдите в бота: @milosttbot", show_alert=True)
-        return
-    
-    await state.set_state(NicknameSG.new_nickname)
-    
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📥 Взять из Telegram", callback_data=NicknameCallback(action="from_telegram").pack())
-    builder.button(text="❌ Отмена", callback_data=NicknameCallback(action="cancel").pack())
-    builder.adjust(1)
-    
-    await callback.message.answer(
-        "<blockquote><b>✏️ Введите новый ник:</b></blockquote>",
-        reply_markup=builder.as_markup()
-    )
-    await callback.answer()
-
-
-@router.callback_query(NicknameCallback.filter(F.action == "from_telegram"))
-async def change_nickname_from_telegram(callback: CallbackQuery, state: FSMContext):
-    if callback.message.chat.type != "private":
-        await callback.answer("❗️ Для изменения ника, пожалуйста, перейдите в бота: @milosttbot", show_alert=True)
-        return
-    
-    user = callback.from_user
-    new_nickname = user.username or user.full_name or f"User{user.id}"
-    
+@router.callback_query(BackToProfileCallback.filter())
+async def process_back_to_profile(callback: CallbackQuery):
     try:
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE users SET nickname = ? WHERE user_id = ?",
-                (new_nickname, user.id)
-            )
-        
-        await callback.message.answer(
-            f"<blockquote><b>✅ Ник изменен на: {new_nickname}</b></blockquote>"
-        )
-        await state.clear()
+        photo, caption, kb = await render_profile(callback.message.bot, callback.from_user.id)
+        await show_or_edit_photo(callback.message, photo, caption, kb)
         await callback.answer()
     except Exception as e:
-        logger.error(f"Ошибка изменения ника: {e}")
+        logger.error(f"Ошибка возврата в профиль: {e}")
         await callback.answer("Произошла ошибка", show_alert=True)
 
 
-@router.callback_query(NicknameCallback.filter(F.action == "cancel"))
-async def change_nickname_cancel(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.answer("<blockquote><b>✅ Изменение ника отменено</b></blockquote>")
-    await callback.answer()
+# ---------- Смена ника (п.5.4/5.5/5.6) ----------
+def validate_nickname(raw: str) -> Optional[str]:
+    raw = raw.strip()
+    if not (2 <= len(raw) <= 32):
+        return None
+    if URL_RE.search(raw):
+        return None
+    if not NICKNAME_RE.match(raw):
+        return None
+    return raw
 
 
-@router.message(NicknameSG.new_nickname, F.text)
-async def change_nickname_save(message: Message, state: FSMContext):
-    if message.chat.type != "private":
-        await message.reply("<blockquote><b>❌ Изменить ник можно только в личных сообщениях с ботом</b></blockquote>")
-        await state.clear()
-        return
-    
-    new_nickname = message.text.strip()
-    
-    if len(new_nickname) > 32:
-        await message.reply("<blockquote><b>❌ Ник слишком длинный (максимум 32 символа)</b></blockquote>")
-        return
-    
+@router.message(Command("nickname"))
+async def nickname_cmd(message: Message, command: Command):
     user_id = message.from_user.id
-    
-    try:
-        async with get_db() as db:
-            await db.execute(
-                "UPDATE users SET nickname = ? WHERE user_id = ?",
-                (new_nickname, user_id)
-            )
-        
+    await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
+
+    arg = (command.args or "").strip()
+
+    # /nickname reset
+    if arg.lower() == "reset":
+        default = default_nickname(message.from_user.username, message.from_user.full_name, user_id)
+        b = InlineKeyboardBuilder()
+        b.button(text="✅ Подтвердить", callback_data=NickConfirmCallback(action="reset").pack())
+        b.button(text="❌ Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
+        b.adjust(2)
         await message.reply(
-            f"<blockquote><b>✅ Ник изменен на: {new_nickname}</b></blockquote>"
+            f"♻️ <b>Сбросить ник?</b>\n\n"
+            f"Будет установлен: <b>{esc(default)}</b>\n"
+            f"Сброс — <b>бесплатно</b>.",
+            reply_markup=b.as_markup(),
         )
-        await state.clear()
-    except Exception as e:
-        logger.error(f"Ошибка сохранения ника: {e}")
-        await message.reply("<blockquote><b>❌ Произошла ошибка</b></blockquote>")
+        return
+
+    # /nickname [ник]
+    if not arg:
+        await message.reply(
+            f"✏️ Использование: <code>/nickname НовыйНик</code>\n"
+            f"Смена ника стоит <b>{NICKNAME_COST} 🪙</b>.\n"
+            f"Сброс: <code>/nickname reset</code> (бесплатно)."
+        )
+        return
+
+    new_nick = validate_nickname(arg)
+    if not new_nick:
+        await message.reply(
+            "❌ <b>Неверный ник.</b> Требования: 2–32 символа, "
+            "без ссылок и упоминаний."
+        )
+        return
+
+    # проверяем баланс
+    row = await get_user_row(user_id)
+    balance = row["coins"] if row else 0
+    if balance < NICKNAME_COST:
+        await message.reply(
+            f"⚠️ Недостаточно монет. Нужно <b>{NICKNAME_COST} 🪙</b>, у вас <b>{balance} 🪙</b>."
+        )
+        return
+
+    b = InlineKeyboardBuilder()
+    # value передаём как есть — callback_data должна быть короткой, ник <=32
+    b.button(
+        text="✅ Подтвердить",
+        callback_data=NickConfirmCallback(action="apply", value=new_nick).pack(),
+    )
+    b.button(text="❌ Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
+    b.adjust(2)
+    await message.reply(
+        f"✏️ <b>Сменить ник?</b>\n\n"
+        f"Новый ник: <b>{esc(new_nick)}</b>\n"
+        f"Стоимость: <b>{NICKNAME_COST} 🪙</b> (баланс: {balance})",
+        reply_markup=b.as_markup(),
+    )
 
 
-# Топ игроков
-async def get_top_players(limit: int = 10):
-    """Получает топ игроков по монетам"""
-    try:
+@router.callback_query(NickConfirmCallback.filter())
+async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCallback):
+    user_id = callback.from_user.id
+
+    if callback_data.action == "cancel":
+        await callback.message.edit_text("✅ <b>Отменено</b>")
+        await callback.answer()
+        return
+
+    if callback_data.action == "reset":
+        default = default_nickname(
+            callback.from_user.username, callback.from_user.full_name, user_id
+        )
         async with get_db() as db:
-            cursor = await db.execute(
-                """
-                SELECT nickname, coins, user_id
-                FROM users
-                ORDER BY coins DESC
-                LIMIT ?
-                """,
-                (limit,)
+            await db.execute("UPDATE users SET nickname = ? WHERE user_id = ?", (default, user_id))
+        await callback.message.edit_text(f"✅ <b>Ник сброшен:</b> {esc(default)}")
+        await callback.answer()
+        return
+
+    if callback_data.action == "apply":
+        new_nick = callback_data.value
+        if not validate_nickname(new_nick):
+            await callback.message.edit_text("❌ <b>Неверный ник</b>")
+            await callback.answer()
+            return
+
+        async with get_db() as db:
+            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+            row = await cur.fetchone()
+            balance = row["coins"] if row else 0
+            if balance < NICKNAME_COST:
+                await callback.message.edit_text(
+                    f"⚠️ Недостаточно монет (нужно {NICKNAME_COST} 🪙)."
+                )
+                await callback.answer()
+                return
+            await db.execute(
+                "UPDATE users SET nickname = ?, coins = coins - ? WHERE user_id = ?",
+                (new_nick, NICKNAME_COST, user_id),
             )
-            return await cursor.fetchall()
-    except Exception as e:
-        logger.error(f"Ошибка получения топа: {e}")
-        return []
+        await callback.message.edit_text(
+            f"✅ <b>Ник изменён:</b> {esc(new_nick)}\n"
+            f"Списано: <b>{NICKNAME_COST} 🪙</b>"
+        )
+        await callback.answer()
+
+
+# Старый вход «Изменить ник» из профиля — теперь просто подсказка
+@router.callback_query(NicknameCallback.filter(F.action == "change"))
+async def change_nickname_hint(callback: CallbackQuery):
+    await callback.answer(
+        f"Используйте /nickname НовыйНик ({NICKNAME_COST} 🪙) "
+        f"или /nickname reset",
+        show_alert=True,
+    )
+
+
+# ---------- Топ (п.6) ----------
+async def build_top_text(kind: str, current_user_id: int) -> str:
+    """Возвращает готовый текст топа с позицией пользователя."""
+    limit = 10
+    async with get_db() as db:
+        if kind == "cards":
+            # топ по сумме amount
+            cur = await db.execute(
+                """SELECT u.user_id, u.nickname, COALESCE(SUM(i.amount), 0) AS value
+                   FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
+                   GROUP BY u.user_id
+                   ORDER BY value DESC, u.user_id ASC
+                   LIMIT ?""",
+                (limit,),
+            )
+            top = await cur.fetchall()
+            cur = await db.execute(
+                """SELECT value FROM (
+                       SELECT u.user_id, COALESCE(SUM(i.amount), 0) AS value
+                       FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
+                       GROUP BY u.user_id
+                   ) WHERE user_id = ?""",
+                (current_user_id,),
+            )
+            my_row = await cur.fetchone()
+            my_value = my_row["value"] if my_row else 0
+            cur = await db.execute(
+                """SELECT COUNT(*) + 1 FROM (
+                       SELECT u.user_id, COALESCE(SUM(i.amount), 0) AS value
+                       FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
+                       GROUP BY u.user_id
+                   ) WHERE value > ?""",
+                (my_value,),
+            )
+            my_rank = (await cur.fetchone())[0]
+            unit = "🃏"
+            title = "🃏 Топ по карточкам"
+        elif kind == "streak":
+            cur = await db.execute(
+                "SELECT user_id, nickname, streak AS value FROM users "
+                "ORDER BY value DESC, user_id ASC LIMIT ?",
+                (limit,),
+            )
+            top = await cur.fetchall()
+            cur = await db.execute("SELECT streak AS value FROM users WHERE user_id = ?", (current_user_id,))
+            my_row = await cur.fetchone()
+            my_value = my_row["value"] if my_row else 0
+            cur = await db.execute(
+                "SELECT COUNT(*) + 1 FROM users WHERE streak > ?", (my_value,)
+            )
+            my_rank = (await cur.fetchone())[0]
+            unit = "🔥"
+            title = "🔥 Топ по стрику"
+        else:  # coins
+            cur = await db.execute(
+                "SELECT user_id, nickname, coins AS value FROM users "
+                "ORDER BY value DESC, user_id ASC LIMIT ?",
+                (limit,),
+            )
+            top = await cur.fetchall()
+            cur = await db.execute("SELECT coins AS value FROM users WHERE user_id = ?", (current_user_id,))
+            my_row = await cur.fetchone()
+            my_value = my_row["value"] if my_row else 0
+            cur = await db.execute("SELECT COUNT(*) + 1 FROM users WHERE coins > ?", (my_value,))
+            my_rank = (await cur.fetchone())[0]
+            unit = "🪙"
+            title = "🪙 Топ по монетам"
+
+        # текущий ник пользователя для отображения
+        cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (current_user_id,))
+        my_row2 = await cur.fetchone()
+        my_nick = my_row2["nickname"] if my_row2 and my_row2["nickname"] else f"User{current_user_id}"
+
+    medals = ["🥇", "🥈", "🥉"]
+    text = f"<b>{title}</b>\n\n"
+    for i, row in enumerate(top, 1):
+        medal = medals[i - 1] if i <= 3 else f"{i}."
+        nick = row["nickname"] or f"User{row['user_id']}"
+        # п.8 — упоминание. username у нас нет в БД, даём ссылку по id.
+        mention = user_mention(row["user_id"], nick, None)
+        text += f"{medal} {mention} • <b>{row['value']}</b> {unit}\n"
+
+    text += f"\n📌 Ваше место: <b>#{my_rank}</b> — {esc(my_nick)} • <b>{my_value}</b> {unit}"
+    return text
 
 
 @router.message(F.text == "🏆 Топ игроков")
 @router.message(Command("top"))
 async def show_top_players(message: Message):
-    top_players = await get_top_players(10)
-    
-    if not top_players:
-        await message.reply("<blockquote><b>📊 Топ пока пуст</b></blockquote>")
+    if rate_limited(f"top:{message.from_user.id}", limit=3, window=5):
         return
-    
-    text = "<b>🏆 Топ игроков по милоте:</b>\n\n"
-
-    text += "<blockquote>"
-    
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (nickname, coins, user_id) in enumerate(top_players, 1):
-        medal = medals[i - 1] if i <= 3 else f"{i}."
-        text += f"{medal} <b>{nickname}</b> — <b>{coins}</b> 🩷\n"
-    
-    text += "</blockquote>"
-    
-    await message.reply(text)
+    try:
+        text = await build_top_text("coins", message.from_user.id)
+        await message.reply(text, reply_markup=get_top_keyboard("coins"))
+    except Exception as e:
+        logger.error(f"Ошибка топа: {e}")
+        await message.reply("❌ <b>Ошибка топа</b>")
 
 
-# Просмотр коллекции
+@router.callback_query(TopCallback.filter())
+async def switch_top(callback: CallbackQuery, callback_data: TopCallback):
+    if rate_limited(f"top:{callback.from_user.id}", limit=5, window=5):
+        await callback.answer("Слишком часто")
+        return
+    try:
+        text = await build_top_text(callback_data.kind, callback.from_user.id)
+        try:
+            await callback.message.edit_text(
+                text, reply_markup=get_top_keyboard(callback_data.kind)
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                text, reply_markup=get_top_keyboard(callback_data.kind)
+            )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка переключения топа: {e}")
+        await callback.answer("Ошибка", show_alert=True)
+
+
+# ---------- Коллекция ----------
 async def get_collection_main_keyboard(user_id: int):
-    """Генерирует клавиатуру главного меню коллекции с подсчетом карточек"""
-    try:
-        async with get_db() as db:
-            # Считаем количество карточек каждого типа у пользователя
-            cursor = await db.execute(
-                """
-                SELECT c.rarity, COUNT(i.card_id)
-                FROM inventory i
-                JOIN cards c ON i.card_id = c.id
-                WHERE i.user_id = ?
-                GROUP BY c.rarity
-                """,
-                (user_id,)
-            )
-            stats = dict(await cursor.fetchall())
-            
-            # Общее количество карточек в игре
-            cursor = await db.execute("SELECT COUNT(*) FROM cards")
-            total_cards_in_game = (await cursor.fetchone())[0]
-            
-            inline_keyboard = []
-            total_cards = sum(stats.values())
-            
-            # Создаем кнопки для всех редкостей
-            for r_key, r_info in RARITIES.items():
-                count = stats.get(r_key, 0)
-                
-                cursor = await db.execute("SELECT COUNT(*) FROM cards WHERE rarity = ?", (r_key,))
-                total_of_rarity = (await cursor.fetchone())[0]
-                
-                btn_text = f"{r_info['name']} ({count}/{total_of_rarity})"
-                inline_keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text=btn_text,
-                            callback_data=RaritySelectCallback(
-                                rarity=r_key, page=0
-                            ).pack(),
-                        )
-                    ]
+    async with get_db() as db:
+        cur = await db.execute(
+            """SELECT c.rarity, COALESCE(SUM(i.amount), 0) FROM inventory i
+               JOIN cards c ON i.card_id = c.id
+               WHERE i.user_id = ? GROUP BY c.rarity""",
+            (user_id,),
+        )
+        stats = dict(await cur.fetchall())
+        cur = await db.execute("SELECT COUNT(*) FROM cards")
+        total_in_game = (await cur.fetchone())[0]
+
+        rows = []
+        total_cards = sum(stats.values())
+        for r_key, r_info in RARITIES.items():
+            cur = await db.execute("SELECT COUNT(*) FROM cards WHERE rarity = ?", (r_key,))
+            total_of_rarity = (await cur.fetchone())[0]
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"{r_info['name']} ({stats.get(r_key, 0)}/{total_of_rarity})",
+                    callback_data=RaritySelectCallback(rarity=r_key, page=0).pack(),
                 )
-            
-            # Добавляем кнопку "Назад в профиль"
-            inline_keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text="👤 Перейти в профиль",
-                        callback_data=BackToProfileCallback().pack()
-                    )
-                ]
+            ])
+        rows.append([
+            InlineKeyboardButton(
+                text="👤 Перейти в профиль",
+                callback_data=BackToProfileCallback().pack(),
             )
-            
-            keyboard = (
-                InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-                if inline_keyboard
-                else None
-            )
-            return keyboard, total_cards, total_cards_in_game
-    except Exception as e:
-        logger.error(f"Ошибка создания клавиатуры коллекции: {e}")
-        return None, 0, 0
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=rows), total_cards, total_in_game
 
 
-async def get_user_profile_photo(bot: Bot, user_id: int) -> Optional[str]:
-    """Получает file_id фото профиля пользователя или None если фото нет"""
-    try:
-        photos = await bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count > 0:
-            return photos.photos[0][-1].file_id
-    except Exception as e:
-        logger.error(f"Ошибка получения фото профиля: {e}")
-    return None
-
-
+@router.message(Command("collection"))
 @router.callback_query(F.data == "collection")
-async def show_collection(callback: CallbackQuery):
-    # Проверка, что запрос из личного чата
-    if callback.message.chat.type != "private":
-        await callback.answer(
-            text="❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot",
-            show_alert=True
-        )
-        return
-    
-    user_id = callback.from_user.id
-    keyboard, total_cards, total_cards_in_game = await get_collection_main_keyboard(user_id)
-    
-    await callback.answer()
-    
-    if total_cards == 0:
-        text = "<blockquote><b>📦 Твоя коллекция пока пуста. Отправь команду «милость», чтобы получить первую карточку</b></blockquote>"
-        await callback.message.edit_text(text)
-        return
-    
-    # Получаем ник для аватарки
-    nickname = await get_user_nickname(user_id)
-    
-    # Пытаемся получить фото профиля
-    photo_id = await get_user_profile_photo(callback.message.bot, user_id)
-    
-    # Если фото профиля нет, создаем аватар-заглушку
-    if not photo_id:
-        initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
-        avatar = await create_avatar_photo(initials)
-        photo_id = avatar
-    
-    text = f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>"
-    
-    # Проверяем, есть ли уже фото в сообщении
-    if callback.message.photo:
-        await callback.message.edit_media(
-            media=InputMediaPhoto(media=photo_id, caption=text),
-            reply_markup=keyboard
-        )
-    else:
-        await callback.message.delete()
-        await callback.message.answer_photo(
-            photo=photo_id,
-            caption=text,
-            reply_markup=keyboard
-        )
+async def show_collection(event):
+    callback = event if isinstance(event, CallbackQuery) else None
+    message = event.message if callback else event
+    user_id = event.from_user.id
+    try:
+        photo, caption, keyboard, total = await render_collection(message.bot, user_id)
+        if callback:
+            await callback.answer()
+        if total == 0:
+            if message.photo:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+            await message.answer(caption, reply_markup=keyboard)
+            return
+        await show_or_edit_photo(message, photo, caption, keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка коллекции: {e}")
+        if callback:
+            await callback.answer("Ошибка", show_alert=True)
+        else:
+            await message.reply("❌ <b>Ошибка</b>")
 
 
 @router.callback_query(RaritySelectCallback.filter())
-async def process_rarity_view(
-        callback: CallbackQuery, callback_data: RaritySelectCallback
-):
-    user_id = callback.from_user.id
-    rarity = callback_data.rarity
-    page = callback_data.page
-    
+async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySelectCallback):
+    user_id, rarity, page = callback.from_user.id, callback_data.rarity, callback_data.page
     try:
         async with get_db() as db:
-            # Получаем все карточки этой редкости у пользователя
-            cursor = await db.execute(
-                """
-                SELECT c.name, c.photo_id, i.claim_time, c.id
-                FROM inventory i
-                JOIN cards c ON i.card_id = c.id
-                WHERE i.user_id = ? AND c.rarity = ?
-                ORDER BY i.claim_time DESC
-                """,
-                (user_id, rarity)
+            cur = await db.execute(
+                """SELECT c.name, c.photo_id, i.claim_time, c.id, i.amount
+                   FROM inventory i
+                   JOIN cards c ON i.card_id = c.id
+                   WHERE i.user_id = ? AND c.rarity = ?
+                   ORDER BY i.claim_time DESC""",
+                (user_id, rarity),
             )
-            cards = await cursor.fetchall()
-            
-            if not cards:
-                await callback.answer(
-                    "У вас больше нет карточек этого типа.", show_alert=True
-                )
-                return
-            
-            total_pages = len(cards)
-            
-            # Защита от выхода за пределы списка
-            if page >= total_pages:
-                page = total_pages - 1
-            elif page < 0:
-                page = 0
-            
-            card = cards[page]
-            card_name, photo_id, claim_time, card_id = card["name"], card["photo_id"], card["claim_time"], card["id"]
-            rarity_name = RARITIES.get(rarity, {}).get("name", rarity)
-            
-            claim_date = datetime.fromtimestamp(claim_time).strftime("%d.%m.%Y %H:%M") if claim_time else "Неизвестно"
-            
-            caption = (
-                f"<blockquote><b>🃏 {card_name}\n\n"
-                f"🎲 Редкость: {rarity_name}\n"
-                f"📅 Получена: {claim_date}</b></blockquote>"
-            )
-            
-            nav_buttons = []
-            if page > 0:
-                nav_buttons.append(
-                    InlineKeyboardButton(
-                        text="◀️",
-                        callback_data=RaritySelectCallback(
-                            rarity=rarity, page=page - 1
-                        ).pack(),
-                    )
-                )
-            
-            nav_buttons.append(
-                InlineKeyboardButton(
-                    text=f"{page + 1}/{total_pages}", callback_data="ignore"
-                )
-            )
-            
-            if page < total_pages - 1:
-                nav_buttons.append(
-                    InlineKeyboardButton(
-                        text="▶️",
-                        callback_data=RaritySelectCallback(
-                            rarity=rarity, page=page + 1
-                        ).pack(),
-                    )
-                )
-            
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    nav_buttons,
-                    [
-                        InlineKeyboardButton(
-                            text="🔙 Назад к категориям",
-                            callback_data=MainMenuCallback().pack(),
-                        )
-                    ],
-                ]
-            )
-            
-            # Если уже открыто фото — обновляем медиа
-            if callback.message.photo:
-                await callback.message.edit_media(
-                    media=InputMediaPhoto(media=photo_id, caption=caption),
-                    reply_markup=keyboard
-                )
-            else:
-                await callback.message.delete()
-                await callback.message.answer_photo(
-                    photo=photo_id, caption=caption, reply_markup=keyboard
-                )
-            
-            await callback.answer()
+            cards = await cur.fetchall()
+
+        if not cards:
+            await callback.answer("У вас больше нет карточек этого типа.", show_alert=True)
+            return
+
+        total_pages = len(cards)
+        page = max(0, min(page, total_pages - 1))
+        card = cards[page]
+        info = RARITIES.get(rarity, {})
+        # п.7.2 — количество
+        caption = (
+            f"🃏 <b>{esc(card['name'])}</b>\n\n"
+            f"{info.get('icon', '')} Редкость: <b>{info.get('name', rarity)}</b>\n"
+            f"🪙 Монеты: <b>+{info.get('coins', 0)}</b>\n"
+            f"🔢 Количество: <b>{card['amount']}</b>"
+        )
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="◀️",
+                callback_data=RaritySelectCallback(rarity=rarity, page=page - 1).pack(),
+            ))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="ignore"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="▶️",
+                callback_data=RaritySelectCallback(rarity=rarity, page=page + 1).pack(),
+            ))
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            nav,
+            [InlineKeyboardButton(text="🔙 К категориям", callback_data=MainMenuCallback().pack())],
+        ])
+        await show_or_edit_photo(callback.message, card["photo_id"], caption, keyboard)
+        await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка просмотра коллекции: {e}")
         await callback.answer("Произошла ошибка", show_alert=True)
@@ -1127,104 +1144,11 @@ async def process_rarity_view(
 
 @router.callback_query(MainMenuCallback.filter())
 async def process_back_to_main(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    keyboard, total_cards, total_cards_in_game = await get_collection_main_keyboard(user_id)
-    
-    # Получаем ник для аватарки
-    nickname = await get_user_nickname(user_id)
-    
-    # Пытаемся получить фото профиля
-    photo_id = await get_user_profile_photo(callback.message.bot, user_id)
-    
-    # Если фото профиля нет, создаем аватар-заглушку
-    if not photo_id:
-        initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
-        avatar = await create_avatar_photo(initials)
-        photo_id = avatar
-    
-    text = f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>"
-    
-    if callback.message.photo:
-        await callback.message.edit_media(
-            media=InputMediaPhoto(media=photo_id, caption=text),
-            reply_markup=keyboard
-        )
-    else:
-        await callback.message.delete()
-        await callback.message.answer_photo(
-            photo=photo_id,
-            caption=text,
-            reply_markup=keyboard
-        )
-    
+    photo, caption, keyboard, _ = await render_collection(
+        callback.message.bot, callback.from_user.id
+    )
+    await show_or_edit_photo(callback.message, photo, caption, keyboard)
     await callback.answer()
-
-
-@router.callback_query(BackToProfileCallback.filter())
-async def process_back_to_profile(callback: CallbackQuery):
-    """Обработчик возврата в профиль из коллекции"""
-    user_id = callback.from_user.id
-    
-    try:
-        # Получаем данные пользователя
-        async with get_db() as db:
-            cursor = await db.execute("""
-                SELECT u.nickname, u.coins, u.registration, u.streak, u.streak_bonus,
-                       COUNT(i.card_id) as cards_count
-                FROM users u
-                LEFT JOIN inventory i ON u.user_id = i.user_id
-                WHERE u.user_id = ?
-                GROUP BY u.user_id
-            """, (user_id,))
-            row = await cursor.fetchone()
-            
-            cursor = await db.execute("SELECT COUNT(*) FROM cards")
-            total_cards = (await cursor.fetchone())[0]
-        
-        nickname = row["nickname"] or f"User{user_id}"
-        coins = row["coins"]
-        registration = row["registration"] or int(time.time())
-        streak = row["streak"]
-        streak_bonus = row["streak_bonus"]
-        cards_count = row["cards_count"]
-        
-        reg_date = datetime.fromtimestamp(registration).strftime("%d.%m.%Y %H:%M")
-        
-        # Пытаемся получить фото профиля пользователя
-        photo_id = await get_user_profile_photo(callback.message.bot, user_id)
-        
-        # Если фото профиля нет, создаем аватарку с инициалами
-        if not photo_id:
-            initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
-            avatar = await create_avatar_photo(initials)
-            photo_id = avatar
-        
-        caption = f"<blockquote>👤 Тебя зовут <b>{nickname}</b>\n\n" \
-                  f"🆔 ID: <code>{user_id}</code>\n" \
-                  f"🩷 Баланс: <b>{coins} милоты</b>\n" \
-                  f"🃏 Карточек: <b>{cards_count}/{total_cards}</b>\n" \
-                  f"📅 Регистрация: <b>{reg_date}</b>\n" \
-                  f"🔥 Стрик: <b>{streak} дней</b> (бонус: +{streak_bonus} монет/день)</blockquote>"
-        
-        # Если сообщение уже с фото - редактируем
-        if callback.message.photo:
-            await callback.message.edit_media(
-                media=InputMediaPhoto(media=photo_id, caption=caption),
-                reply_markup=get_profile_kb()
-            )
-        else:
-            # Если сообщение без фото - удаляем и отправляем новое
-            await callback.message.delete()
-            await callback.message.answer_photo(
-                photo=photo_id,
-                caption=caption,
-                reply_markup=get_profile_kb()
-            )
-        
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"Ошибка возврата в профиль: {e}")
-        await callback.answer("Произошла ошибка", show_alert=True)
 
 
 @router.callback_query(F.data == "ignore")
@@ -1232,141 +1156,100 @@ async def ignore_callback(callback: CallbackQuery):
     await callback.answer()
 
 
-# Обработка действий с карточкой
+# ---------- Действия с карточкой ----------
 @router.callback_query(CardActionCallback.filter())
 async def handle_card_action(callback: CallbackQuery, callback_data: CardActionCallback):
     user_id = callback.from_user.id
     action = callback_data.action
-    target_user_id = callback_data.user_id if callback_data.user_id else user_id
-    
-    # Проверяем, что кнопку нажал именно тот пользователь, кому адресовано сообщение
-    if user_id != target_user_id:
-        await callback.answer("❗️ Эта кнопка не для вас", show_alert=True)
-        return
-    
-    try:
-        # Получаем ник из базы данных
-        nickname = await get_user_nickname(user_id)
-        
-        if action == "instant" or action == "another":
-            # Проверяем баланс
-            async with get_db() as db:
-                cursor = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-                row = await cursor.fetchone()
-                balance = row["coins"] if row else 0
-            
-            if balance < INSTANT_COST:
-                await callback.answer(f"❗️ Не хватает монет. Для получения ещё одной карточки требуется {INSTANT_COST}, на Вашем балансе — {balance}", show_alert=True)
-                return
-            
-            await callback.answer("⏳ Получаем карточку...")
-            
-            # Списываем монеты и выдаем карточку
-            async with get_db() as db:
-                await db.execute("BEGIN TRANSACTION")
-                try:
-                    # Списываем монеты
-                    await db.execute(
-                        "UPDATE users SET coins = coins - ? WHERE user_id = ?",
-                        (INSTANT_COST, user_id)
-                    )
-                    
-                    # Обновляем last_claim
-                    now = int(time.time())
-                    await db.execute(
-                        "UPDATE users SET last_claim = ? WHERE user_id = ?",
-                        (now, user_id)
-                    )
-                    
-                    await db.execute("COMMIT")
-                except Exception as e:
-                    await db.execute("ROLLBACK")
-                    logger.error(f"Ошибка списания монет: {e}")
-                    await callback.answer("Произошла ошибка", show_alert=True)
-                    return
-            
-            # Выдаем карточку
-            card_data, status = await issue_card(user_id, check_cooldown=False)
-            
-            if status == "all_collected":
-                # Возвращаем монеты, если все карточки собраны
-                async with get_db() as db:
-                    await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                        (INSTANT_COST, user_id)
-                    )
-                await callback.message.answer(
-                    f"<blockquote><b>🎉 {nickname}, ты собрал все доступные карточки! Монеты возвращены.</b></blockquote>"
-                )
-                await callback.answer()
-                return
-            elif status == "error" or card_data is None:
-                # Возвращаем монеты при ошибке
-                async with get_db() as db:
-                    await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                        (INSTANT_COST, user_id)
-                    )
-                await callback.message.answer(
-                    "<blockquote><b>❌ Произошла ошибка. Монеты возвращены.</b></blockquote>"
-                )
-                await callback.answer()
-                return
-            
-            rarity_title = RARITIES[card_data["rarity"]]["name"]
-            caption = (
-                f"<blockquote><b>🎉 {nickname}</b>, вам выпала новая карточка: <b>{card_data['name']}</b>!\n\n"
-                f"🎲 Редкость: <b>{rarity_title}</b>\n"
-                f"🩷 Милота: <b>+{card_data['coins_earned']} (всего: {card_data['balance']})</b></blockquote>"
-            )
-            
-            await callback.message.answer_photo(
-                photo=card_data["photo_id"], 
-                caption=caption, 
-                reply_markup=get_after_card_keyboard(user_id, card_data["balance"])
-            )
-            
-            # Проверяем стрик
-            streak, bonus, new_balance = await check_and_update_streak(user_id)
-            if bonus > 0 and streak > 0:
-                await callback.message.answer(
-                    f"<blockquote><b>🔥 {nickname}, ваш стрик {streak} день!</b>\n"
-                    f"🩷 Бонус за стрик: +{bonus} милоты (всего: {new_balance})</blockquote>"
-                )
-        
-        elif action == "collection":
-            # Проверка, что запрос из личного чата
-            if callback.message.chat.type != "private":
+    target = callback_data.user_id or user_id
 
+    if user_id != target:
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
+        return
+
+    if rate_limited(f"card-action:{user_id}", limit=6, window=10):
+        await callback.answer("Слишком часто")
+        return
+
+    try:
+        nickname = await get_user_nickname(user_id)
+        mention = user_mention(user_id, nickname, callback.from_user.username)
+
+        if action in ("instant", "another"):
+            async with get_db() as db:
+                cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+                row = await cur.fetchone()
+                balance = row["coins"] if row else 0
+
+            if balance < INSTANT_COST:
+                await callback.answer(f"⚠️ Требуется {INSTANT_COST} 🪙, у вас {balance} 🪙")
+                return
+
+            await callback.answer("⏳ Получаем карточку...")
+
+            now = int(time.time())
+            async with get_db() as db:
+                await db.execute(
+                    "UPDATE users SET coins = coins - ?, last_claim = ? WHERE user_id = ?",
+                    (INSTANT_COST, now, user_id),
+                )
+
+            card, status = await issue_card(user_id, check_cooldown=False)
+
+            if status != "success" or card is None:
+                async with get_db() as db:
+                    await db.execute(
+                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                        (INSTANT_COST, user_id),
+                    )
+                await callback.message.answer("❌ <b>Ошибка. Монеты возвращены.</b>")
+                return
+
+            streak, bonus, new_balance = await check_and_update_streak(user_id)
+
+            caption = _card_caption(mention, card)
+            if bonus > 0 and streak > 0:
+                caption += (
+                    f"\n\n<blockquote>🔥 Стрик • <b>{streak} дней</b>\n"
+                    f"🪙 Бонус • +{bonus} (баланс: {new_balance})</blockquote>"
+                )
+            elif streak == 1:
+                caption += (
+                    "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
+                    "Это значит, что вы начали серию ежедневных заходов. "
+                    "Со 2-го дня за стрик начисляются бонусные монеты.</blockquote>"
+                )
+
+            try:
+                await callback.message.answer_photo(
+                    photo=card["photo_id"],
+                    caption=caption,
+                    reply_markup=get_after_card_keyboard(user_id, card["balance"]),
+                )
+            except TelegramBadRequest as e:
+                logger.error(f"instant photo error: {e}")
+                await callback.message.answer(caption)
+            return
+
+        if action == "collection":
+            if callback.message.chat.type != "private":
                 await callback.answer(
-                    text="❗ Для просмотра своей коллекции, пожалуйста, перейдите в бота: @milosttbot",
-                    show_alert=True
+                    "❗ Для просмотра коллекции перейдите в бота: @milosttbot",
+                    show_alert=True,
                 )
                 return
-            
-            keyboard, total_cards, total_cards_in_game = await get_collection_main_keyboard(user_id)
-            
-            if total_cards == 0:
-                await callback.message.answer(
-                    f"<blockquote><b>📦 {nickname}, твоя коллекция пока пуста. Отправь команду «милость», чтобы получить первую карточку</b></blockquote>"
-                )
+
+            photo, caption, keyboard, total = await render_collection(
+                callback.message.bot, user_id
+            )
+            if total == 0:
+                await callback.message.answer(caption)
                 await callback.answer()
                 return
-            
-            # Пытаемся получить фото профиля
-            photo_id = await get_user_profile_photo(callback.message.bot, user_id)
-            
-            # Если фото профиля нет, создаем аватар-заглушку
-            if not photo_id:
-                initials = ''.join(word[0] for word in nickname.split()[:2]) or nickname[:2]
-                avatar = await create_avatar_photo(initials)
-                photo_id = avatar
-            
-            await callback.message.answer_photo(
-                photo=photo_id,
-                caption=f"<blockquote><b>📦 Коллекция {nickname} ({total_cards}/{total_cards_in_game})</b></blockquote>",
-                reply_markup=keyboard
-            )
+            try:
+                await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=keyboard)
+            except TelegramBadRequest:
+                await callback.message.answer(caption, reply_markup=keyboard)
             await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка обработки действия: {e}")
@@ -1374,14 +1257,16 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
-
 async def admin_filter(message: Message) -> bool:
     return await is_admin(message.from_user.id)
 
 
 @router.message(Command("admin"), admin_filter)
 async def admin_panel(message: Message):
-    await message.answer("<blockquote><b>⚙️ Меню администратора</b></blockquote>", reply_markup=get_admin_main_kb())
+    await message.answer(
+        "⚙️ <b>Меню администратора</b>",
+        reply_markup=get_admin_main_kb(),
+    )
 
 
 @router.callback_query(F.data == "admin_add_card")
@@ -1389,27 +1274,23 @@ async def add_card_start(call: CallbackQuery, state: FSMContext):
     if not await is_admin(call.from_user.id):
         await call.answer("❗️ Недостаточно прав", show_alert=True)
         return
-    
     await state.set_state(AddCardSG.photo)
-    await call.message.answer(
-        "<blockquote><b>📷 Отправьте фото для добавления новой карточки (/cancel для отмены)</b></blockquote>")
+    await call.message.answer("📷 <b>Отправьте фото новой карточки</b> (/cancel для отмены)")
     await call.answer()
 
 
 @router.message(Command("cancel"))
 async def cancel_handler(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
+    if await state.get_state() is None:
         return
-    
     await state.clear()
-    await message.reply("<blockquote><b>✅ Операция отменена</b></blockquote>", reply_markup=get_admin_main_kb())
+    await message.reply("✅ <b>Операция отменена</b>", reply_markup=get_admin_main_kb())
 
 
 @router.callback_query(F.data == "cancel_add_card")
 async def cancel_add_card_callback(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.answer("<blockquote><b>✅ Операция отменена</b></blockquote>", reply_markup=get_admin_main_kb())
+    await call.message.answer("✅ <b>Операция отменена</b>", reply_markup=get_admin_main_kb())
     await call.answer()
 
 
@@ -1418,11 +1299,9 @@ async def add_card_photo(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
         await state.clear()
         return
-    
-    photo_id = message.photo[-1].file_id
-    await state.update_data(photo_id=photo_id)
+    await state.update_data(photo_id=message.photo[-1].file_id)
     await state.set_state(AddCardSG.name)
-    await message.answer("<blockquote><b>✍️ Придумайте название</b></blockquote>")
+    await message.answer("✍️ <b>Придумайте название</b>")
 
 
 @router.message(AddCardSG.name, F.text)
@@ -1430,144 +1309,109 @@ async def add_card_name(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
         await state.clear()
         return
-    
-    await state.update_data(name=message.text)
+    await state.update_data(name=message.text[:64])
     await state.set_state(AddCardSG.rarity)
-    await message.answer("<blockquote><b>🎲 Выберите редкость</b></blockquote>", reply_markup=get_rarity_keyboard())
+    await message.answer("🎲 <b>Выберите редкость</b>", reply_markup=get_rarity_keyboard())
 
 
 @router.callback_query(AddCardSG.rarity, F.data.startswith("set_rarity:"))
 async def add_card_rarity(call: CallbackQuery, state: FSMContext):
     if not await is_admin(call.from_user.id):
         await state.clear()
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
-    
     rarity = call.data.split(":")[1]
     data = await state.get_data()
-    
-    try:
-        async with get_db() as db:
-            await db.execute(
-                "INSERT INTO cards (name, rarity, photo_id) VALUES (?, ?, ?)",
-                (data["name"], rarity, data["photo_id"])
-            )
-        
-        await call.message.answer(f"<blockquote><b>✅ Карточка {data['name']} успешно добавлена</b></blockquote>",
-                                  reply_markup=get_admin_main_kb())
-        await state.clear()
-        await call.answer()
-    except Exception as e:
-        logger.error(f"Ошибка добавления карточки: {e}")
-        await call.answer("Произошла ошибка", show_alert=True)
+    async with get_db() as db:
+        await db.execute(
+            "INSERT INTO cards (name, rarity, photo_id) VALUES (?, ?, ?)",
+            (data["name"], rarity, data["photo_id"]),
+        )
+    await call.message.answer(
+        f"✅ <b>Карточка добавлена:</b> {esc(data['name'])}",
+        reply_markup=get_admin_main_kb(),
+    )
+    await state.clear()
+    await call.answer()
 
 
 @router.callback_query(F.data == "admin_list_cards")
 async def list_cards(call: CallbackQuery):
     if not await is_admin(call.from_user.id):
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
-    
-    try:
-        async with get_db() as db:
-            cursor = await db.execute("SELECT id, name, rarity FROM cards")
-            cards = await cursor.fetchall()
-        
-        if not cards:
-            await call.message.answer("<blockquote><b>🔴 Вы пока не добавили ни одной карточки</b></blockquote>")
-            await call.answer()
-            return
-        
-        builder = InlineKeyboardBuilder()
-        for card in cards:
-            c_id, name, rarity = card[0], card[1], card[2]
-            r_name = RARITIES.get(rarity, {}).get("name", rarity)
-            builder.button(text=f"{name} ({r_name})", callback_data=f"card_manage:{c_id}")
-        builder.adjust(1)
-        
-        await call.message.answer("<blockquote><b>🃏 Выберите карточку из списка</b></blockquote>",
-                                  reply_markup=builder.as_markup())
+    async with get_db() as db:
+        cur = await db.execute("SELECT id, name, rarity FROM cards")
+        cards = await cur.fetchall()
+    if not cards:
+        await call.message.answer("🔴 <b>Пока нет карточек</b>")
         await call.answer()
-    except Exception as e:
-        logger.error(f"Ошибка списка карточек: {e}")
-        await call.answer("Произошла ошибка", show_alert=True)
+        return
+    b = InlineKeyboardBuilder()
+    for c_id, name, rarity in cards:
+        r_name = RARITIES.get(rarity, {}).get("name", rarity)
+        b.button(text=f"{name} ({r_name})", callback_data=f"card_manage:{c_id}")
+    b.adjust(1)
+    await call.message.answer("🃏 <b>Выберите карточку</b>", reply_markup=b.as_markup())
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("card_manage:"))
 async def manage_single_card(call: CallbackQuery):
     if not await is_admin(call.from_user.id):
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
-    
     card_id = int(call.data.split(":")[1])
-    
-    try:
-        async with get_db() as db:
-            cursor = await db.execute("SELECT name, rarity, photo_id FROM cards WHERE id = ?", (card_id,))
-            card = await cursor.fetchone()
-        
-        if not card:
-            await call.message.answer("<blockquote><b>🔴 Карточка не найдена</b></blockquote>")
-            await call.answer()
-            return
-        
-        name, rarity, photo_id = card[0], card[1], card[2]
-        r_name = RARITIES.get(rarity, {}).get("name", rarity)
-        
-        builder = InlineKeyboardBuilder()
-        builder.button(text="✏️ Изменить название", callback_data=f"edit_name:{card_id}")
-        builder.button(text="🎲 Изменить редкость", callback_data=f"edit_rarity:{card_id}")
-        builder.button(text="❌ Удалить", callback_data=f"delete_card:{card_id}")
-        builder.button(text="🔙 Назад", callback_data="admin_list_cards")
-        builder.adjust(1)
-        
-        await call.message.answer_photo(
-            photo=photo_id,
-            caption=f"<blockquote><b>🃏 {name}\n\n🎲 Редкость: {r_name}\n🆔 ID: {card_id}</b></blockquote>",
-            reply_markup=builder.as_markup()
-        )
+    async with get_db() as db:
+        cur = await db.execute("SELECT name, rarity, photo_id FROM cards WHERE id = ?", (card_id,))
+        card = await cur.fetchone()
+    if not card:
+        await call.message.answer("🔴 <b>Карточка не найдена</b>")
         await call.answer()
-    except Exception as e:
-        logger.error(f"Ошибка управления карточкой: {e}")
-        await call.answer("Произошла ошибка", show_alert=True)
+        return
+    r_name = RARITIES.get(card["rarity"], {}).get("name", card["rarity"])
+    b = InlineKeyboardBuilder()
+    b.button(text="✏️ Изменить название", callback_data=f"edit_name:{card_id}")
+    b.button(text="🎲 Изменить редкость", callback_data=f"edit_rarity:{card_id}")
+    b.button(text="❌ Удалить", callback_data=f"delete_card:{card_id}")
+    b.button(text="🔙 Назад", callback_data="admin_list_cards")
+    b.adjust(1)
+    try:
+        await call.message.answer_photo(
+            photo=card["photo_id"],
+            caption=f"🃏 <b>{esc(card['name'])}</b>\n\n🎲 <b>{r_name}</b>\n🆔 {card_id}",
+            reply_markup=b.as_markup(),
+        )
+    except TelegramBadRequest as e:
+        logger.error(f"manage card photo error: {e}")
+        await call.message.answer(
+            f"🃏 <b>{esc(card['name'])}</b>\n\n🎲 <b>{r_name}</b>\n🆔 {card_id}",
+            reply_markup=b.as_markup(),
+        )
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("delete_card:"))
 async def delete_card_cmd(call: CallbackQuery):
     if not await is_admin(call.from_user.id):
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
-    
     card_id = int(call.data.split(":")[1])
-    
-    try:
-        async with get_db() as db:
-            await db.execute("BEGIN TRANSACTION")
-            try:
-                await db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-                await db.execute("DELETE FROM inventory WHERE card_id = ?", (card_id,))
-                await db.execute("COMMIT")
-            except Exception as e:
-                await db.execute("ROLLBACK")
-                raise e
-        
-        await call.message.answer("<blockquote><b>🗑 Карточка успешно удалена</b></blockquote>")
-        await call.answer()
-    except Exception as e:
-        logger.error(f"Ошибка удаления карточки: {e}")
-        await call.answer("Произошла ошибка", show_alert=True)
+    async with get_db() as db:
+        await db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+        await db.execute("DELETE FROM inventory WHERE card_id = ?", (card_id,))
+    await call.message.answer("🗑 <b>Карточка удалена</b>")
+    await call.answer()
 
 
 @router.callback_query(F.data.startswith("edit_name:"))
 async def edit_card_name_start(call: CallbackQuery, state: FSMContext):
     if not await is_admin(call.from_user.id):
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
-    
-    card_id = int(call.data.split(":")[1])
-    await state.update_data(card_id=card_id)
+    await state.update_data(card_id=int(call.data.split(":")[1]))
     await state.set_state(EditCardSG.new_name)
-    await call.message.answer("<blockquote><b>✍️ Придумайте новое название для карточки</b></blockquote>")
+    await call.message.answer("✍️ <b>Новое название:</b>")
     await call.answer()
 
 
@@ -1576,78 +1420,116 @@ async def edit_card_name_save(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
         await state.clear()
         return
-    
     data = await state.get_data()
-    card_id = data["card_id"]
-    new_name = message.text
-    
-    try:
-        async with get_db() as db:
-            await db.execute("UPDATE cards SET name = ? WHERE id = ?", (new_name, card_id))
-        
-        await message.answer(f"<blockquote><b>✅ Название карточки изменено на {new_name}</b></blockquote>",
-                             reply_markup=get_admin_main_kb())
-        await state.clear()
-    except Exception as e:
-        logger.error(f"Ошибка изменения названия: {e}")
-        await message.answer("<blockquote><b>❌ Произошла ошибка</b></blockquote>")
+    new_name = message.text[:64]
+    async with get_db() as db:
+        await db.execute("UPDATE cards SET name = ? WHERE id = ?", (new_name, data["card_id"]))
+    await message.answer(
+        f"✅ <b>Название изменено:</b> {esc(new_name)}",
+        reply_markup=get_admin_main_kb(),
+    )
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("edit_rarity:"))
 async def edit_card_rarity_start(call: CallbackQuery):
     if not await is_admin(call.from_user.id):
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
-    
     card_id = int(call.data.split(":")[1])
-    
-    builder = InlineKeyboardBuilder()
-    for rarity_key, rarity_info in RARITIES.items():
-        builder.button(
-            text=rarity_info["name"],
-            callback_data=AdminRarityCallback(card_id=card_id, rarity=rarity_key).pack()
+    b = InlineKeyboardBuilder()
+    for key, info in RARITIES.items():
+        b.button(
+            text=info["name"],
+            callback_data=AdminRarityCallback(card_id=card_id, rarity=key).pack(),
         )
-    builder.button(text="🔙 Назад", callback_data=f"card_manage:{card_id}")
-    builder.adjust(2)
-    
-    await call.message.answer("<blockquote><b>🎲 Выберите новую редкость для карточки</b></blockquote>",
-                              reply_markup=builder.as_markup())
+    b.button(text="🔙 Назад", callback_data=f"card_manage:{card_id}")
+    b.adjust(2)
+    await call.message.answer("🎲 <b>Новая редкость:</b>", reply_markup=b.as_markup())
     await call.answer()
 
 
 @router.callback_query(AdminRarityCallback.filter())
 async def edit_card_rarity_save(call: CallbackQuery, callback_data: AdminRarityCallback):
     if not await is_admin(call.from_user.id):
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
-    
-    card_id = callback_data.card_id
-    new_rarity = callback_data.rarity
-    
-    try:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE cards SET rarity = ? WHERE id = ?",
+            (callback_data.rarity, callback_data.card_id),
+        )
+    await call.message.answer(
+        f"✅ <b>Редкость изменена:</b> {RARITIES[callback_data.rarity]['name']}",
+        reply_markup=get_admin_main_kb(),
+    )
+    await call.answer()
+
+
+# ================= [TEST] ТЕСТОВЫЕ КОМАНДЫ =================
+
+# [TEST] п.5 — сброс ников у всех пользователей по той же логике,
+# что и для новых: Имя -> Юзернейм -> ID
+@router.message(Command("reset_all_nicknames"), admin_filter)
+async def test_reset_all_nicknames(message: Message):
+    async with get_db() as db:
+        cur = await db.execute("SELECT user_id FROM users")
+        rows = await cur.fetchall()
+
+    bot: Bot = message.bot
+    count = 0
+    for row in rows:
+        uid = row["user_id"]
+        full_name = None
+        username = None
+        try:
+            chat = await bot.get_chat(uid)
+            full_name = chat.full_name
+            username = chat.username
+        except Exception as e:
+            # Если Telegram недоступен для конкретного пользователя —
+            # ничего страшного, просто перейдём к ID
+            logger.warning(f"[TEST] get_chat failed for {uid}: {e}")
+
+        new_nick = default_nickname(username, full_name, uid)
         async with get_db() as db:
-            await db.execute("UPDATE cards SET rarity = ? WHERE id = ?", (new_rarity, card_id))
-        
-        rarity_name = RARITIES[new_rarity]["name"]
-        await call.message.answer(f"<blockquote><b>✅ Редкость карточки изменена на {rarity_name}</b></blockquote>",
-                                  reply_markup=get_admin_main_kb())
-        await call.answer()
-    except Exception as e:
-        logger.error(f"Ошибка изменения редкости: {e}")
-        await call.answer("Произошла ошибка", show_alert=True)
+            await db.execute(
+                "UPDATE users SET nickname = ? WHERE user_id = ?",
+                (new_nick, uid),
+            )
+        count += 1
+
+    await message.answer(f"✅ <b>[TEST] Сброшено ников:</b> {count}")
 
 
-# ================= ЗАПУСК БОТА =================
+# [TEST] п.10 — перевод части эпических/легендарных в мифическую
+@router.message(Command("promote_to_mythical"), admin_filter)
+async def test_promote_to_mythical(message: Message):
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT id FROM cards WHERE rarity IN ('epic', 'legendary') ORDER BY RANDOM() LIMIT 10"
+        )
+        ids = [r["id"] for r in await cur.fetchall()]
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            await db.execute(
+                f"UPDATE cards SET rarity = 'mythical' WHERE id IN ({placeholders})",
+                ids,
+            )
+    await message.answer(f"✅ <b>[TEST] Переведено в мифические:</b> {len(ids)} карточек")
+
+
+# ================= ЗАПУСК =================
 async def main():
     try:
         await init_db()
         logger.info("База данных инициализирована")
-        
+
         bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         dp = Dispatcher(storage=MemoryStorage())
         dp.include_router(router)
-        
-        logger.info("🤖 Бот успешно запущен")
+
+        logger.info("🤖 Бот запущен")
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
