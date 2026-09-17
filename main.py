@@ -1725,7 +1725,21 @@ async def admin_help(message: Message):
         "<b>🀄️ Управление карточками:</b>\n"
         "<code>/admin</code> — панель администратора\n"
         "  • ➕ Добавить карточку\n"
-        "  • 📜 Список карточек (редактирование/удаление)\n\n"
+        "  • 📜 Список карточек (редактирование/удаление)\n"
+        "<code>/delcard ID</code> — быстрое удаление карточки по ID\n\n"
+
+        "<b>📊 Статистика и данные:</b>\n"
+        "<code>/stats</code> — общая статистика бота "
+        "(пользователи, монеты, карточки, коллекции)\n"
+        "<code>/getusers</code> — список всех пользователей "
+        "с балансом, карточками и стриком\n\n"
+
+        "<b>🪙 Управление пользователями:</b>\n"
+        "<code>/setcoins COINS</code> — установить баланс себе\n"
+        "<code>/setcoins USERID COINS</code> — установить баланс другому\n"
+        "<code>/resetcd</code> — сбросить кулдаун себе\n"
+        "<code>/resetcd USERID</code> — сбросить кулдаун другому\n"
+        "<i>Все команды работают только в ЛС.</i>\n\n"
 
         "<b>🧪 Тестовые команды:</b>\n"
         "<code>/reset_all_nicknames</code> — сбросить ники всех "
@@ -1734,7 +1748,9 @@ async def admin_help(message: Message):
         "epic/legendary в mythical\n"
         "<code>/getfileid</code> — получить file_id картинки "
         "(отправьте фото с командой в подписи)\n"
-        "<code>/denominate_coins</code> — разделить баланс всех на 10\n\n"
+        "<code>/denominate_coins</code> — разделить баланс всех на 10\n"
+        "<code>/set_registration_now</code> — проставить дату регистрации "
+        "тем, у кого она не установлена\n\n"
 
         "<b>⌨️ Общие команды:</b>\n"
         "<code>/cancel</code> — отменить текущую FSM-операцию\n"
@@ -1864,6 +1880,389 @@ async def unset_admin_cmd(message: Message, command: Command):
         f"✅ <b>Пользователь разжалован:</b>\n"
         f"🆔 <code>{target_id}</code>\n"
         f"👤 {esc(row['nickname'] or str(target_id))}"
+    )
+
+
+# ================= СТАТИСТИКА И УПРАВЛЕНИЕ =================
+
+@router.message(Command("stats"), admin_filter)
+async def admin_stats(message: Message):
+    """📊 Общая статистика бота."""
+    try:
+        async with get_db() as db:
+            # Пользователи
+            cur = await db.execute("SELECT COUNT(*) FROM users")
+            total_users = (await cur.fetchone())[0]
+
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM users WHERE last_claim > 0"
+            )
+            active_users = (await cur.fetchone())[0]
+
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM users WHERE streak > 0"
+            )
+            streaked_users = (await cur.fetchone())[0]
+
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+            )
+            admins = (await cur.fetchone())[0]
+
+            # Монеты
+            cur = await db.execute("SELECT COALESCE(SUM(coins), 0) FROM users")
+            total_coins = (await cur.fetchone())[0]
+
+            cur = await db.execute("SELECT COALESCE(AVG(coins), 0) FROM users")
+            avg_coins = (await cur.fetchone())[0]
+
+            cur = await db.execute("SELECT COALESCE(MAX(coins), 0) FROM users")
+            max_coins = (await cur.fetchone())[0]
+
+            # Карточки в игре
+            cur = await db.execute("SELECT COUNT(*) FROM cards")
+            total_cards = (await cur.fetchone())[0]
+
+            cur = await db.execute(
+                "SELECT rarity, COUNT(*) FROM cards GROUP BY rarity"
+            )
+            cards_by_rarity = dict(await cur.fetchall())
+
+            # Инвентарь
+            cur = await db.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM inventory"
+            )
+            total_owned = (await cur.fetchone())[0]
+
+            cur = await db.execute(
+                "SELECT COUNT(DISTINCT user_id) FROM inventory"
+            )
+            collectors = (await cur.fetchone())[0]
+
+            cur = await db.execute(
+                "SELECT COUNT(DISTINCT card_id) FROM inventory"
+            )
+            unique_owned = (await cur.fetchone())[0]
+
+            # Топ-1 по монетам
+            cur = await db.execute(
+                "SELECT nickname, coins FROM users ORDER BY coins DESC LIMIT 1"
+            )
+            top_user = await cur.fetchone()
+
+            # Самая популярная карточка
+            cur = await db.execute(
+                """SELECT c.name, COALESCE(SUM(i.amount), 0) AS cnt
+                   FROM inventory i
+                            JOIN cards c ON i.card_id = c.id
+                   GROUP BY c.id
+                   ORDER BY cnt DESC
+                   LIMIT 1"""
+            )
+            top_card = await cur.fetchone()
+
+        rarity_lines = []
+        for r_key, r_info in RARITIES.items():
+            cnt = cards_by_rarity.get(r_key, 0)
+            rarity_lines.append(f"  {r_info['icon']} {r_info['name']}: <b>{fmt_num(cnt)}</b>")
+
+        text = (
+                f"📊 <b>Статистика бота</b>\n\n"
+                f"<b>👥 Пользователи:</b>\n"
+                f"  • Всего: <b>{fmt_num(total_users)}</b>\n"
+                f"  • Активных (получали карточки): <b>{fmt_num(active_users)}</b>\n"
+                f"  • Со стриком: <b>{fmt_num(streaked_users)}</b>\n"
+                f"  • Админов: <b>{fmt_num(admins)}</b>\n\n"
+                f"<b>🪙 Монеты:</b>\n"
+                f"  • В обороте: <b>{fmt_num(total_coins)}</b>\n"
+                f"  • В среднем: <b>{fmt_num(int(avg_coins))}</b>\n"
+                f"  • Максимум: <b>{fmt_num(max_coins)}</b>\n\n"
+                f"<b>🀄️ Карточки в игре:</b>\n"
+                f"  • Всего: <b>{fmt_num(total_cards)}</b>\n"
+                + "\n".join(rarity_lines) + "\n\n"
+                                            f"<b>🎒 Коллекции:</b>\n"
+                                            f"  • Собрано экземпляров: <b>{fmt_num(total_owned)}</b>\n"
+                                            f"  • Уникальных карточек: <b>{fmt_num(unique_owned)}</b> из <b>{fmt_num(total_cards)}</b>\n"
+                                            f"  • Коллекционеров: <b>{fmt_num(collectors)}</b>\n\n"
+        )
+
+        if top_user:
+            text += (
+                f"<b>🏆 Лидер по монетам:</b>\n"
+                f"  {esc(top_user['nickname'] or '—')} — <b>{fmt_num(top_user['coins'])}</b> 🪙\n\n"
+            )
+        if top_card:
+            text += (
+                f"<b>🔥 Популярная карточка:</b>\n"
+                f"  {esc(top_card['name'])} — <b>{fmt_num(top_card['cnt'])}</b> шт."
+            )
+
+        await message.reply(text)
+    except Exception as e:
+        logger.error(f"Ошибка /stats: {e}")
+        await message.reply("❌ <b>Ошибка при сборе статистики.</b>")
+
+
+@router.message(Command("setcoins"), admin_filter)
+async def admin_setcoins(message: Message, command: Command):
+    """
+    /setcoins [USERID] COINS — установить баланс.
+    Без USERID — применяется к самому админу.
+    """
+    if message.chat.type != "private":
+        await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
+        return
+
+    args = (command.args or "").strip().split()
+    if not args:
+        await message.reply(
+            "✏️ Использование:\n"
+            "<code>/setcoins COINS</code> — себе\n"
+            "<code>/setcoins USERID COINS</code> — другому пользователю\n\n"
+            "Например: <code>/setcoins 500</code> или <code>/setcoins 123456789 1000</code>"
+        )
+        return
+
+    target_id = message.from_user.id
+
+    if len(args) == 1:
+        # /setcoins COINS
+        try:
+            coins = int(args[0])
+        except ValueError:
+            await message.reply("❌ <b>COINS должно быть числом.</b>")
+            return
+    elif len(args) == 2:
+        # /setcoins USERID COINS
+        try:
+            target_id = int(args[0])
+            coins = int(args[1])
+        except ValueError:
+            await message.reply("❌ <b>USERID и COINS должны быть числами.</b>")
+            return
+    else:
+        await message.reply("❌ <b>Слишком много аргументов.</b> Используйте /setcoins [USERID] COINS")
+        return
+
+    if target_id <= 0:
+        await message.reply("❌ <b>Некорректный USERID.</b>")
+        return
+    if coins < 0:
+        await message.reply("❌ <b>Баланс не может быть отрицательным.</b>")
+        return
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id, nickname, coins FROM users WHERE user_id = ?",
+            (target_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            await message.reply(
+                f"❌ <b>Пользователь не найден в базе.</b>\n"
+                f"Он должен хотя бы раз запустить бота (<code>/start</code>)."
+            )
+            return
+
+        old_coins = row["coins"] or 0
+        await db.execute(
+            "UPDATE users SET coins = ? WHERE user_id = ?", (coins, target_id)
+        )
+
+    who = "себе" if target_id == message.from_user.id else f"пользователю {esc(row['nickname'] or target_id)}"
+    await message.reply(
+        f"✅ <b>Баланс обновлён</b> ({who}):\n"
+        f"🆔 <code>{target_id}</code>\n"
+        f"🪙 Было: <b>{fmt_num(old_coins)}</b> → Стало: <b>{fmt_num(coins)}</b>"
+    )
+
+
+@router.message(Command("resetcd"), admin_filter)
+async def admin_resetcd(message: Message, command: Command):
+    """
+    /resetcd [USERID] — сбросить кулдаун.
+    Без USERID — применяется к самому админу.
+    """
+    if message.chat.type != "private":
+        await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
+        return
+
+    args = (command.args or "").strip().split()
+    target_id = message.from_user.id
+
+    if len(args) >= 1:
+        try:
+            target_id = int(args[0])
+        except ValueError:
+            await message.reply("❌ <b>USERID должен быть числом.</b>")
+            return
+    if len(args) > 1:
+        await message.reply("❌ <b>Слишком много аргументов.</b> Используйте /resetcd [USERID]")
+        return
+
+    if target_id <= 0:
+        await message.reply("❌ <b>Некорректный USERID.</b>")
+        return
+
+    now = int(time.time())
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id, nickname, last_claim FROM users WHERE user_id = ?",
+            (target_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            await message.reply(
+                f"❌ <b>Пользователь не найден в базе.</b>\n"
+                f"Он должен хотя бы раз запустить бота (<code>/start</code>)."
+            )
+            return
+
+        old_last_claim = row["last_claim"] or 0
+        await db.execute(
+            "UPDATE users SET last_claim = 0 WHERE user_id = ?", (target_id,)
+        )
+
+    if old_last_claim == 0:
+        cd_info = "кулдауна не было"
+    else:
+        remaining = max(0, COOLDOWN_SECONDS - (now - old_last_claim))
+        if remaining > 0:
+            h, m = remaining // 3600, (remaining % 3600) // 60
+            cd_info = f"оставалось {h} ч {m} мин"
+        else:
+            cd_info = "кулдаун уже прошёл"
+
+    who = "себе" if target_id == message.from_user.id else f"пользователю {esc(row['nickname'] or target_id)}"
+    await message.reply(
+        f"✅ <b>Кулдаун сброшен</b> ({who}):\n"
+        f"🆔 <code>{target_id}</code>\n"
+        f"⏱ {cd_info} — теперь можно получать карточку сразу."
+    )
+
+
+@router.message(Command("getusers"), admin_filter)
+async def admin_getusers(message: Message):
+    """👥 Список всех пользователей с основной информацией."""
+    try:
+        async with get_db() as db:
+            cur = await db.execute(
+                """SELECT u.user_id,
+                          u.nickname,
+                          u.coins,
+                          u.streak,
+                          u.role,
+                          u.registration,
+                          u.gender,
+                          COALESCE(SUM(i.amount), 0) AS cards_count
+                   FROM users u
+                            LEFT JOIN inventory i ON u.user_id = i.user_id
+                   GROUP BY u.user_id
+                   ORDER BY u.registration DESC"""
+            )
+            users = await cur.fetchall()
+
+        if not users:
+            await message.reply("🔴 <b>В базе пока нет пользователей.</b>")
+            return
+
+        lines = [f"👥 <b>Пользователи</b> (всего: {fmt_num(len(users))})\n"]
+        # Telegram ограничивает сообщение ~4096 символами — режем на части
+        chunk = ""
+        parts = []
+
+        for u in users:
+            g = GENDERS.get(u["gender"] or "none", GENDERS["none"])
+            role_mark = "👑" if u["role"] == "admin" else "👤"
+            reg_date = (
+                datetime.fromtimestamp(u["registration"]).strftime("%d.%m.%Y")
+                if u["registration"] else "—"
+            )
+            line = (
+                f"{role_mark} <b>{esc(u['nickname'] or f'User{u['user_id']}')}</b> "
+                f"(<code>{u['user_id']}</code>)\n"
+                f"    🪙 {fmt_num(u['coins'] or 0)} | "
+                f"🀄️ {fmt_num(u['cards_count'])} | "
+                f"🔥 {fmt_num(u['streak'] or 0)} | "
+                f"{g['icon']} | 📅 {reg_date}\n"
+            )
+            if len(chunk) + len(line) > 3500:
+                parts.append(chunk)
+                chunk = line
+            else:
+                chunk += line
+
+        if chunk:
+            parts.append(chunk)
+
+        for i, part in enumerate(parts):
+            header = lines[0] if i == 0 else f"👥 <b>Пользователи</b> (продолжение {i + 1}/{len(parts)})\n"
+            await message.reply(header + part)
+    except Exception as e:
+        logger.error(f"Ошибка /getusers: {e}")
+        await message.reply("❌ <b>Ошибка при получении списка пользователей.</b>")
+
+
+@router.message(Command("delcard"), admin_filter)
+async def admin_delcard(message: Message, command: Command):
+    """
+    /delcard ID — быстрое удаление карточки по ID.
+    """
+    if message.chat.type != "private":
+        await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
+        return
+
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.reply(
+            "✏️ Использование: <code>/delcard ID</code>\n"
+            "Например: <code>/delcard 42</code>\n\n"
+            "ID карточек можно посмотреть в <code>/admin</code> → 📜 Список карточек."
+        )
+        return
+
+    try:
+        card_id = int(arg)
+    except ValueError:
+        await message.reply("❌ <b>ID должен быть числом.</b>")
+        return
+
+    if card_id <= 0:
+        await message.reply("❌ <b>Некорректный ID.</b>")
+        return
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT id, name, rarity FROM cards WHERE id = ?", (card_id,)
+        )
+        card = await cur.fetchone()
+        if not card:
+            await message.reply(f"❌ <b>Карточка с ID {card_id} не найдена.</b>")
+            return
+
+        # Считаем, у скольких пользователей она была
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM inventory WHERE card_id = ?",
+            (card_id,),
+        )
+        owned_total = (await cur.fetchone())[0]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM inventory WHERE card_id = ?", (card_id,)
+        )
+        owners = (await cur.fetchone())[0]
+
+        await db.execute("DELETE FROM inventory WHERE card_id = ?", (card_id,))
+        await db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+
+    r_info = RARITIES.get(card["rarity"], {})
+    await message.reply(
+        f"🗑 <b>Карточка удалена</b>\n\n"
+        f"🆔 <code>{card_id}</code>\n"
+        f"🀄️ {esc(card['name'])}\n"
+        f"{r_info.get('icon', '')} {r_info.get('name', card['rarity'])}\n\n"
+        f"👥 Затронуто коллекционеров: <b>{fmt_num(owners)}</b>\n"
+        f"📦 Удалено экземпляров: <b>{fmt_num(owned_total)}</b>"
     )
 
 
