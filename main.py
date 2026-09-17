@@ -681,7 +681,7 @@ async def cmd_start(message: Message):
         except Exception as e:
             logger.warning(f"sticker error: {e}")
         await message.reply(
-            "👋 Привет! Отправьте команду «мяу», чтобы получить милую карточку",
+            "👋 Привет! Отправьте команду «мряу», чтобы получить милую карточку",
             reply_markup=get_main_km(),
         )
     except Exception as e:
@@ -696,7 +696,7 @@ async def cmd_help(message: Message):
             "📖 <b>Помощь</b>\n\n"
             "<b>Основные команды:</b>\n"
             "/start — запуск бота\n"
-            "/meow или «мяу» — получить карточку\n"
+            "/meow или «мряу» — получить карточку\n"
             "/profile — профиль\n"
             "/collection — мои карточки\n"
             "/top — топ игроков\n"
