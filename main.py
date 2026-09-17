@@ -56,6 +56,13 @@ RARITIES = {
     "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5, "reward": 100},
 }
 
+GENDERS = {
+    "male": {"icon": "♂️", "name": "Мужской"},
+    "female": {"icon": "♀️", "name": "Женский"},
+    "other": {"icon": "⚧️", "name": "Другой"},
+    "none": {"icon": "➖", "name": "Не задан"},
+}
+
 # п.2 — стрик начисляется со 2-го дня
 STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
 
@@ -179,6 +186,10 @@ class NickConfirmCallback(CallbackData, prefix="nickconf"):
     value: str = ""  # для apply — новый ник (url-safe? используем как есть)
 
 
+class GenderCallback(CallbackData, prefix="gender"):
+    value: str
+
+
 # ================= БАЗА ДАННЫХ =================
 @asynccontextmanager
 async def get_db():
@@ -220,7 +231,8 @@ async def init_db():
                              registration     INTEGER DEFAULT 0,
                              streak           INTEGER DEFAULT 0,
                              last_streak_date INTEGER DEFAULT 0,
-                             streak_bonus     INTEGER DEFAULT 0
+                             streak_bonus     INTEGER DEFAULT 0,
+                             gender           TEXT    DEFAULT 'none'
                          )
                          """)
         await db.execute("""
@@ -234,6 +246,7 @@ async def init_db():
                              FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
                          )
                          """)
+
         for sql in (
                 "CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)",
                 "CREATE INDEX IF NOT EXISTS idx_inventory_user ON inventory(user_id)",
@@ -249,6 +262,7 @@ async def init_db():
             ("users", "streak", "INTEGER DEFAULT 0"),
             ("users", "last_streak_date", "INTEGER DEFAULT 0"),
             ("users", "streak_bonus", "INTEGER DEFAULT 0"),
+            ("users", "gender", "TEXT DEFAULT 'none'"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("inventory", "amount", "INTEGER DEFAULT 1"),
         ]:
@@ -348,7 +362,22 @@ def get_admin_main_kb():
 def get_profile_kb():
     b = InlineKeyboardBuilder()
     b.button(text="🀄️ Мои карточки", callback_data="collection")
-    b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)", callback_data=NicknameCallback(action="change").pack())
+    b.button(text="⚧ Выбрать пол", callback_data=GenderCallback(value="menu").pack())
+    b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)",
+             callback_data=NicknameCallback(action="change").pack())
+    b.adjust(1)
+    return b.as_markup()
+
+
+def get_gender_kb(current: str = "none") -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for key, info in GENDERS.items():
+        mark = "✅ " if key == current else ""
+        b.button(
+            text=f"{mark}{info['icon']} {info['name']}",
+            callback_data=GenderCallback(value=key).pack(),
+        )
+    b.button(text="🔙 Назад в профиль", callback_data=BackToProfileCallback().pack())
     b.adjust(1)
     return b.as_markup()
 
@@ -428,6 +457,8 @@ async def render_profile(bot: Bot, user_id: int):
                                       u.registration,
                                       u.streak,
                                       u.streak_bonus,
+                                      u.role,
+                                      u.gender,
                                       COALESCE(SUM(i.amount), 0) AS cards_count
                                FROM users u
                                         LEFT JOIN inventory i ON u.user_id = i.user_id
@@ -440,9 +471,19 @@ async def render_profile(bot: Bot, user_id: int):
 
     nickname = row["nickname"] or f"User{user_id}"
     reg_date = datetime.fromtimestamp(row["registration"] or time.time()).strftime("%d.%m.%Y")
+
+    role = row["role"] or "user"
+    role_display = "👑 Администратор" if role == "admin" else "👤 Пользователь"
+
+    gender = row["gender"] or "none"
+    g = GENDERS.get(gender, GENDERS["none"])
+    gender_display = f"{g['icon']} {g['name']}"
+
     caption = (
         f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
         f"🆔 ID • <code>{user_id}</code>\n"
+        f"🎭 Роль • <b>{role_display}</b>\n"
+        f"⚧ Пол • <b>{gender_display}</b>\n"
         f"📅 Регистрация • <b>{reg_date}</b>\n\n"
         f"🀄️ Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
         f"🪙 Монеты • <b>{fmt_num(row['coins'])}</b>\n"
@@ -740,6 +781,7 @@ async def cmd_help(message: Message):
             "/top — топ игроков\n"
             f"/nickname [ник] — сменить ник ({NICKNAME_COST} 🪙)\n"
             "/nickname reset — сбросить ник (бесплатно)\n"
+            "/gender [м/ж/др/нет] — установить пол (необязательно)\n"
             "/help — эта справка\n\n"
             "<b>Редкости карточек:</b>\n"
             + "\n".join(
@@ -1029,6 +1071,76 @@ async def change_nickname_hint(callback: CallbackQuery):
         f"или /nickname reset для сброса",
         show_alert=True,
     )
+
+
+# ---------- Смена пола ----------
+@router.callback_query(GenderCallback.filter(F.value == "menu"))
+async def gender_menu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    async with get_db() as db:
+        cur = await db.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+    current = (row["gender"] if row and row["gender"] else "none")
+    await callback.message.edit_caption(
+        caption="⚧ <b>Выберите пол</b>\n\n<i>Это необязательное поле — можно оставить «Не задан».</i>",
+        reply_markup=get_gender_kb(current),
+    )
+    await callback.answer()
+
+
+@router.callback_query(GenderCallback.filter(F.value != "menu"))
+async def gender_set(callback: CallbackQuery, callback_data: GenderCallback):
+    user_id = callback.from_user.id
+    value = callback_data.value
+    if value not in GENDERS:
+        await callback.answer("⚠️ Неизвестное значение")
+        return
+
+    async with get_db() as db:
+        await db.execute("UPDATE users SET gender = ? WHERE user_id = ?", (value, user_id))
+
+    g = GENDERS[value]
+    await callback.message.edit_caption(
+        caption=f"✅ <b>Пол сохранён:</b> {g['icon']} {g['name']}\n\n"
+                f"<i>Вернуться в профиль:</i>",
+        reply_markup=get_gender_kb(value),
+    )
+    await callback.answer("✅ Сохранено")
+
+
+@router.message(Command("gender"))
+async def gender_cmd(message: Message, command: Command):
+    user_id = message.from_user.id
+    await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
+    arg = (command.args or "").strip().lower()
+
+    if not arg:
+        async with get_db() as db:
+            cur = await db.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
+            row = await cur.fetchone()
+        current = (row["gender"] if row and row["gender"] else "none")
+        await message.reply("⚧ <b>Выберите пол:</b>", reply_markup=get_gender_kb(current))
+        return
+
+    aliases = {
+        "м": "male", "муж": "male", "мужской": "male", "m": "male", "male": "male",
+        "ж": "female", "жен": "female", "женский": "female", "f": "female", "female": "female",
+        "др": "other", "другой": "other", "other": "other",
+        "none": "none", "не задан": "none", "нет": "none", "сброс": "none",
+    }
+    value = aliases.get(arg)
+    if not value:
+        await message.reply(
+            "✏️ Использование: <code>/gender м|ж|др|нет</code>\n"
+            "Например: <code>/gender ж</code>"
+        )
+        return
+
+    async with get_db() as db:
+        await db.execute("UPDATE users SET gender = ? WHERE user_id = ?", (value, user_id))
+
+    g = GENDERS[value]
+    await message.reply(f"✅ <b>Пол сохранён:</b> {g['icon']} {g['name']}")
 
 
 # ---------- Топ (п.6) ----------
@@ -1596,6 +1708,165 @@ async def edit_card_rarity_save(call: CallbackQuery, callback_data: AdminRarityC
     await call.answer()
 
 
+@router.message(Command("adminhelp"), admin_filter)
+async def admin_help(message: Message):
+    """
+    Скрытая справка для администраторов.
+    Не упоминается в общей /help. Доступна только role='admin'.
+    """
+    text = (
+        "🛠 <b>Справка администратора</b>\n\n"
+
+        "<b>👑 Управление правами:</b>\n"
+        "<code>/setadmin USERID</code> — назначить админа\n"
+        "<code>/unsetadmin USERID</code> — разжаловать админа\n"
+        "<i>Только в ЛС. Нельзя разжаловать себя.</i>\n\n"
+
+        "<b>🀄️ Управление карточками:</b>\n"
+        "<code>/admin</code> — панель администратора\n"
+        "  • ➕ Добавить карточку\n"
+        "  • 📜 Список карточек (редактирование/удаление)\n\n"
+
+        "<b>🧪 Тестовые команды:</b>\n"
+        "<code>/reset_all_nicknames</code> — сбросить ники всех "
+        "(Имя → username → ID)\n"
+        "<code>/promote_to_mythical</code> — перевести 10 случайных "
+        "epic/legendary в mythical\n"
+        "<code>/getfileid</code> — получить file_id картинки "
+        "(отправьте фото с командой в подписи)\n"
+        "<code>/denominate_coins</code> — разделить баланс всех на 10\n\n"
+
+        "<b>⌨️ Общие команды:</b>\n"
+        "<code>/cancel</code> — отменить текущую FSM-операцию\n"
+        "<code>/adminhelp</code> — эта справка\n\n"
+
+        "💡 <i>Команда скрыта из общей справки и доступна только "
+        "пользователям с ролью admin.</i>"
+    )
+    await message.reply(text)
+
+
+@router.message(Command("setadmin"), admin_filter)
+async def set_admin_cmd(message: Message, command: Command):
+    """
+    /setadmin USERID — назначить пользователя администратором.
+    Доступно только текущим админам.
+    """
+    if message.chat.type != "private":
+        await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
+        return
+
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.reply(
+            "✏️ Использование: <code>/setadmin USERID</code>\n"
+            "Например: <code>/setadmin 123456789</code>"
+        )
+        return
+
+    try:
+        target_id = int(arg)
+    except ValueError:
+        await message.reply("❌ <b>USERID должен быть числом.</b>")
+        return
+
+    if target_id <= 0:
+        await message.reply("❌ <b>Некорректный USERID.</b>")
+        return
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id, nickname, role FROM users WHERE user_id = ?", (target_id,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            await message.reply(
+                f"❌ <b>Пользователь не найден в базе.</b>\n"
+                f"Он должен хотя бы раз запустить бота (<code>/start</code>)."
+            )
+            return
+
+        if row["role"] == "admin":
+            await message.reply(
+                f"ℹ️ Пользователь <b>{esc(row['nickname'] or target_id)}</b> "
+                f"уже является администратором."
+            )
+            return
+
+        await db.execute(
+            "UPDATE users SET role = 'admin' WHERE user_id = ?", (target_id,)
+        )
+
+    await message.reply(
+        f"✅ <b>Пользователь назначен администратором:</b>\n"
+        f"🆔 <code>{target_id}</code>\n"
+        f"👤 {esc(row['nickname'] or str(target_id))}"
+    )
+
+
+@router.message(Command("unsetadmin"), admin_filter)
+async def unset_admin_cmd(message: Message, command: Command):
+    """
+    /unsetadmin USERID — разжаловать администратора.
+    Доступно только текущим админам.
+    """
+    if message.chat.type != "private":
+        await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
+        return
+
+    arg = (command.args or "").strip()
+    if not arg:
+        await message.reply(
+            "✏️ Использование: <code>/unsetadmin USERID</code>\n"
+            "Например: <code>/unsetadmin 123456789</code>"
+        )
+        return
+
+    try:
+        target_id = int(arg)
+    except ValueError:
+        await message.reply("❌ <b>USERID должен быть числом.</b>")
+        return
+
+    if target_id <= 0:
+        await message.reply("❌ <b>Некорректный USERID.</b>")
+        return
+
+    # Защита от разжалования самого себя — иначе можно потерять доступ
+    if target_id == message.from_user.id:
+        await message.reply(
+            "⚠️ <b>Нельзя разжаловать самого себя.</b>\n"
+            "Попросите другого администратора сделать это."
+        )
+        return
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id, nickname, role FROM users WHERE user_id = ?", (target_id,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            await message.reply(f"❌ <b>Пользователь не найден в базе.</b>")
+            return
+
+        if row["role"] != "admin":
+            await message.reply(
+                f"ℹ️ Пользователь <b>{esc(row['nickname'] or target_id)}</b> "
+                f"не является администратором."
+            )
+            return
+
+        await db.execute(
+            "UPDATE users SET role = 'user' WHERE user_id = ?", (target_id,)
+        )
+
+    await message.reply(
+        f"✅ <b>Пользователь разжалован:</b>\n"
+        f"🆔 <code>{target_id}</code>\n"
+        f"👤 {esc(row['nickname'] or str(target_id))}"
+    )
+
+
 # ================= [TEST] ТЕСТОВЫЕ КОМАНДЫ =================
 
 # [TEST] п.5 — сброс ников у всех пользователей по той же логике,
@@ -1679,6 +1950,7 @@ async def test_denominate_coins(message: Message):
         f"👥 Пользователей: <b>{total}</b>\n"
         f"🪙 Суммарный баланс после: <b>{new_total_coins}</b>"
     )
+
 
 # [TEST] Проставить дату регистрации текущим временем тем,
 # у кого она не установлена (registration = 0)
