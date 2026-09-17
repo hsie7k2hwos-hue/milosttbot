@@ -41,15 +41,18 @@ NICKNAME_COST = 100
 DUPLICATE_CHANCE = 0.25  # п.7 — шанс дубликата
 DUPLICATE_REFUND = 0.5  # 50% от стоимости
 
+# п.14 — авто-удаление сообщений бота о кулдауне в группах (в секундах)
+GROUP_AUTODELETE_SECONDS = 30
+
 # п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 
 RARITIES = {
-    "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "coins": 10},
-    "rare": {"icon": "🔵", "name": "Редкая", "weight": 20, "coins": 25},
-    "epic": {"icon": "🟣", "name": "Эпическая", "weight": 15, "coins": 50},
-    "mythical": {"icon": "🔴", "name": "Мифическая", "weight": 10, "coins": 75},
-    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5, "coins": 100},
+    "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "reward": 10},
+    "rare": {"icon": "🔵", "name": "Редкая", "weight": 20, "reward": 25},
+    "epic": {"icon": "🟣", "name": "Эпическая", "weight": 15, "reward": 50},
+    "mythical": {"icon": "🔴", "name": "Мифическая", "weight": 10, "reward": 75},
+    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5, "reward": 100},
 }
 
 # п.2 — стрик начисляется со 2-го дня
@@ -551,7 +554,7 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                 is_duplicate = True
 
             card_id, card_name, photo_id = card[0], card[1], card[2]
-            base_coins = RARITIES[selected_rarity]["coins"]
+            base_coins = RARITIES[selected_rarity]["reward"]
             coins_earned = int(base_coins * DUPLICATE_REFUND) if is_duplicate else base_coins
             now = int(time.time())
 
@@ -666,6 +669,18 @@ def rate_limited(key: str, limit: int, window: float) -> bool:
     bucket.append(now)
     return False
 
+# ================= АВТО-УДАЛЕНИЕ СООБЩЕНИЯ (п.14) =================
+
+async def _auto_delete(message: Message, delay: int):
+    """Удаляет сообщение через delay секунд (тихо игнорирует ошибки)."""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        logger.debug(f"auto_delete error: {e}")
+
 
 # ================= ПОЛЬЗОВАТЕЛЬСКИЕ ХЕНДЛЕРЫ =================
 @router.message(CommandStart(), F.chat.type == "private")
@@ -705,7 +720,7 @@ async def cmd_help(message: Message):
             "/help — эта справка\n\n"
             "<b>Редкости карточек:</b>\n"
             + "\n".join(
-        f"{v['icon']} {v['name']} — {v['coins']} 🪙"
+        f"{v['icon']} {v['name']} — {v['reward']} 🪙"
         for v in RARITIES.values()
     )
             + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно за 150 🪙.\n"
@@ -756,7 +771,13 @@ async def get_card_handler(message: Message):
             )
             text += _streak_text(streak, bonus, new_balance)
 
-            await message.reply(text, reply_markup=get_card_action_keyboard(user_id, balance))
+            sent = await message.reply(
+                text, reply_markup=get_card_action_keyboard(user_id, balance)
+            )
+
+            # п.14 — в группах авто-удаление сообщения о кулдауне через 30 секунд
+            if message.chat.type != "private":
+                asyncio.create_task(_auto_delete(sent, GROUP_AUTODELETE_SECONDS))
             return
 
         card, status = await issue_card(user_id, check_cooldown=True)
@@ -1190,7 +1211,7 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         caption = (
             f"🀄️ <b>{esc(card['name'])}</b>\n\n"
             f"{info.get('icon', '')} Редкость • <b>{info.get('name', rarity)}</b>\n"
-            f"🪙 Монеты • <b>+{fmt_num(info.get('coins', 0))}</b>\n"
+            f"🪙 Монеты • <b>+{fmt_num(info.get('reward', 0))}</b>\n"
             f"🔢 Количество • <b>{fmt_num(card['amount'])}</b>"
         )
 
