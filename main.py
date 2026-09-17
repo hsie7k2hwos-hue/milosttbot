@@ -823,7 +823,7 @@ async def cmd_help(message: Message):
             + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно: "
               f"цена зависит от остатка таймера (от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙).\n"
               "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты.\n\n"
-              "💞 <b>РП-команды (в группах):</b> напишите <code>+рп</code>, "
+              "💞 <b>РП-команды (в группах):</b> напишите <code>+мрп</code>, "
               "чтобы увидеть список доступных действий."
     )
     await message.reply(text, reply_markup=get_main_km())
@@ -1539,17 +1539,20 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
 # "acc" — винительный падеж для текста (кого?).
 RP_ACTIONS = {
     "обнять": {"verb_m": "обнял", "verb_f": "обняла", "verb_n": "обнял(-а)", "emoji": "🤗"},
-    "приобнять": {"verb_m": "приобнял", "verb_f": "приобняла", "verb_n": "приобнял(-а)", "emoji": "🤗"},
     "поцеловать": {"verb_m": "поцеловал", "verb_f": "поцеловала", "verb_n": "поцеловал(-а)", "emoji": "😘"},
-    "чмокнуть": {"verb_m": "чмокнул", "verb_f": "чмокнула", "verb_n": "чмокнул(-а)", "emoji": "😚"},
+    "чмок": {"verb_m": "чмокнул", "verb_f": "чмокнула", "verb_n": "чмокнул(-а)", "emoji": "😚"},
     "погладить": {"verb_m": "погладил", "verb_f": "погладила", "verb_n": "погладил(-а)", "emoji": "🫶"},
     "ударить": {"verb_m": "ударил", "verb_f": "ударила", "verb_n": "ударил(-а)", "emoji": "👊"},
-    "укусить": {"verb_m": "укусил", "verb_f": "укусила", "verb_n": "укусил(-а)", "emoji": "😈"},
-    "лизнуть": {"verb_m": "лизнул", "verb_f": "лизнула", "verb_n": "лизнул(-а)", "emoji": "👅"},
-    "шлёпнуть": {"verb_m": "шлёпнул", "verb_f": "шлёпнула", "verb_n": "шлёпнул(-а)", "emoji": "🍑"},
-    "трахнуть": {"verb_m": "трахнул", "verb_f": "трахнула", "verb_n": "трахнул(-а)", "emoji": "🔥"},
+    "кусь": {"verb_m": "укусил", "verb_f": "укусила", "verb_n": "укусил(-а)", "emoji": "😈"},
+    "лизь": {"verb_m": "лизнул", "verb_f": "лизнула", "verb_n": "лизнул(-а)", "emoji": "👅"},
+    "шлёп": {"verb_m": "шлёпнул", "verb_f": "шлёпнула", "verb_n": "шлёпнул(-а)", "emoji": "🍑"}, # NSFW
+    "трах": {"verb_m": "трахнул", "verb_f": "трахнула", "verb_n": "трахнул(-а)", "emoji": "🔥"}, # NSFW
+    "выебать": {"verb_m": "выебал", "verb_f": "выебала", "verb_n": "выебал(-а)", "emoji": "🔞"}, # NSFW
     "пнуть": {"verb_m": "пнул", "verb_f": "пнула", "verb_n": "пнул(-а)", "emoji": "🦶"},
-    "ласкать": {"verb_m": "ласкал", "verb_f": "ласкала", "verb_n": "ласкал(-а)", "emoji": "💞"},
+    "ласка": {"verb_m": "приласкал", "verb_f": "приласкала", "verb_n": "приласкал(-а)", "emoji": "💞"},
+    "фистинг": {"verb_m": "сделал фистинг", "verb_f": "сделала фистинг", "verb_n": "сделал(-а) фистинг", "emoji": "✊"}, #NSFW
+    "отсос": {"verb_m": "отсосал", "verb_f": "отсосала", "verb_n": "отсосал(-а)", "emoji": "🌭"}, # NSFW
+    "подрочить": {"verb_m": "подрочил", "verb_f": "подрочила", "verb_n": "подрочил(-а)", "emoji": "🍌"}, #NSFW
 }
 
 # Регулярка: "+команда" в начале сообщения, затем опционально цель
@@ -1605,9 +1608,9 @@ async def _resolve_target(message: Message, rest: str) -> Optional[int]:
     return None
 
 
-@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.lower().regexp(r"^\+\s*рп\s*$"))
+@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.lower().regexp(r"^\+\s*мрп\s*$"))
 async def rp_help_handler(message: Message):
-    """+рп — список доступных РП-команд."""
+    """+мрп — список доступных РП-команд."""
     if not message.from_user or message.from_user.is_bot:
         return
 
