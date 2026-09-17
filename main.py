@@ -36,7 +36,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_NAME = "/app/data/cards_game.db"
 COOLDOWN_SECONDS = 4 * 3600
-INSTANT_COST = 150
+INSTANT_COST = 150  # максимум (полный кулдаун)
+INSTANT_MIN_COST = 5  # минимум (кулдаун почти истёк)
 NICKNAME_COST = 100
 DUPLICATE_CHANCE = 0.25  # п.7 — шанс дубликата
 DUPLICATE_REFUND = 0.5  # 50% от стоимости
@@ -123,6 +124,22 @@ def user_mention(user_id: int, nickname: str, username: Optional[str] = None) ->
     if username:
         return f'<a href="https://t.me/{esc(username)}">{safe}</a>'
     return f'<a href="tg://user?id={user_id}">{safe}</a>'
+
+
+def instant_cost(remaining_seconds: int) -> int:
+    """
+    Динамическая стоимость мгновенного получения.
+    Полный кулдаун (remaining >= COOLDOWN_SECONDS) -> INSTANT_COST.
+    Осталось 0 секунд                          -> INSTANT_MIN_COST.
+    Линейная интерполяция между ними.
+    """
+    if remaining_seconds <= 0:
+        return INSTANT_MIN_COST
+    if remaining_seconds >= COOLDOWN_SECONDS:
+        return INSTANT_COST
+    ratio = remaining_seconds / COOLDOWN_SECONDS  # 1.0 -> 0.0
+    cost = INSTANT_MIN_COST + (INSTANT_COST - INSTANT_MIN_COST) * ratio
+    return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
 
 
 # ================= CALLBACK DATA =================
@@ -346,25 +363,30 @@ def get_main_km():
     )
 
 
-def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str, action: str):
+def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str,
+                    action: str, cost: int = INSTANT_COST):
     b.button(
-        text=f"{label} ({fmt_num(INSTANT_COST)} 🪙)",
+        text=f"{label} ({fmt_num(cost)} 🪙)",
         callback_data=CardActionCallback(action=action, user_id=user_id).pack(),
     )
 
 
-def get_card_action_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
+def get_card_action_keyboard(user_id: int, balance: int = 0,
+                             remaining: int = COOLDOWN_SECONDS) -> InlineKeyboardMarkup:
+    cost = instant_cost(remaining)
     b = InlineKeyboardBuilder()
-    if balance >= INSTANT_COST:
-        _instant_button(b, user_id, "✨ Получить сейчас", "instant")
+    if balance >= cost:
+        _instant_button(b, user_id, "✨ Получить сейчас", "instant", cost)
     b.adjust(1)
     return b.as_markup()
 
 
 def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
+    # После выдачи карточки кулдаун полный -> максимальная цена
+    cost = instant_cost(COOLDOWN_SECONDS)
     b = InlineKeyboardBuilder()
-    if balance >= INSTANT_COST:
-        _instant_button(b, user_id, "✨ Получить ещё одну", "another")
+    if balance >= cost:
+        _instant_button(b, user_id, "✨ Получить ещё одну", "another", cost)
     b.button(
         text="🀄️ Мои карточки",
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
@@ -724,7 +746,8 @@ async def cmd_help(message: Message):
         f"{v['icon']} {v['name']} — {v['reward']} 🪙"
         for v in RARITIES.values()
     )
-            + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно за 150 🪙.\n"
+            + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно: "
+              f"цена зависит от остатка таймера (от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙).\n"
               "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты."
     )
     await message.reply(text, reply_markup=get_main_km())
@@ -773,7 +796,8 @@ async def get_card_handler(message: Message):
             text += _streak_text(streak, bonus, new_balance)
 
             sent = await message.reply(
-                text, reply_markup=get_card_action_keyboard(user_id, balance)
+                text,
+                reply_markup=get_card_action_keyboard(user_id, balance, remaining=remaining),
             )
 
             # п.14 — в группах авто-удаление сообщения о кулдауне через 30 секунд
@@ -1274,22 +1298,35 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
         mention = user_mention(user_id, nickname, callback.from_user.username)
 
         if action in ("instant", "another"):
+            now = int(time.time())
             async with get_db() as db:
-                cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+                cur = await db.execute(
+                    "SELECT coins, last_claim FROM users WHERE user_id = ?", (user_id,)
+                )
                 row = await cur.fetchone()
-                balance = row["coins"] if row else 0
+            balance = row["coins"] if row else 0
+            last_claim = row["last_claim"] if row else 0
 
-            if balance < INSTANT_COST:
-                await callback.answer(f"⚠️ Требуется {INSTANT_COST} 🪙, у вас {balance} 🪙")
+            # Если кулдаун уже прошёл — пользователь мог бы получить карточку бесплатно.
+            # Тогда просто перенаправляем на обычную выдачу.
+            time_passed = now - last_claim
+            if time_passed >= COOLDOWN_SECONDS:
+                await callback.answer("⏳ Кулдаун уже прошёл — получайте бесплатно!", show_alert=True)
                 return
 
-            await callback.answer("⏳ Получаем карточку...")
+            remaining = int(COOLDOWN_SECONDS - time_passed)
+            cost = instant_cost(remaining)
 
-            now = int(time.time())
+            if balance < cost:
+                await callback.answer(f"⚠️ Требуется {cost} 🪙, у вас {balance} 🪙")
+                return
+
+            await callback.answer(f"⏳ Получаем карточку за {cost} 🪙...")
+
             async with get_db() as db:
                 await db.execute(
                     "UPDATE users SET coins = coins - ?, last_claim = ? WHERE user_id = ?",
-                    (INSTANT_COST, now, user_id),
+                    (cost, now, user_id),
                 )
 
             card, status = await issue_card(user_id, check_cooldown=False)
@@ -1298,7 +1335,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 async with get_db() as db:
                     await db.execute(
                         "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                        (INSTANT_COST, user_id),
+                        (cost, user_id),
                     )
                 await callback.message.answer("❌ <b>Ошибка. Монеты возвращены.</b>")
                 return
