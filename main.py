@@ -55,371 +55,6 @@ RARITIES = {
 # п.2 — стрик начисляется со 2-го дня
 STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
 
-# ================= РП-КОМАНДЫ =================
-# Действие -> (эмодзи, [варианты текста])
-# {a} — автор, {b} — цель
-
-RP_ACTIONS = {
-    # =========================================================================
-    # 1. СУЩЕСТВУЮЩИЕ КОМАНДЫ (РАСШИРЕННЫЕ)
-    # =========================================================================
-    "обнять": (
-        "🤗",
-        [
-            "{a} крепко обнял(а) {b} 🫂",
-            "{a} заключает {b} в тёплые объятия",
-            "{a} обнимает {b} и не отпускает",
-            "{a} уткнулся(ась) носом в плечо {b} и обнял(а)",
-            "{a} тихонько обнимает {b} со спины",
-            "{a} раскрывает объятия для {b}",
-        ],
-    ),
-    "поцеловать": (
-        "😘",
-        [
-            "{a} нежно поцеловал(а) {b} 💋",
-            "{a} оставляет лёгкий поцелуй на щеке {b}",
-            "{a} целует {b} в макушку",
-            "{a} вовлекает {b} в долгий и сладкий поцелуй",
-            "{a} мимолётно коснулся(ась) губ {b}",
-            "{a} страстно целует {b}",
-        ],
-    ),
-    "ударить": (
-        "👊",
-        [
-            "{a} отвесил(а) {b} звонкую оплеуху 💥",
-            "{a} бьёт {b} по голове",
-            "{a} отвесил(а) {b} подзатыльник",
-            "{a} зарядил(а) {b} мощный лещ",
-            "{a} пинает {b} под зад",
-            "{a} дает пропистон {b}",
-        ],
-    ),
-    "укусить": (
-        "🦷",
-        [
-            "{a} кусает {b} за плечо 😼",
-            "{a} вцепился(ась) зубами в {b}",
-            "{a} нежно прикусил(а) {b} за ушко",
-            "{a} оставляет укус на пальце {b}",
-            "{a} внезапно цапнул(а) {b} за щеку",
-        ],
-    ),
-    "погладить": (
-        "🤚",
-        [
-            "{a} ласково погладил(а) {b} по голове ✨",
-            "{a} треплет {b} по волосам",
-            "{a} гладит {b} по спинке",
-            "{a} нежно проводит рукой по щеке {b}",
-            "{a} гладит {b}, словно милого котёнка",
-        ],
-    ),
-    "дать пять": (
-        "🙌",
-        [
-            "{a} даёт пять {b} ✋",
-            "{a} и {b} дали пять друг другу",
-            "{a} хлопнул(а) по ладони {b}",
-            "{a} громко звонко отбивает пять {b}",
-        ],
-    ),
-    "потанцевать": (
-        "💃",
-        [
-            "{a} приглашает {b} на танец 💫",
-            "{a} и {b} кружатся в вальсе",
-            "{a} тянет {b} танцевать",
-            "{a} берет {b} за руку и закруживает в медленном танце",
-        ],
-    ),
-    "обнять крепко": (
-        "🫂",
-        [
-            "{a} сжал(а) {b} в медвежьих объятиях 🐻",
-            "{a} душит {b} в объятиях",
-            "{a} прижимает {b} к себе изо всех сил",
-        ],
-    ),
-    "шлёпнуть": (
-        "🍑",
-        [
-            "{a} шлёпнул(а) {b} по попе 😳",
-            "{a} отвесил(а) {b} звонкий шлепок",
-            "{a} игриво шлёпает {b}",
-        ],
-    ),
-    "покормить": (
-        "🍰",
-        [
-            "{a} покормил(а) {b} вкусняшкой 🍪",
-            "{a} угощает {b} пироженкой",
-            "{a} протягивает {b} бутерброд",
-            "{a} кормит {b} с ложечки",
-            "{a} сует в рот {b} конфетку",
-        ],
-    ),
-    "напоить чаем": (
-        "🍵",
-        [
-            "{a} налил(а) {b} чашечку чая ☕️",
-            "{a} угощает {b} горячим чаем с печеньками",
-            "{a} дует на чай и подает его {b}",
-        ],
-    ),
-    "укутать": (
-        "🧣",
-        [
-            "{a} укутал(а) {b} в тёплый плед 🛌",
-            "{a} заботливо укрывает {b} одеялом",
-            "{a} замотал(а) {b} в шарф, чтобы не мёрз(ла)",
-        ],
-    ),
-    "похвалить": (
-        "🌟",
-        [
-            "{a} хвалит {b}: «Ты молодец!» 👏",
-            "{a} восхищается {b}",
-            "{a} гордится успехом {b}",
-        ],
-    ),
-    "успокоить": (
-        "🫂",
-        [
-            "{a} успокаивает {b} и гладит по спинке",
-            "{a} шепчет {b}: «Всё будет хорошо»",
-            "{a} вытирает слезинки с лица {b}",
-        ],
-    ),
-    "пожать руку": (
-        "🤝",
-        [
-            "{a} пожал(а) руку {b} 🤝",
-            "{a} и {b} скрепили договор рукопожатием",
-            "{a} деловито трясёт руку {b}",
-        ],
-    ),
-    "ущипнуть": (
-        "🤏",
-        [
-            "{a} ущипнул(а) {b} за бочок 😼",
-            "{a} щиплет {b} за щёчку",
-            "{a} больно ущипнул(а) {b}",
-        ],
-    ),
-    "пощекотать": (
-        "🪶",
-        [
-            "{a} щекочет {b} 😂",
-            "{a} напал(а) на {b} с щекоткой",
-            "{a} щекочет бока {b}, доводя до смеха",
-        ],
-    ),
-    "сфоткать": (
-        "📸",
-        [
-            "{a} сфоткал(а) {b} 📷",
-            "{a} сделал(а) совместное селфи с {b} 🤳",
-            "{a} тайно фотографирует {b}",
-        ],
-    ),
-    "станцевать ламбаду": (
-        "🕺",
-        [
-            "{a} и {b} танцуют ламбаду 💃🕺",
-            "{a} заставляет {b} танцевать ламбаду",
-        ],
-    ),
-    "предложить дружбу": (
-        "🤝",
-        [
-            "{a} предлагает {b} дружбу 🤝",
-            "{a} протягивает {b} руку дружбы",
-        ],
-    ),
-
-    # =========================================================================
-    # 2. НОВЫЕ ОБЩИЕ / МИЛЫЕ РП-КОМАНДЫ
-    # =========================================================================
-    "взъерошить": (
-        "💆‍♂️",
-        [
-            "{a} взъерошил(а) причёску {b} ✨",
-            "{a} лохматит волосы {b}",
-        ],
-    ),
-    "показать язык": (
-        "👅",
-        [
-            "{a} дразнит {b} и показывает язык 😜",
-            "{a} корчит милую рожицу {b}",
-        ],
-    ),
-    "уронил": (
-        "💫",
-        [
-            "{a} случайно повалил(а) {b} на пол 💥",
-            "{a} не удержался(ась) и упал(а) прямо на {b}",
-        ],
-    ),
-    "подарить цветы": (
-        "💐",
-        [
-            "{a} вручает {b} букет прекрасных цветов 🌸",
-            "{a} дарит {b} одну одинокую розетку 🌹",
-        ],
-    ),
-    "умыть": (
-        "🚰",
-        [
-            "{a} брызгает холодной водой в лицо {b} 💦",
-            "{a} заботливо вытирает лицо {b} салфеткой",
-        ],
-    ),
-
-    # =========================================================================
-    # 3. НЕПРИЛИЧНЫЕ / РОМАНТИЧЕСКИЕ / ФЛИРТ (SFW - 16+)
-    # =========================================================================
-    # [КАТЕГОРИЯ: ФЛИРТ И НАМЁКИ]
-    "посадить на колени": (
-        "🪑",
-        [
-            "{a} притягивает {b} и сажает к себе на колени 😳",
-            "{a} усадил(а) {b} на свои колени и крепко обнял(а)",
-        ],
-    ),
-    "прошептать": (
-        "👂",
-        [
-            "{a} склоняется и смущающе шепчет что-то на ушко {b} 🤫",
-            "{a} шепчет горячие слова прямо в ухо {b}",
-        ],
-    ),
-    "засос": (
-        "💋",
-        [
-            "{a} оставляет яркий засос на шее {b} 😈",
-            "{a} метит {b}, оставляя горячий засос",
-        ],
-    ),
-    "лизнуть": (
-        "👅",
-        [
-            "{a} провести языком по щеке {b} 😼",
-            "{a} игриво лизнул(а) {b} в ушко",
-            "{a} лизнул(а) {b} прямо в нос",
-        ],
-    ),
-
-    # =========================================================================
-    # 4. ЯОЙ / БОЙСЛАВ / ДРАМАТИЧЕСКИЙ ФЛИРТ (ТРОПЫ ИЗ МАНГИ/ДОДЗИНСИ)
-    # =========================================================================
-    # [КАТЕГОРИЯ: ЯОЙ / YAOI / BL TROPES]
-    "прижать к стене": (
-        "🚪",
-        [
-            "{a} резко прижал(а) {b} к стене и блокирует путь руками (Кабедон!) 💥",
-            "{a} загнал(а) {b} в угол и не даёт пройти 😈",
-            "{a} приближается вплотную к {b}, прижимая к холодной стене",
-        ],
-    ),
-    "подбородок": (
-        "✨",
-        [
-            "{a} властно держит {b} за подбородок, заставляя смотреть в глаза 👁️",
-            "{a} аккуратно приподнимает подбородок {b} пальчиками",
-        ],
-    ),
-    "повалить": (
-        "🛋️",
-        [
-            "{a} толкает {b} и валится сверху на кровать 🛌",
-            "{a} повалил(а) {b} на мягкий диван и навис(ла) сверху 😳",
-            "{a} перехватывает руки {b} и прижимает его/её к футону",
-        ],
-    ),
-    "снять галстук": (
-        "👔",
-        [
-            "{a} медленно развязывает галстук на {b} 🔥",
-            "{a} тянет {b} за галстук к себе для поцелуя",
-        ],
-    ),
-    "загнать в угол": (
-        "🐾",
-        [
-            "{a} медленно наступает на {b}, пока тот не упирается в тупик ⛓️",
-            "{a} пристально смотрит на смущённого {b}, не оставляя путей к отступлению",
-        ],
-    ),
-
-    # =========================================================================
-    # 5. ЭКСПЛИЦИТНЫЕ / 18+ / ЭРОТИЧЕСКИЕ (NSFW)
-    # =========================================================================
-    # [КАТЕГОРИЯ: 18+ / NSFW]
-    "поцеловать в шею": (
-        "🔥",
-        [
-            "{a} покрывает горячими поцелуями чувствительную шею {b} 🫦",
-            "{a} дорожкой из поцелуев спускается от ключиц к шее {b}",
-        ],
-    ),
-    "провести рукой": (
-        "СЕКСУАЛЬНОЕ",
-        [
-            "{a} медленно проводит рукой по бёдрам {b} 😈",
-            "{a} забирается ладонью под одежду {b}",
-            "{a} гладит внутреннюю сторону бедра {b}, вызывая мурашки",
-        ],
-    ),
-    "расстегнуть": (
-        "🎽",
-        [
-            "{a} медленно расстёгивает пуговицы на рубашке {b} 😳",
-            "{a} снимает с {b} лишнюю одежду",
-        ],
-    ),
-    "связать": (
-        "🪢",
-        [
-            "{a} связывает запястья {b} шелковой лентой 🎀",
-            "{a} привязывает {b} к изголовью кровати 😈",
-        ],
-    ),
-    "яой": (
-        "🖤",
-        [
-            "{a} доминирует над {b}, заставляя того тихо стонать 💥",
-            "{a} крепко держит {b} за бёдра, не давая вырваться 🔥",
-        ],
-    ),
-    "отодрать": (
-        "🔞",
-        [
-            "{a} жёстко берет {b}, не оставляя шанса на сопротивление 😈",
-            "{a} грубо прижимает {b} за талию и полностью завладевает им 🔥",
-        ],
-    ),
-    "стонать": (
-        "💬",
-        [
-            "{a} тихо стонет на ухо {b} от прикосновений 🤤",
-            "{a} издаёт смущённый вздох прямо в губы {b}",
-        ],
-    ),
-    "шлёпать больно": (
-        "🍑🔥",
-        [
-            "{a} оставляет звонкий красный след от ладони на попе {b} 💥",
-            "{a} наказывает {b} сериями ощутимых шлепков",
-        ],
-    ),
-}
-
-RP_COOLDOWN = 15  # секунд между РП-действиями одного автора
-_rp_bucket: dict = {}
-
 # п.5.2 — валидация ника
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
@@ -692,7 +327,7 @@ def get_admin_main_kb():
 
 def get_profile_kb():
     b = InlineKeyboardBuilder()
-    b.button(text="📦 Моя коллекция", callback_data="collection")
+    b.button(text="🀄️ Мои карточки", callback_data="collection")
     b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)", callback_data=NicknameCallback(action="change").pack())
     b.adjust(1)
     return b.as_markup()
@@ -701,7 +336,7 @@ def get_profile_kb():
 def get_main_km():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🃏 Получить карточку"), KeyboardButton(text="👤 Профиль")],
+            [KeyboardButton(text="🀄️ Получить карточку"), KeyboardButton(text="👤 Профиль")],
             [KeyboardButton(text="🏆 Топ игроков"), KeyboardButton(text="❓ Помощь")],
         ],
         resize_keyboard=True,
@@ -728,7 +363,7 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
     if balance >= INSTANT_COST:
         _instant_button(b, user_id, "✨ Получить ещё одну", "another")
     b.button(
-        text="🃏 Мои карточки",
+        text="🀄️ Мои карточки",
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
     )
     b.adjust(1)
@@ -740,7 +375,7 @@ def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text=("✅ " if kind == "coins" else "") + "🪙 Монеты",
              callback_data=TopCallback(kind="coins").pack())
-    b.button(text=("✅ " if kind == "cards" else "") + "🃏 Карточки",
+    b.button(text=("✅ " if kind == "cards" else "") + "🀄️ Карточки",
              callback_data=TopCallback(kind="cards").pack())
     b.button(text=("✅ " if kind == "streak" else "") + "🔥 Стрик",
              callback_data=TopCallback(kind="streak").pack())
@@ -784,7 +419,7 @@ async def render_profile(bot: Bot, user_id: int):
         f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
         f"🆔 ID • <code>{user_id}</code>\n"
         f"📅 Регистрация • <b>{reg_date}</b>\n\n"
-        f"🃏 Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
+        f"🀄️ Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
         f"🪙 Монеты • <b>{fmt_num(row['coins'])}</b>\n"
         f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
     )
@@ -796,7 +431,7 @@ async def render_collection(bot: Bot, user_id: int):
     nickname = await get_user_nickname(user_id)
     photo = await get_user_photo(bot, user_id, nickname)
     caption = (
-        f"🃏 <b>Ваши карточки</b>\n"
+        f"🀄️ <b>Ваши карточки</b>\n"
         f"Всего: {fmt_num(total)} из {fmt_num(total_in_game)}"
     )
     return photo, caption, keyboard, total
@@ -1063,7 +698,7 @@ async def cmd_help(message: Message):
             "/start — запуск бота\n"
             "/meow или «мяу» — получить карточку\n"
             "/profile — профиль\n"
-            "/collection — коллекция\n"
+            "/collection — мои карточки\n"
             "/top — топ игроков\n"
             f"/nickname [ник] — сменить ник ({NICKNAME_COST} 🪙)\n"
             "/nickname reset — сбросить ник (бесплатно)\n"
@@ -1079,7 +714,7 @@ async def cmd_help(message: Message):
     await message.reply(text, reply_markup=get_main_km())
 
 
-@router.message(F.text == "🃏 Получить карточку")
+@router.message(F.text == "🀄️ Получить карточку")
 @router.message(F.text.lower().strip() == "мряу")
 @router.message(F.text.lower().strip() == "милость")
 @router.message(Command("meow"))
@@ -1150,14 +785,14 @@ async def get_card_handler(message: Message):
 
 def _streak_text(streak: int, bonus: int, new_balance: int) -> str:
     """Формирует текст про стрик для сообщения."""
-    if streak == 1 and bonus == 0:
+    if bonus > 0 and streak == 1:
         return (
-            "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n\n"
+            "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
             "💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
         )
     if bonus > 0 and streak >= 2:
         return (
-            f"\n\n<blockquote>🔥 Стрик • <b>{fmt_num(streak)} дней</b>\n\n"
+            f"\n\n<blockquote>🔥 Стрик • <b>{fmt_days(streak)}</b>\n"
             f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]\n"
             f"💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
         )
@@ -1202,7 +837,7 @@ async def process_back_to_profile(callback: CallbackQuery):
         await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка возврата в профиль: {e}")
-        await callback.answer("Произошла ошибка", show_alert=True)
+        await callback.answer("⚠️ Произошла ошибка")
 
 
 # ---------- Смена ника (п.5.4/5.5/5.6) ----------
@@ -1332,8 +967,8 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
 @router.callback_query(NicknameCallback.filter(F.action == "change"))
 async def change_nickname_hint(callback: CallbackQuery):
     await callback.answer(
-        f"Используйте /nickname НовыйНик ({NICKNAME_COST} 🪙) "
-        f"или /nickname reset",
+        f"Для изменения ника используйте команду /nickname НовыйНик ({NICKNAME_COST} 🪙) "
+        f"или /nickname reset для сброса",
         show_alert=True,
     )
 
@@ -1376,8 +1011,8 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
-            unit = "🃏"
-            title = "🃏 Топ по карточкам"
+            unit = "🀄️"
+            title = "🀄️ Топ по карточкам"
         elif kind == "streak":
             cur = await db.execute(
                 "SELECT user_id, nickname, streak AS value FROM users "
@@ -1458,7 +1093,7 @@ async def switch_top(callback: CallbackQuery, callback_data: TopCallback):
         await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка переключения топа: {e}")
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("⚠️ Произошла ошибка")
 
 
 # ---------- Коллекция ----------
@@ -1479,11 +1114,15 @@ async def get_collection_main_keyboard(user_id: int):
         rows = []
         total_cards = sum(stats.values())
         for r_key, r_info in RARITIES.items():
+            user_amount = stats.get(r_key, 0)
+            # Пропускаем редкость, если у пользователя 0 карточек
+            if user_amount == 0:
+                continue
             cur = await db.execute("SELECT COUNT(*) FROM cards WHERE rarity = ?", (r_key,))
             total_of_rarity = (await cur.fetchone())[0]
             rows.append([
                 InlineKeyboardButton(
-                    text=f"{r_info['name']} ({fmt_num(stats.get(r_key, 0))}/{fmt_num(total_of_rarity)})",
+                    text=f"{r_info['icon']} {r_info['name']} ({fmt_num(user_amount)}/{fmt_num(total_of_rarity)})",
                     callback_data=RaritySelectCallback(rarity=r_key, page=0).pack(),
                 )
             ])
@@ -1518,7 +1157,7 @@ async def show_collection(event):
     except Exception as e:
         logger.error(f"Ошибка коллекции: {e}")
         if callback:
-            await callback.answer("Ошибка", show_alert=True)
+            await callback.answer("⚠️ Произошла ошибка")
         else:
             await message.reply("❌ <b>Ошибка</b>")
 
@@ -1540,7 +1179,7 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
             cards = await cur.fetchall()
 
         if not cards:
-            await callback.answer("У вас больше нет карточек этого типа.", show_alert=True)
+            await callback.answer("У вас больше нет карточек этого типа")
             return
 
         total_pages = len(cards)
@@ -1549,7 +1188,7 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         info = RARITIES.get(rarity, {})
         # п.7.2 — количество
         caption = (
-            f"🃏 <b>{esc(card['name'])}</b>\n\n"
+            f"🀄️ <b>{esc(card['name'])}</b>\n\n"
             f"{info.get('icon', '')} Редкость • <b>{info.get('name', rarity)}</b>\n"
             f"🪙 Монеты • <b>+{fmt_num(info.get('coins', 0))}</b>\n"
             f"🔢 Количество • <b>{fmt_num(card['amount'])}</b>"
@@ -1576,7 +1215,7 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка просмотра коллекции: {e}")
-        await callback.answer("Произошла ошибка", show_alert=True)
+        await callback.answer("⚠️ Произошла ошибка")
 
 
 @router.callback_query(MainMenuCallback.filter())
@@ -1645,17 +1284,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             streak, bonus, new_balance = await check_and_update_streak(user_id)
 
             caption = _card_caption(mention, card)
-            if bonus > 0 and streak > 0:
-                caption += (
-                    f"\n\n<blockquote>🔥 Стрик • <b>{fmt_days(streak)}</b>\n"
-                    f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]</blockquote>"
-                )
-            elif streak == 1:
-                caption += (
-                    "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
-                    "Это значит, что вы начали серию ежедневных заходов. "
-                    "Со 2-го дня за стрик начисляются бонусные монеты.</blockquote>"
-                )
+            caption += _streak_text(streak, bonus, new_balance)
 
             try:
                 await callback.message.answer_photo(
@@ -1668,14 +1297,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 await callback.message.answer(caption)
             return
 
-        if action == "collection":
-            if callback.message.chat.type != "private":
-                await callback.answer(
-                    "❗ Для просмотра коллекции перейдите в бота: @milosttbot",
-                    show_alert=True,
-                )
-                return
-
+        if action == "collection"
             photo, caption, keyboard, total = await render_collection(
                 callback.message.bot, user_id
             )
@@ -1690,130 +1312,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка обработки действия: {e}")
-        await callback.answer("Произошла ошибка", show_alert=True)
-
-
-# ================= РП-КОМАНДЫ =================
-def _rp_rate_limited(user_id: int) -> bool:
-    now = time.monotonic()
-    last = _rp_bucket.get(user_id, 0)
-    if now - last < RP_COOLDOWN:
-        return True
-    _rp_bucket[user_id] = now
-    return False
-
-
-async def _resolve_rp_target(message: Message):
-    """
-    Определяет цель РП-действия:
-    1) reply на сообщение -> автор того сообщения
-    2) упоминание @username в тексте
-    3) текстовое упоминание через entities (text_mention)
-    Возвращает (user_id, full_name, username) или None.
-    """
-    # 1) reply
-    if message.reply_to_message and message.reply_to_message.from_user:
-        u = message.reply_to_message.from_user
-        if u.id != message.from_user.id:
-            return u.id, u.full_name, u.username
-
-    # 2) entities (упоминания @user и text_mention)
-    if message.entities and message.text:
-        for ent in message.entities:
-            # 2.1) text_mention — юзер передан объектом
-            if ent.type == "text_mention" and ent.user:
-                u = ent.user
-                if u.id != message.from_user.id:
-                    return u.id, u.full_name, u.username
-
-            # 2.2) mention — @username в тексте
-            elif ent.type == "mention":
-                uname = (
-                    message.text[ent.offset + 1: ent.offset + ent.length]
-                    .lstrip("@")
-                )
-                try:
-                    chat = await message.bot.get_chat(f"@{uname}")
-                    if chat.id != message.from_user.id:
-                        return chat.id, chat.full_name, chat.username
-                except Exception as e:
-                    logger.warning(f"rp mention resolve failed: {e}")
-
-    return None
-
-
-@router.message(F.chat.type.in_({"group", "supergroup"}))
-async def rp_handler(message: Message):
-    """Обработчик РП-команд в группах: 'мр <действие>'."""
-    if not message.text:
-        return
-
-    text = message.text.strip()
-    low = text.lower()
-
-    # проверяем именно "мр " (с пробелом), чтобы не ловить "мразь", "мрачно" и т.п.
-    if not (low == "мр" or low.startswith("мр ")):
-        return
-
-    rest = text[2:].strip()  # ← отрезаем ровно "мр"
-    if not rest:
-        return
-
-    action_key = rest.lower()
-    if action_key not in RP_ACTIONS:
-        return
-
-    # rate limit
-    if _rp_rate_limited(message.from_user.id):
-        return
-
-    # ищем цель
-    target = await _resolve_rp_target(message)
-    if not target:
-        await message.reply(
-            "🤔 Укажи, к кому применить действие: ответь на сообщение "
-            "или упомяни @username."
-        )
-        return
-
-    target_id, target_name, target_username = target
-
-    # защита от самого себя
-    if target_id == message.from_user.id:
-        await message.reply("😅 Нельзя применить РП-действие к самому себе.")
-        return
-
-    # ники (из БД, если есть)
-    author_nick = await get_user_nickname(message.from_user.id)
-    target_nick = await get_user_nickname(target_id)
-
-    author_mention = user_mention(message.from_user.id, author_nick, message.from_user.username)
-    target_mention = user_mention(target_id, target_nick, target_username)
-
-    emoji, variants = RP_ACTIONS[action_key]
-    template = random.choice(variants)
-    body = template.format(a=author_mention, b=target_mention)
-
-    try:
-        await message.reply(f"{emoji} {body}")
-    except TelegramBadRequest as e:
-        logger.error(f"rp reply error: {e}")
-
-
-@router.message(Command("rp"))
-@router.message(F.text.lower().strip() == "мр рп")
-async def rp_help(message: Message):
-    if message.chat.type not in ("group", "supergroup"):
-        # в ЛК тоже можно показать
-        pass
-    actions = ", ".join(f"<code>мр {k}</code>" for k in RP_ACTIONS.keys())
-    text = (
-        "🎭 <b>РП-команды</b>\n\n"
-        "Использование: <code>мр &lt;действие&gt;</code> в ответ на сообщение "
-        "или с упоминанием <code>@username</code>.\n\n"
-        f"<b>Доступные действия:</b>\n{actions}"
-    )
-    await message.reply(text)
+        await callback.answer("⚠️ Произошла ошибка")
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
@@ -1832,7 +1331,7 @@ async def admin_panel(message: Message):
 @router.callback_query(F.data == "admin_add_card")
 async def add_card_start(call: CallbackQuery, state: FSMContext):
     if not await is_admin(call.from_user.id):
-        await call.answer("❗️ Недостаточно прав", show_alert=True)
+        await call.answer("⚠️ Ошибка доступа")
         return
     await state.set_state(AddCardSG.photo)
     await call.message.answer("📷 <b>Отправьте фото новой карточки</b> (/cancel для отмены)")
@@ -1912,7 +1411,7 @@ async def list_cards(call: CallbackQuery):
         r_name = RARITIES.get(rarity, {}).get("name", rarity)
         b.button(text=f"{name} ({r_name})", callback_data=f"card_manage:{c_id}")
     b.adjust(1)
-    await call.message.answer("🃏 <b>Выберите карточку</b>", reply_markup=b.as_markup())
+    await call.message.answer("🀄️ <b>Выберите карточку</b>", reply_markup=b.as_markup())
     await call.answer()
 
 
@@ -1939,13 +1438,13 @@ async def manage_single_card(call: CallbackQuery):
     try:
         await call.message.answer_photo(
             photo=card["photo_id"],
-            caption=f"🃏 <b>{esc(card['name'])}</b>\n\n🎲 <b>{r_name}</b>\n🆔 {card_id}",
+            caption=f"🀄️ <b>{esc(card['name'])}</b>\n\n🎲 <b>{r_name}</b>\n🆔 {card_id}",
             reply_markup=b.as_markup(),
         )
     except TelegramBadRequest as e:
         logger.error(f"manage card photo error: {e}")
         await call.message.answer(
-            f"🃏 <b>{esc(card['name'])}</b>\n\n🎲 <b>{r_name}</b>\n🆔 {card_id}",
+            f"🀄️ <b>{esc(card['name'])}</b>\n\n🎲 <b>{r_name}</b>\n🆔 {card_id}",
             reply_markup=b.as_markup(),
         )
     await call.answer()
