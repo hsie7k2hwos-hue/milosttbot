@@ -1680,6 +1680,29 @@ async def test_denominate_coins(message: Message):
         f"🪙 Суммарный баланс после: <b>{new_total_coins}</b>"
     )
 
+# [TEST] Проставить дату регистрации текущим временем тем,
+# у кого она не установлена (registration = 0)
+@router.message(Command("set_registration_now"), admin_filter)
+async def test_set_registration_now(message: Message):
+    now = int(time.time())
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE registration = 0 OR registration IS NULL"
+        )
+        affected = (await cur.fetchone())[0]
+
+        await db.execute(
+            "UPDATE users SET registration = ? "
+            "WHERE registration = 0 OR registration IS NULL",
+            (now,),
+        )
+
+    await message.answer(
+        f"✅ <b>[TEST] Дата регистрации установлена</b>\n\n"
+        f"👥 Обновлено пользователей: <b>{fmt_num(affected)}</b>\n"
+        f"🕐 Время: <b>{datetime.fromtimestamp(now).strftime('%d.%m.%Y %H:%M:%S')}</b>"
+    )
+
 
 # ================= ЗАПУСК =================
 async def main():
