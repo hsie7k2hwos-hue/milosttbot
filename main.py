@@ -1929,12 +1929,13 @@ async def build_admin_users_page(page: int = 0):
             g = GENDERS.get(u["gender"] or "none", GENDERS["none"])
             role_mark = "👑" if u["role"] == "admin" else "👤"
             reg = datetime.fromtimestamp(u["registration"]).strftime("%d.%m.%Y") if u["registration"] else "—"
+            nick = u["nickname"] or f"User{u['user_id']}"
             text += (
-                f"{role_mark} <b>{esc(u['nickname'] or f'User{u[chr(39) + chr(39)]}' if False else u['nickname'] or f'User{u['user_id']}')}</b>\n"
+                f"{role_mark} <b>{esc(nick)}</b>\n"
                 f"   🆔 <code>{u['user_id']}</code> | 🪙 {fmt_num(u['coins'] or 0)} | 🔥 {u['streak'] or 0} | {g['icon']} | 📅 {reg}\n\n"
             )
             b.button(
-                text=f"{role_mark} {u['nickname'] or f'User{u[chr(39)]}'}" if False else f"{role_mark} {u['nickname'] or f'User{u[chr(39)]}'}",
+                text=f"{role_mark} {nick}",
                 callback_data=AdminUserViewCallback(user_id=u["user_id"]).pack(),
             )
 
