@@ -669,6 +669,7 @@ def rate_limited(key: str, limit: int, window: float) -> bool:
     bucket.append(now)
     return False
 
+
 # ================= АВТО-УДАЛЕНИЕ СООБЩЕНИЯ (п.14) =================
 
 async def _auto_delete(message: Message, delay: int):
@@ -1318,7 +1319,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 await callback.message.answer(caption)
             return
 
-        if action == "collection"
+        if action == "collection":
             photo, caption, keyboard, total = await render_collection(
                 callback.message.bot, user_id
             )
