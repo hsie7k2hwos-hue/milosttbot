@@ -788,10 +788,22 @@ async def get_card_handler(message: Message):
             streak, bonus, new_balance = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             h, m = remaining // 3600, (remaining % 3600) // 60
+            s = remaining % 60
+
+            # Формируем строку с оставшимся временем:
+            # - если есть часы — показываем часы и минуты
+            # - если часов нет, но есть минуты — показываем только минуты
+            # - если и минут нет — показываем только секунды
+            if h > 0:
+                time_str = f"{h} ч {m} мин"
+            elif m > 0:
+                time_str = f"{m} мин"
+            else:
+                time_str = f"{s} сек"
 
             text = (
-                f"🕘 <b>{mention}</b>, придётся немного подождать!\n\n"
-                f"Следующую карточку можно будет получить через <b>{h} ч {m} мин</b>"
+                f"🕘 <b>{mention}</b>, придётся немного подождать!\n"
+                f"Следующую карточку можно будет получить через <b>{time_str}</b>"
             )
             text += _streak_text(streak, bonus, new_balance)
 
