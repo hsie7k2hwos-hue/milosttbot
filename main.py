@@ -2178,9 +2178,11 @@ async def admin_getusers(message: Message):
                 datetime.fromtimestamp(u["registration"]).strftime("%d.%m.%Y")
                 if u["registration"] else "—"
             )
+            uid = u["user_id"]
+            nick = u["nickname"] or f"User{uid}"
             line = (
-                f"{role_mark} <b>{esc(u['nickname'] or f'User{u['user_id']}')}</b> "
-                f"(<code>{u['user_id']}</code>)\n"
+                f"{role_mark} <b>{esc(nick)}</b> "
+                f"(<code>{uid}</code>)\n"
                 f"    🪙 {fmt_num(u['coins'] or 0)} | "
                 f"🀄️ {fmt_num(u['cards_count'])} | "
                 f"🔥 {fmt_num(u['streak'] or 0)} | "
