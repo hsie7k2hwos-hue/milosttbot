@@ -79,7 +79,7 @@ DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfH
 SLOT_SPIN_DELAY = 4  # секунд до показа результата (анимация)
 
 # Доступные эмодзи для слота
-SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎰", "🎳"]
+SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎳"]
 
 RARITIES = {
     "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "reward": 10},
@@ -292,32 +292,6 @@ def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
         if value == 3:
             return 1.0, "⚽️ Штанга… возврат ставки"
         return 0.0, f"⚽️ Мимо ({value})… ставка сгорела"
-
-    # 🎰 Слот-машина (1–64)
-    if emoji == "🎰":
-        # Расшифровка комбинации (официальная схема Telegram)
-        # 0 = BAR, 1 = 🍇, 2 = 🍋, 3 = 7️⃣
-        symbols = ["BAR", "🍇", "🍋", "7️⃣"]
-        v = value - 1
-        left   = symbols[v % 4]
-        center = symbols[(v // 4) % 4]
-        right  = symbols[(v // 16) % 4]
-        combo = f"{left} {center} {right}"
-
-        # Джекпот — три семёрки
-        if value == 64:
-            return 10.0, f"🎰 JACKPOT 7️⃣7️⃣7️⃣!!! x10"
-
-        # Две семёрки слева (7️⃣7️⃣ ?)
-        if value in (16, 32, 48):
-            return 3.0, f"🎰 Две семёрки! ({combo}) x3"
-
-        # Три одинаковых (BAR / 🍇 / 🍋)
-        if value in (1, 22, 43):
-            return 2.5, f"🎰 Три одинаковых! ({combo}) x2.5"
-
-        # Всё остальное — проигрыш
-        return 0.0, f"🎰 {combo}… ставка сгорела"
 
     # fallback
     return 1.0, "⚠️ Что-то пошло не так… возврат ставки"
