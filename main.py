@@ -1074,10 +1074,7 @@ async def slot_machine_handler(message: Message):
             new_balance_after_bet = balance - bet
 
         # --- Прокрут ---
-        spin_msg = await message.reply(
-            f"🎰 <b>{mention}</b> ставит <b>{fmt_num(bet)} 🪙</b>…\n"
-            f"Крутим барабаны…"
-        )
+        spin_msg = await message.reply("🎰")
 
         # Ждём 5 секунд «прокрута»
         await asyncio.sleep(SLOT_SPIN_DELAY)
