@@ -229,6 +229,8 @@ def instant_cost(remaining_seconds: int) -> int:
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
     
 
+from typing import Tuple
+
 def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
     """
     Определяет множитель и текст результата по реальному значению Telegram Dice.
@@ -271,7 +273,7 @@ def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
             return 1.0, "🎳 Три кегли — возврат ставки"
         return 0.0, f"🎳 Всего {value}… ставка сгорела"
 
-    # 🏀 Баскетбол (1–5, 4–5 = попал)
+    # 🏀 Баскетбол (1–5)
     if emoji == "🏀":
         if value == 5:
             return 2.5, "🏀 Красивый данк! x2.5"
@@ -281,8 +283,8 @@ def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
             return 1.0, "🏀 Почти… возврат ставки"
         return 0.0, f"🏀 Мимо ({value})… ставка сгорела"
 
-    # ⚽️ Футбол (1–5, 4–5 = гол)
-    if emoji == "⚽️":
+    # ⚽️ / ⚽ Футбол (1–5)
+    if emoji in ("⚽️", "⚽"):
         if value == 5:
             return 2.5, "⚽️ Гол!!! x2.5"
         if value == 4:
@@ -293,16 +295,29 @@ def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
 
     # 🎰 Слот-машина (1–64)
     if emoji == "🎰":
+        # Расшифровка комбинации (официальная схема Telegram)
+        # 0 = BAR, 1 = 🍇, 2 = 🍋, 3 = 7️⃣
+        symbols = ["BAR", "🍇", "🍋", "7️⃣"]
+        v = value - 1
+        left   = symbols[v % 4]
+        center = symbols[(v // 4) % 4]
+        right  = symbols[(v // 16) % 4]
+        combo = f"{left} {center} {right}"
+
+        # Джекпот — три семёрки
         if value == 64:
-            return 10.0, "🎰 JACKPOT 7️⃣7️⃣7️⃣!!! x10"
-        # Две семёрки слева (7️⃣7️⃣?)
+            return 10.0, f"🎰 JACKPOT 7️⃣7️⃣7️⃣!!! x10"
+
+        # Две семёрки слева (7️⃣7️⃣ ?)
         if value in (16, 32, 48):
-            return 3.0, "🎰 Две семёрки! x3"
+            return 3.0, f"🎰 Две семёрки! ({combo}) x3"
+
         # Три одинаковых (BAR / 🍇 / 🍋)
         if value in (1, 22, 43):
-            return 2.5, "🎰 Три одинаковых! x2.5"
+            return 2.5, f"🎰 Три одинаковых! ({combo}) x2.5"
+
         # Всё остальное — проигрыш
-        return 0.0, "🎰 Пусто… ставка сгорела"
+        return 0.0, f"🎰 {combo}… ставка сгорела"
 
     # fallback
     return 1.0, "⚠️ Что-то пошло не так… возврат ставки"
