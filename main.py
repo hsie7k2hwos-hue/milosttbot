@@ -227,9 +227,7 @@ def instant_cost(remaining_seconds: int) -> int:
     ratio = remaining_seconds / COOLDOWN_SECONDS  # 1.0 -> 0.0
     cost = INSTANT_MIN_COST + (INSTANT_COST - INSTANT_MIN_COST) * ratio
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
-
-
-from typing import Tuple
+    
 
 def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
     """
