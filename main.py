@@ -128,6 +128,14 @@ COLLECTION_CMD_RE = re.compile(
     r"^мряу\s+(коллекция|карточки)\s*$",
     re.IGNORECASE | re.UNICODE,
 )
+TOP_CMD_RE = re.compile(
+    r"^мряу\s+топ\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+HELP_CMD_RE = re.compile(
+    r"^мряу\s+помощь\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -990,6 +998,7 @@ async def cmd_start(message: Message):
 
 @router.message(Command("help"))
 @router.message(F.text == "❓ Помощь")
+@router.message(F.text.regexp(HELP_CMD_RE))
 async def cmd_help(message: Message):
     market_prices = "\n".join(
         f"  {v['icon']} {v['name']} — {MARKET_PRICES[k]} 💎"
@@ -1005,6 +1014,8 @@ async def cmd_help(message: Message):
             "«мряу профиль» — свой профиль (в группе реплаем — профиль другого)\n"
             "«мряу маркет» — маркет (в группе реплаем — маркет другого)\n"
             "«мряу коллекция» / «мряу карточки» — коллекция (реплаем — чужая)\n"
+            "«мряу топ» — топ игроков\n"
+            "«мряу помощь» — эта справка\n"
             "/profile — профиль\n"
             "/collection — мои карточки\n"
             "/market или «🛒 Маркет» — купить недостающие карточки\n"
@@ -1773,6 +1784,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
 
 @router.message(F.text == "🏆 Топ игроков")
 @router.message(Command("top"))
+@router.message(F.text.regexp(TOP_CMD_RE))
 async def show_top_players(message: Message):
     if rate_limited(f"top:{message.from_user.id}", limit=3, window=5):
         return
