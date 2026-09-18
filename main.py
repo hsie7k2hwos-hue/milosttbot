@@ -42,6 +42,24 @@ NICKNAME_COST = 100
 DUPLICATE_CHANCE = 0.25  # п.7 — шанс дубликата
 DUPLICATE_REFUND = 0.5  # 50% от стоимости
 
+# Кристаллы и маркет
+CRYSTAL_TO_COINS = 100  # 1 кристалл = 100 монет
+# Цены карточек в маркете (кристаллы) по редкости
+MARKET_PRICES = {
+    "common": 1,
+    "rare": 3,
+    "epic": 8,
+    "mythical": 20,
+    "legendary": 50,
+}
+# Кристаллы за получение карточки (не дубликат)
+CRYSTAL_REWARDS = {
+    "mythical": 1,
+    "legendary": 2,
+}
+# Бонус кристаллов за стрик (ежедневно при обновлении стрика)
+STREAK_CRYSTAL_BONUSES = [(7, 5), (30, 20)]  # (мин. дней, кристаллы)
+
 # п.14 — авто-удаление сообщений бота о кулдауне в группах (в секундах)
 GROUP_AUTODELETE_SECONDS = 30
 
@@ -149,6 +167,20 @@ def fmt_cards(n: int) -> str:
 def fmt_coins(n: int) -> str:
     """1 монета, 2 монеты, 5 монет."""
     return f"{fmt_num(n)} {plural(n, 'монета', 'монеты', 'монет')}"
+
+
+def fmt_crystals(n: int) -> str:
+    """1 кристалл, 2 кристалла, 5 кристаллов."""
+    return f"{fmt_num(n)} {plural(n, 'кристалл', 'кристалла', 'кристаллов')}"
+
+
+def streak_crystal_bonus(streak: int) -> int:
+    """Кристаллы за текущий стрик (берём максимальный подходящий порог)."""
+    bonus = 0
+    for days, crystals in STREAK_CRYSTAL_BONUSES:
+        if streak >= days:
+            bonus = crystals
+    return bonus
 
 
 def user_mention(user_id: int, nickname: str, username: Optional[str] = None) -> str:
@@ -321,6 +353,24 @@ class AdminUserActionCallback(CallbackData, prefix="admin_user_action"):
     user_id: int
 
 
+class MarketRarityCallback(CallbackData, prefix="mkt_rarity"):
+    rarity: str
+    page: int = 0
+
+
+class MarketBuyCallback(CallbackData, prefix="mkt_buy"):
+    card_id: int
+
+
+class MarketExchangeCallback(CallbackData, prefix="mkt_ex"):
+    action: str  # buy_crystals | menu
+    amount: int = 0
+
+
+class MarketMainCallback(CallbackData, prefix="mkt_main"):
+    pass
+
+
 # ================= БАЗА ДАННЫХ =================
 @asynccontextmanager
 async def get_db():
@@ -359,6 +409,7 @@ async def init_db():
                              role             TEXT    DEFAULT 'user',
                              nickname         TEXT,
                              coins            INTEGER DEFAULT 0,
+                             crystals         INTEGER DEFAULT 0,
                              registration     INTEGER DEFAULT 0,
                              streak           INTEGER DEFAULT 0,
                              last_streak_date INTEGER DEFAULT 0,
@@ -394,6 +445,7 @@ async def init_db():
             ("users", "last_streak_date", "INTEGER DEFAULT 0"),
             ("users", "streak_bonus", "INTEGER DEFAULT 0"),
             ("users", "gender", "TEXT DEFAULT 'none'"),
+            ("users", "crystals", "INTEGER DEFAULT 0"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("inventory", "amount", "INTEGER DEFAULT 1"),
         ]:
@@ -523,7 +575,8 @@ def get_main_km():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🀄️ Получить карточку"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🏆 Топ игроков"), KeyboardButton(text="❓ Помощь")],
+            [KeyboardButton(text="🛒 Маркет"), KeyboardButton(text="🏆 Топ игроков")],
+            [KeyboardButton(text="❓ Помощь")],
         ],
         resize_keyboard=True,
     )
@@ -590,6 +643,7 @@ async def render_profile(bot: Bot, user_id: int):
         cur = await db.execute("""
                                SELECT u.nickname,
                                       u.coins,
+                                      u.crystals,
                                       u.registration,
                                       u.streak,
                                       u.streak_bonus,
@@ -615,6 +669,8 @@ async def render_profile(bot: Bot, user_id: int):
     g = GENDERS.get(gender, GENDERS["none"])
     gender_display = f"{g['icon']} {g['name']}"
 
+    crystals = row["crystals"] if row["crystals"] is not None else 0
+
     caption = (
         f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
         f"🆔 ID • <code>{user_id}</code>\n"
@@ -623,6 +679,7 @@ async def render_profile(bot: Bot, user_id: int):
         f"📅 Регистрация • <b>{reg_date}</b>\n\n"
         f"🀄️ Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
         f"🪙 Монеты • <b>{fmt_num(row['coins'])}</b>\n"
+        f"💎 Кристаллы • <b>{fmt_num(crystals)}</b>\n"
         f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
     )
     return await get_user_photo(bot, user_id, nickname), caption, get_profile_kb()
@@ -751,20 +808,25 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
             card_id, card_name, photo_id = card[0], card[1], card[2]
             base_coins = RARITIES[selected_rarity]["reward"]
             coins_earned = int(base_coins * DUPLICATE_REFUND) if is_duplicate else base_coins
+            crystals_earned = 0
+            if not is_duplicate:
+                crystals_earned = CRYSTAL_REWARDS.get(selected_rarity, 0)
             now = int(time.time())
 
             if check_cooldown:
                 await db.execute(
-                    """INSERT INTO users (user_id, last_claim, coins)
-                       VALUES (?, ?, ?)
+                    """INSERT INTO users (user_id, last_claim, coins, crystals)
+                       VALUES (?, ?, ?, ?)
                        ON CONFLICT(user_id) DO UPDATE SET last_claim = ?,
-                                                          coins      = coins + ?""",
-                    (user_id, now, coins_earned, now, coins_earned),
+                                                          coins      = coins + ?,
+                                                          crystals   = crystals + ?""",
+                    (user_id, now, coins_earned, crystals_earned,
+                     now, coins_earned, crystals_earned),
                 )
             else:
                 await db.execute(
-                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                    (coins_earned, user_id),
+                    "UPDATE users SET coins = coins + ?, crystals = crystals + ? WHERE user_id = ?",
+                    (coins_earned, crystals_earned, user_id),
                 )
 
             await db.execute(
@@ -775,13 +837,19 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                 (user_id, card_id, now, now),
             )
 
-            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-            balance = (await cur.fetchone())[0]
+            cur = await db.execute(
+                "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+            )
+            row_bal = await cur.fetchone()
+            balance = row_bal["coins"]
+            crystals_balance = row_bal["crystals"] or 0
 
             return {
                 "id": card_id, "name": card_name, "photo_id": photo_id,
                 "rarity": selected_rarity, "coins_earned": coins_earned,
-                "balance": balance, "is_duplicate": is_duplicate,
+                "crystals_earned": crystals_earned,
+                "balance": balance, "crystals": crystals_balance,
+                "is_duplicate": is_duplicate,
             }, "success"
     except Exception as e:
         logger.error(f"Ошибка выдачи карточки: {e}")
@@ -789,10 +857,10 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 
 
 # ================= СТРИК =================
-async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
+async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
     """
     Обновляет стрик по факту захода.
-    Возвращает (streak, bonus, balance).
+    Возвращает (streak, coin_bonus, balance, crystal_bonus).
     """
     try:
         now = datetime.now()
@@ -809,14 +877,14 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
             )
             row = await cur.fetchone()
             if not row:
-                return 0, 0, 0
+                return 0, 0, 0, 0
 
             streak = row["streak"] or 0
             last_date = row["last_streak_date"] or 0
             balance = row["coins"] or 0
 
             if today_start <= last_date <= today_end:
-                return streak, 0, balance
+                return streak, 0, balance, 0
 
             new_streak = (
                 streak + 1
@@ -827,18 +895,20 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
             new_bonus = 0 if new_streak == 1 else next(
                 b for d, b in STREAK_BONUSES if new_streak <= d
             )
+            crystal_bonus = streak_crystal_bonus(new_streak)
 
             await db.execute(
                 "UPDATE users SET streak = ?, last_streak_date = ?, "
-                "streak_bonus = ?, coins = coins + ? WHERE user_id = ?",
-                (new_streak, int(time.time()), new_bonus, new_bonus, user_id),
+                "streak_bonus = ?, coins = coins + ?, crystals = crystals + ? "
+                "WHERE user_id = ?",
+                (new_streak, int(time.time()), new_bonus, new_bonus, crystal_bonus, user_id),
             )
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
             new_balance = (await cur.fetchone())[0]
-            return new_streak, new_bonus, new_balance
+            return new_streak, new_bonus, new_balance, crystal_bonus
     except Exception as e:
         logger.error(f"Ошибка обновления стрика: {e}")
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
 
 # ================= RATE LIMIT (п.11) =================
@@ -891,6 +961,10 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 @router.message(F.text == "❓ Помощь")
 async def cmd_help(message: Message):
+    market_prices = "\n".join(
+        f"  {v['icon']} {v['name']} — {MARKET_PRICES[k]} 💎"
+        for k, v in RARITIES.items()
+    )
     text = (
             "📖 <b>Помощь</b>\n\n"
             "<b>Основные команды:</b>\n"
@@ -900,6 +974,7 @@ async def cmd_help(message: Message):
             "«мряу перевод N» — перевод монет (в группе, реплаем на сообщение получателя)\n"
             "/profile — профиль\n"
             "/collection — мои карточки\n"
+            "/market или «🛒 Маркет» — купить недостающие карточки\n"
             "/top — топ игроков\n"
             f"/nickname [ник] — сменить ник ({NICKNAME_COST} 🪙)\n"
             "/nickname reset — сбросить ник (бесплатно)\n"
@@ -912,7 +987,14 @@ async def cmd_help(message: Message):
     )
             + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно: "
               f"цена зависит от остатка таймера (от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙).\n"
-              "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты.\n\n"
+              "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты "
+              f"и кристаллы (от 7 дней — +5 💎, от 30 дней — +20 💎).\n\n"
+              "💎 <b>Кристаллы:</b>\n"
+              "  • 1 мифическая карта (новая) → +1 💎\n"
+              "  • 1 легендарная карта (новая) → +2 💎\n"
+              f"  • Обмен: 1 💎 = {CRYSTAL_TO_COINS} 🪙 (купить кристаллы за монеты в маркете)\n\n"
+              "🛒 <b>Маркет:</b> покупайте карточки, которых у вас ещё нет, за кристаллы.\n"
+              f"Цены:\n{market_prices}\n\n"
               "🎰 <b>Слот-машина:</b> напишите <code>мряу ставка 50</code>. "
               "Бот случайно выбирает игру (🎲 🎯 🏀 ⚽ 🎰 🎳) и крутит анимированный эмодзи. "
               "Выигрыш зависит от того, что реально выпало!\n\n"
@@ -953,7 +1035,7 @@ async def get_card_handler(message: Message):
 
         time_passed = now - last_claim
         if time_passed < COOLDOWN_SECONDS:
-            streak, bonus, new_balance = await check_and_update_streak(user_id)
+            streak, bonus, new_balance, crystal_bonus = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             h, m = remaining // 3600, (remaining % 3600) // 60
             s = remaining % 60
@@ -969,7 +1051,7 @@ async def get_card_handler(message: Message):
                 f"🕘 <b>{mention}</b>, придётся немного подождать!\n"
                 f"Следующую карточку можно будет получить через <b>{time_str}</b>"
             )
-            text += _streak_text(streak, bonus, new_balance)
+            text += _streak_text(streak, bonus, new_balance, crystal_bonus)
 
             sent = await message.reply(
                 text,
@@ -985,10 +1067,10 @@ async def get_card_handler(message: Message):
             await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
             return
 
-        streak, bonus, new_balance = await check_and_update_streak(user_id)
+        streak, bonus, new_balance, crystal_bonus = await check_and_update_streak(user_id)
 
         caption = _card_caption(mention, card)
-        caption += _streak_text(streak, bonus, new_balance)
+        caption += _streak_text(streak, bonus, new_balance, crystal_bonus)
 
         try:
             await message.reply_photo(
@@ -1004,7 +1086,7 @@ async def get_card_handler(message: Message):
         await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
-def _streak_text(streak: int, bonus: int, new_balance: int) -> str:
+def _streak_text(streak: int, bonus: int, new_balance: int, crystal_bonus: int = 0) -> str:
     """Формирует текст про стрик для сообщения."""
     if bonus > 0 and streak == 1:
         return (
@@ -1012,22 +1094,35 @@ def _streak_text(streak: int, bonus: int, new_balance: int) -> str:
             "💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
         )
     if bonus > 0 and streak >= 2:
-        return (
+        text = (
             f"\n\n<blockquote>🔥 Стрик • <b>{fmt_days(streak)}</b>\n"
-            f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]\n"
-            f"💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
+            f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]"
         )
+        if crystal_bonus > 0:
+            text += f"\n💎 Кристаллы • +{fmt_num(crystal_bonus)}"
+        text += (
+            "\n💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
+        )
+        return text
     return ""
 
 
 def _card_caption(mention: str, card: dict) -> str:
     r = RARITIES[card["rarity"]]
     title = "✨ Новая карточка" if not card.get("is_duplicate") else "🔁 Дубликат"
-    return (
+    text = (
         f"{title} • <b>{esc(card['name'])}</b>\n\n"
         f"{r['icon']} Редкость • <b>{r['name']}</b>\n"
         f"🪙 Монеты • <b>+{fmt_num(card['coins_earned'])}</b> [{fmt_num(card['balance'])}]"
     )
+    crystals_earned = card.get("crystals_earned") or 0
+    if crystals_earned > 0:
+        crystals_bal = card.get("crystals") or 0
+        text += (
+            f"\n💎 Кристаллы • <b>+{fmt_num(crystals_earned)}</b> "
+            f"[{fmt_num(crystals_bal)}]"
+        )
+    return text
 
 
 # ================= СЛОТ-МАШИНА =================
@@ -1833,10 +1928,10 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 await callback.message.answer("❌ <b>Ошибка. Монеты возвращены.</b>")
                 return
 
-            streak, bonus, new_balance = await check_and_update_streak(user_id)
+            streak, bonus, new_balance, crystal_bonus = await check_and_update_streak(user_id)
 
             caption = _card_caption(mention, card)
-            caption += _streak_text(streak, bonus, new_balance)
+            caption += _streak_text(streak, bonus, new_balance, crystal_bonus)
 
             try:
                 await callback.message.answer_photo(
@@ -1865,6 +1960,439 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
     except Exception as e:
         logger.error(f"Ошибка обработки действия: {e}")
         await callback.answer("⚠️ Произошла ошибка")
+
+
+# ================= МАРКЕТ =================
+async def get_user_crystals(user_id: int) -> int:
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT crystals FROM users WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        return (row["crystals"] or 0) if row else 0
+
+
+async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Главное меню маркета: баланс + категории по редкости + обмен."""
+    crystals = await get_user_crystals(user_id)
+    async with get_db() as db:
+        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        coins = (row["coins"] or 0) if row else 0
+
+        # Сколько карточек каждой редкости ещё нет у пользователя
+        missing_by_rarity = {}
+        for r_key in RARITIES:
+            cur = await db.execute(
+                """SELECT COUNT(*) FROM cards c
+                   WHERE c.rarity = ?
+                     AND c.id NOT IN (
+                         SELECT card_id FROM inventory WHERE user_id = ?
+                     )""",
+                (r_key, user_id),
+            )
+            missing_by_rarity[r_key] = (await cur.fetchone())[0]
+
+    text = (
+        f"🛒 <b>Маркет</b>\n\n"
+        f"💎 Кристаллы: <b>{fmt_num(crystals)}</b>\n"
+        f"🪙 Монеты: <b>{fmt_num(coins)}</b>\n"
+        f"💱 Курс: 1 💎 = {CRYSTAL_TO_COINS} 🪙\n\n"
+        f"Выберите редкость, чтобы купить недостающие карточки:"
+    )
+
+    b = InlineKeyboardBuilder()
+    for r_key, r_info in RARITIES.items():
+        missing = missing_by_rarity.get(r_key, 0)
+        price = MARKET_PRICES.get(r_key, 0)
+        if missing > 0:
+            label = (
+                f"{r_info['icon']} {r_info['name']} "
+                f"({fmt_num(missing)}) — {price} 💎"
+            )
+        else:
+            label = f"{r_info['icon']} {r_info['name']} — собрано ✅"
+        b.button(
+            text=label,
+            callback_data=MarketRarityCallback(rarity=r_key, page=0).pack(),
+        )
+    b.button(
+        text="💱 Купить кристаллы за монеты",
+        callback_data=MarketExchangeCallback(action="menu").pack(),
+    )
+    b.adjust(1)
+    return text, b.as_markup()
+
+
+async def build_market_rarity_page(
+    user_id: int, rarity: str, page: int = 0
+) -> Tuple[str, InlineKeyboardMarkup, Optional[dict]]:
+    """Список недостающих карточек выбранной редкости (по 1 на страницу с фото)."""
+    per_page = 1
+    price = MARKET_PRICES.get(rarity, 0)
+    r_info = RARITIES.get(rarity, {})
+
+    async with get_db() as db:
+        cur = await db.execute(
+            """SELECT c.id, c.name, c.photo_id, c.rarity
+               FROM cards c
+               WHERE c.rarity = ?
+                 AND c.id NOT IN (
+                     SELECT card_id FROM inventory WHERE user_id = ?
+                 )
+               ORDER BY c.id ASC""",
+            (rarity, user_id),
+        )
+        cards = await cur.fetchall()
+        crystals = await get_user_crystals(user_id)
+
+    if not cards:
+        text = (
+            f"{r_info.get('icon', '')} <b>{r_info.get('name', rarity)}</b>\n\n"
+            f"У вас уже есть все карточки этой редкости! 🎉"
+        )
+        b = InlineKeyboardBuilder()
+        b.button(text="🔙 Назад в маркет", callback_data=MarketMainCallback().pack())
+        b.adjust(1)
+        return text, b.as_markup(), None
+
+    total = len(cards)
+    page = max(0, min(page, total - 1))
+    card = cards[page]
+
+    text = (
+        f"🛒 <b>Маркет</b> • {r_info.get('icon', '')} {r_info.get('name', rarity)}\n\n"
+        f"🀄️ <b>{esc(card['name'])}</b>\n"
+        f"💎 Цена • <b>{fmt_num(price)}</b>\n"
+        f"💎 Ваш баланс • <b>{fmt_num(crystals)}</b>\n"
+        f"📄 {page + 1}/{total}"
+    )
+
+    b = InlineKeyboardBuilder()
+    can_buy = crystals >= price
+    buy_label = (
+        f"✅ Купить ({fmt_num(price)} 💎)"
+        if can_buy
+        else f"❌ Нужно {fmt_num(price)} 💎"
+    )
+    b.button(
+        text=buy_label,
+        callback_data=MarketBuyCallback(card_id=card["id"]).pack(),
+    )
+
+    nav = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️",
+                callback_data=MarketRarityCallback(rarity=rarity, page=page - 1).pack(),
+            )
+        )
+    nav.append(
+        InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data="ignore")
+    )
+    if page < total - 1:
+        nav.append(
+            InlineKeyboardButton(
+                text="▶️",
+                callback_data=MarketRarityCallback(rarity=rarity, page=page + 1).pack(),
+            )
+        )
+
+    b.row(*nav)
+    b.row(
+        InlineKeyboardButton(
+            text="🔙 К редкостям", callback_data=MarketMainCallback().pack()
+        )
+    )
+    return text, b.as_markup(), dict(card)
+
+
+@router.message(F.text == "🛒 Маркет")
+@router.message(Command("market"))
+@router.message(F.text.lower().strip() == "маркет")
+async def show_market(message: Message):
+    try:
+        await get_or_create_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.full_name,
+        )
+        if rate_limited(f"market:{message.from_user.id}", limit=5, window=8):
+            return
+        text, kb = await build_market_main(message.from_user.id)
+        await message.reply(text, reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Ошибка маркета: {e}")
+        await message.reply("❌ <b>Ошибка маркета. Попробуйте позже.</b>")
+
+
+@router.callback_query(MarketMainCallback.filter())
+async def market_main_callback(callback: CallbackQuery):
+    try:
+        text, kb = await build_market_main(callback.from_user.id)
+        try:
+            if callback.message.photo:
+                await callback.message.delete()
+                await callback.message.answer(text, reply_markup=kb)
+            else:
+                await callback.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest:
+            await callback.message.answer(text, reply_markup=kb)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка market_main: {e}")
+        await callback.answer("⚠️ Ошибка")
+
+
+@router.callback_query(MarketRarityCallback.filter())
+async def market_rarity_view(callback: CallbackQuery, callback_data: MarketRarityCallback):
+    try:
+        text, kb, card = await build_market_rarity_page(
+            callback.from_user.id, callback_data.rarity, callback_data.page
+        )
+        if card and card.get("photo_id"):
+            try:
+                if callback.message.photo:
+                    await callback.message.edit_media(
+                        media=InputMediaPhoto(
+                            media=card["photo_id"], caption=text
+                        ),
+                        reply_markup=kb,
+                    )
+                else:
+                    try:
+                        await callback.message.delete()
+                    except Exception:
+                        pass
+                    await callback.message.answer_photo(
+                        photo=card["photo_id"], caption=text, reply_markup=kb
+                    )
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=kb)
+        else:
+            try:
+                if callback.message.photo:
+                    await callback.message.delete()
+                    await callback.message.answer(text, reply_markup=kb)
+                else:
+                    await callback.message.edit_text(text, reply_markup=kb)
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=kb)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка market_rarity: {e}")
+        await callback.answer("⚠️ Ошибка")
+
+
+@router.callback_query(MarketBuyCallback.filter())
+async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallback):
+    user_id = callback.from_user.id
+    card_id = callback_data.card_id
+
+    if rate_limited(f"mkt-buy:{user_id}", limit=5, window=10):
+        await callback.answer("Слишком часто", show_alert=True)
+        return
+
+    try:
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT id, name, rarity, photo_id FROM cards WHERE id = ?",
+                (card_id,),
+            )
+            card = await cur.fetchone()
+            if not card:
+                await callback.answer("❌ Карточка не найдена", show_alert=True)
+                return
+
+            rarity = card["rarity"]
+            price = MARKET_PRICES.get(rarity, 0)
+            if price <= 0:
+                await callback.answer("❌ Эту карточку нельзя купить", show_alert=True)
+                return
+
+            # Уже есть?
+            cur = await db.execute(
+                "SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?",
+                (user_id, card_id),
+            )
+            owned = await cur.fetchone()
+            if owned:
+                await callback.answer("✅ У вас уже есть эта карточка", show_alert=True)
+                return
+
+            cur = await db.execute(
+                "SELECT crystals FROM users WHERE user_id = ?", (user_id,)
+            )
+            row = await cur.fetchone()
+            crystals = (row["crystals"] or 0) if row else 0
+
+            if crystals < price:
+                await callback.answer(
+                    f"⚠️ Недостаточно кристаллов. Нужно {price} 💎, у вас {crystals} 💎",
+                    show_alert=True,
+                )
+                return
+
+            now = int(time.time())
+            await db.execute(
+                "UPDATE users SET crystals = crystals - ? WHERE user_id = ?",
+                (price, user_id),
+            )
+            await db.execute(
+                """INSERT INTO inventory (user_id, card_id, claim_time, amount)
+                   VALUES (?, ?, ?, 1)
+                   ON CONFLICT(user_id, card_id) DO UPDATE SET amount = amount + 1,
+                                                               claim_time = ?""",
+                (user_id, card_id, now, now),
+            )
+            cur = await db.execute(
+                "SELECT crystals FROM users WHERE user_id = ?", (user_id,)
+            )
+            new_crystals = (await cur.fetchone())[0] or 0
+
+        r_info = RARITIES.get(rarity, {})
+        caption = (
+            f"✅ <b>Покупка успешна!</b>\n\n"
+            f"🀄️ <b>{esc(card['name'])}</b>\n"
+            f"{r_info.get('icon', '')} {r_info.get('name', rarity)}\n"
+            f"💎 Списано • <b>{fmt_num(price)}</b>\n"
+            f"💎 Баланс • <b>{fmt_num(new_crystals)}</b>"
+        )
+        b = InlineKeyboardBuilder()
+        b.button(
+            text="🛒 Продолжить покупки",
+            callback_data=MarketRarityCallback(rarity=rarity, page=0).pack(),
+        )
+        b.button(text="🏠 В маркет", callback_data=MarketMainCallback().pack())
+        b.adjust(1)
+
+        try:
+            await callback.message.answer_photo(
+                photo=card["photo_id"], caption=caption, reply_markup=b.as_markup()
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(caption, reply_markup=b.as_markup())
+        await callback.answer("✅ Куплено!")
+    except Exception as e:
+        logger.error(f"Ошибка покупки в маркете: {e}")
+        await callback.answer("⚠️ Ошибка покупки", show_alert=True)
+
+
+@router.callback_query(MarketExchangeCallback.filter())
+async def market_exchange(callback: CallbackQuery, callback_data: MarketExchangeCallback):
+    user_id = callback.from_user.id
+    action = callback_data.action
+    amount = callback_data.amount
+
+    try:
+        if action == "menu":
+            async with get_db() as db:
+                cur = await db.execute(
+                    "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+                )
+                row = await cur.fetchone()
+            coins = (row["coins"] or 0) if row else 0
+            crystals = (row["crystals"] or 0) if row else 0
+            max_buy = coins // CRYSTAL_TO_COINS
+
+            text = (
+                f"💱 <b>Обмен монет на кристаллы</b>\n\n"
+                f"Курс: <b>1 💎 = {CRYSTAL_TO_COINS} 🪙</b>\n"
+                f"🪙 Монеты: <b>{fmt_num(coins)}</b>\n"
+                f"💎 Кристаллы: <b>{fmt_num(crystals)}</b>\n"
+                f"Можно купить до: <b>{fmt_num(max_buy)}</b> 💎\n\n"
+                f"Выберите количество:"
+            )
+            b = InlineKeyboardBuilder()
+            for n in (1, 5, 10, 25, 50):
+                cost = n * CRYSTAL_TO_COINS
+                if coins >= cost:
+                    b.button(
+                        text=f"+{n} 💎 ({fmt_num(cost)} 🪙)",
+                        callback_data=MarketExchangeCallback(
+                            action="buy_crystals", amount=n
+                        ).pack(),
+                    )
+            if max_buy >= 1 and max_buy not in (1, 5, 10, 25, 50):
+                cost = max_buy * CRYSTAL_TO_COINS
+                b.button(
+                    text=f"+{fmt_num(max_buy)} 💎 (все, {fmt_num(cost)} 🪙)",
+                    callback_data=MarketExchangeCallback(
+                        action="buy_crystals", amount=max_buy
+                    ).pack(),
+                )
+            b.button(text="🔙 Назад", callback_data=MarketMainCallback().pack())
+            b.adjust(2)
+            try:
+                if callback.message.photo:
+                    await callback.message.delete()
+                    await callback.message.answer(text, reply_markup=b.as_markup())
+                else:
+                    await callback.message.edit_text(text, reply_markup=b.as_markup())
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=b.as_markup())
+            await callback.answer()
+            return
+
+        if action == "buy_crystals":
+            if amount <= 0:
+                await callback.answer("❌ Некорректное количество")
+                return
+            if amount > 10_000:
+                await callback.answer("❌ Слишком много за раз", show_alert=True)
+                return
+
+            cost = amount * CRYSTAL_TO_COINS
+            async with get_db() as db:
+                cur = await db.execute(
+                    "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+                )
+                row = await cur.fetchone()
+                coins = (row["coins"] or 0) if row else 0
+                if coins < cost:
+                    await callback.answer(
+                        f"⚠️ Недостаточно монет. Нужно {fmt_num(cost)} 🪙",
+                        show_alert=True,
+                    )
+                    return
+                await db.execute(
+                    "UPDATE users SET coins = coins - ?, crystals = crystals + ? "
+                    "WHERE user_id = ?",
+                    (cost, amount, user_id),
+                )
+                cur = await db.execute(
+                    "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+                )
+                row = await cur.fetchone()
+                new_coins = row["coins"] or 0
+                new_crystals = row["crystals"] or 0
+
+            text = (
+                f"✅ <b>Обмен выполнен</b>\n\n"
+                f"💎 Получено: <b>+{fmt_num(amount)}</b>\n"
+                f"🪙 Списано: <b>−{fmt_num(cost)}</b>\n\n"
+                f"💎 Баланс: <b>{fmt_num(new_crystals)}</b>\n"
+                f"🪙 Монеты: <b>{fmt_num(new_coins)}</b>"
+            )
+            b = InlineKeyboardBuilder()
+            b.button(
+                text="💱 Ещё обмен",
+                callback_data=MarketExchangeCallback(action="menu").pack(),
+            )
+            b.button(text="🛒 В маркет", callback_data=MarketMainCallback().pack())
+            b.adjust(1)
+            try:
+                await callback.message.edit_text(text, reply_markup=b.as_markup())
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=b.as_markup())
+            await callback.answer("✅ Готово!")
+            return
+
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка обмена: {e}")
+        await callback.answer("⚠️ Ошибка обмена", show_alert=True)
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
@@ -2243,7 +2771,7 @@ async def build_admin_users_page(page: int = 0):
         offset = page * per_page
 
         cur = await db.execute(
-            """SELECT u.user_id, u.nickname, u.coins, u.streak, u.role, u.registration, u.gender
+            """SELECT u.user_id, u.nickname, u.coins, u.crystals, u.streak, u.role, u.registration, u.gender
                FROM users u
                ORDER BY u.registration DESC
                LIMIT ? OFFSET ?""",
@@ -2260,7 +2788,8 @@ async def build_admin_users_page(page: int = 0):
             nick = u["nickname"] or f"User{u['user_id']}"
             text += (
                 f"{role_mark} <b>{esc(nick)}</b>\n"
-                f"   🆔 <code>{u['user_id']}</code> | 🪙 {fmt_num(u['coins'] or 0)} | 🔥 {u['streak'] or 0} | {g['icon']} | 📅 {reg}\n\n"
+                f"   🆔 <code>{u['user_id']}</code> | 🪙 {fmt_num(u['coins'] or 0)} | "
+                f"💎 {fmt_num(u['crystals'] or 0)} | 🔥 {u['streak'] or 0} | {g['icon']} | 📅 {reg}\n\n"
             )
             b.button(
                 text=f"{role_mark} {nick}",
@@ -2319,6 +2848,7 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
     g = GENDERS.get(user["gender"] or "none", GENDERS["none"])
     reg = datetime.fromtimestamp(user["registration"]).strftime("%d.%m.%Y %H:%M") if user["registration"] else "—"
 
+    crystals = user["crystals"] if user["crystals"] is not None else 0
     caption = (
         f"👤 <b>{esc(nick)}</b>\n\n"
         f"🆔 <code>{user_id}</code>\n"
@@ -2326,6 +2856,7 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
         f"⚧ Пол: {g['icon']} {g['name']}\n"
         f"📅 Регистрация: {reg}\n"
         f"🪙 Монеты: <b>{fmt_num(user['coins'])}</b>\n"
+        f"💎 Кристаллы: <b>{fmt_num(crystals)}</b>\n"
         f"🀄️ Карточек: <b>{fmt_num(user['cards_count'])}</b>\n"
         f"🔥 Стрик: <b>{fmt_days(user['streak'])}</b>"
     )
@@ -2333,6 +2864,7 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
     b = InlineKeyboardBuilder()
     b.button(text="✏️ Ник", callback_data=AdminUserActionCallback(action="nick", user_id=user_id).pack())
     b.button(text="🪙 Монеты", callback_data=AdminUserActionCallback(action="coins", user_id=user_id).pack())
+    b.button(text="💎 Кристаллы", callback_data=AdminUserActionCallback(action="crystals", user_id=user_id).pack())
     if user["role"] == "admin":
         b.button(text="❌ Разжаловать", callback_data=AdminUserActionCallback(action="unadmin", user_id=user_id).pack())
     else:
@@ -2377,6 +2909,12 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
         await call.message.answer(
             f"🪙 Чтобы изменить монеты пользователя <code>{target_id}</code>, "
             f"выполните команду:\n<code>/setcoins {target_id} 1000</code>"
+        )
+        await call.answer()
+    elif action == "crystals":
+        await call.message.answer(
+            f"💎 Чтобы изменить кристаллы пользователя <code>{target_id}</code>, "
+            f"выполните команду:\n<code>/setcrystals {target_id} 50</code>"
         )
         await call.answer()
 
@@ -2440,7 +2978,8 @@ async def admin_help(message: Message):
         "<code>/getusers</code> — список пользователей (текстом)\n\n"
 
         "<b>🪙 Управление пользователями:</b>\n"
-        "<code>/setcoins [USERID] COINS</code> — установить баланс\n"
+        "<code>/setcoins [USERID] COINS</code> — установить баланс монет\n"
+        "<code>/setcrystals [USERID] N</code> — установить баланс кристаллов\n"
         "<code>/setnick USERID НовыйНик</code> — установить ник\n"
         "<code>/resetcd [USERID]</code> — сбросить кулдаун\n"
         "<i>Все команды работают только в ЛС.</i>\n\n"
@@ -2604,6 +3143,12 @@ async def admin_stats(message: Message):
             cur = await db.execute("SELECT COALESCE(MAX(coins), 0) FROM users")
             max_coins = (await cur.fetchone())[0]
 
+            cur = await db.execute("SELECT COALESCE(SUM(crystals), 0) FROM users")
+            total_crystals = (await cur.fetchone())[0]
+
+            cur = await db.execute("SELECT COALESCE(MAX(crystals), 0) FROM users")
+            max_crystals = (await cur.fetchone())[0]
+
             cur = await db.execute("SELECT COUNT(*) FROM cards")
             total_cards = (await cur.fetchone())[0]
 
@@ -2658,6 +3203,9 @@ async def admin_stats(message: Message):
                 f"  • В обороте: <b>{fmt_num(total_coins)}</b>\n"
                 f"  • В среднем: <b>{fmt_num(int(avg_coins))}</b>\n"
                 f"  • Максимум: <b>{fmt_num(max_coins)}</b>\n\n"
+                f"<b>💎 Кристаллы:</b>\n"
+                f"  • В обороте: <b>{fmt_num(total_crystals)}</b>\n"
+                f"  • Максимум: <b>{fmt_num(max_crystals)}</b>\n\n"
                 f"<b>🀄️ Карточки в игре:</b>\n"
                 f"  • Всего: <b>{fmt_num(total_cards)}</b>\n"
                 + "\n".join(rarity_lines) + "\n\n"
@@ -2749,6 +3297,80 @@ async def admin_setcoins(message: Message, command: Command):
         f"✅ <b>Баланс обновлён</b> ({who}):\n"
         f"🆔 <code>{target_id}</code>\n"
         f"🪙 Было: <b>{fmt_num(old_coins)}</b> → Стало: <b>{fmt_num(coins)}</b>"
+    )
+
+
+@router.message(Command("setcrystals"), admin_filter)
+async def admin_setcrystals(message: Message, command: Command):
+    if message.chat.type != "private":
+        await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
+        return
+
+    args = (command.args or "").strip().split()
+    if not args:
+        await message.reply(
+            "✏️ Использование:\n"
+            "<code>/setcrystals N</code> — себе\n"
+            "<code>/setcrystals USERID N</code> — другому пользователю\n\n"
+            "Например: <code>/setcrystals 50</code> или <code>/setcrystals 123456789 100</code>"
+        )
+        return
+
+    target_id = message.from_user.id
+
+    if len(args) == 1:
+        try:
+            crystals = int(args[0])
+        except ValueError:
+            await message.reply("❌ <b>N должно быть числом.</b>")
+            return
+    elif len(args) == 2:
+        try:
+            target_id = int(args[0])
+            crystals = int(args[1])
+        except ValueError:
+            await message.reply("❌ <b>USERID и N должны быть числами.</b>")
+            return
+    else:
+        await message.reply(
+            "❌ <b>Слишком много аргументов.</b> Используйте /setcrystals [USERID] N"
+        )
+        return
+
+    if target_id <= 0:
+        await message.reply("❌ <b>Некорректный USERID.</b>")
+        return
+    if crystals < 0:
+        await message.reply("❌ <b>Баланс не может быть отрицательным.</b>")
+        return
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id, nickname, crystals FROM users WHERE user_id = ?",
+            (target_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            await message.reply(
+                f"❌ <b>Пользователь не найден в базе.</b>\n"
+                f"Он должен хотя бы раз запустить бота (<code>/start</code>)."
+            )
+            return
+
+        old_crystals = row["crystals"] or 0
+        await db.execute(
+            "UPDATE users SET crystals = ? WHERE user_id = ?", (crystals, target_id)
+        )
+
+    who = (
+        "себе"
+        if target_id == message.from_user.id
+        else f"пользователю {esc(row['nickname'] or target_id)}"
+    )
+    await message.reply(
+        f"✅ <b>Кристаллы обновлены</b> ({who}):\n"
+        f"🆔 <code>{target_id}</code>\n"
+        f"💎 Было: <b>{fmt_num(old_crystals)}</b> → Стало: <b>{fmt_num(crystals)}</b>"
     )
 
 
