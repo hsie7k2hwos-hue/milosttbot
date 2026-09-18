@@ -48,6 +48,31 @@ GROUP_AUTODELETE_SECONDS = 30
 # п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 
+# ================= СЛОТ-МАШИНА (🎰) =================
+# Команда: «мряу ставка [монеты]»
+# Пример: мряу ставка 50
+# Логика:
+#   1. Проверяем, что на балансе хватает монет (нельзя ставить больше, чем есть).
+#   2. Списываем ставку сразу.
+#   3. Отправляем «прокрут» 🎰.
+#   4. Ждём 5 секунд.
+#   5. По вероятности определяем множитель и начисляем выигрыш (или 0).
+#   6. Баланс в БД может стать отрицательным (если когда-то будет нужно),
+#      но при ставке мы всегда проверяем balance >= bet.
+SLOT_SPIN_DELAY = 5  # секунд до результата
+
+# Таблица выплат слот-машины (множитель × ставка):
+#   (шанс, множитель, текст результата)
+# Сумма шансов = 1.0
+SLOT_PAYOUTS = [
+    (0.45, 0, "💀 Пусто… ставка сгорела"),  # 45% — проигрыш
+    (0.25, 1.5, "🍋 x1.5 — небольшой выигрыш"),  # 25%
+    (0.15, 2, "🍒 x2 — неплохо!"),  # 15%
+    (0.08, 3, "🍊 x3 — солидно!"),  # 8%
+    (0.05, 5, "🍇 x5 — крупный куш!"),  # 5%
+    (0.02, 10, "💎 JACKPOT x10!!!"),  # 2%
+]
+
 RARITIES = {
     "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "reward": 10},
     "rare": {"icon": "🔵", "name": "Редкая", "weight": 20, "reward": 25},
@@ -69,6 +94,12 @@ STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
 # п.5.2 — валидация ника
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
+
+# Регулярка для команды слота: «мряу ставка 123»
+SLOT_CMD_RE = re.compile(
+    r"^мряу\s+ставка\s+(\d+)\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -147,6 +178,22 @@ def instant_cost(remaining_seconds: int) -> int:
     ratio = remaining_seconds / COOLDOWN_SECONDS  # 1.0 -> 0.0
     cost = INSTANT_MIN_COST + (INSTANT_COST - INSTANT_MIN_COST) * ratio
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
+
+
+def roll_slot() -> Tuple[float, str]:
+    """
+    Бросок слот-машины.
+    Возвращает (множитель, текст_результата).
+    Множитель 0 = полный проигрыш ставки.
+    """
+    r = random.random()
+    cumulative = 0.0
+    for chance, mult, text in SLOT_PAYOUTS:
+        cumulative += chance
+        if r <= cumulative:
+            return mult, text
+    # на всякий случай (если сумма шансов < 1 из-за округления)
+    return 0.0, "💀 Пусто… ставка сгорела"
 
 
 # ================= CALLBACK DATA =================
@@ -808,6 +855,7 @@ async def cmd_help(message: Message):
             "<b>Основные команды:</b>\n"
             "/start — запуск бота\n"
             "/meow или «мряу» — получить карточку\n"
+            "«мряу ставка N» — слот-машина 🎰 (ставка N монет)\n"
             "/profile — профиль\n"
             "/collection — мои карточки\n"
             "/top — топ игроков\n"
@@ -823,6 +871,9 @@ async def cmd_help(message: Message):
             + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно: "
               f"цена зависит от остатка таймера (от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙).\n"
               "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты.\n\n"
+              "🎰 <b>Слот-машина:</b> напишите <code>мряу ставка 50</code> — "
+              "бот крутит 🎰 и через 5 секунд показывает результат. "
+              "Можно выиграть x1.5 … x10 или потерять ставку.\n\n"
               "💞 <b>РП-команды (в группах):</b> напишите <code>+мрп</code>, "
               "чтобы увидеть список доступных действий."
     )
@@ -941,6 +992,155 @@ def _card_caption(mention: str, card: dict) -> str:
         f"{r['icon']} Редкость • <b>{r['name']}</b>\n"
         f"🪙 Монеты • <b>+{fmt_num(card['coins_earned'])}</b> [{fmt_num(card['balance'])}]"
     )
+
+
+# ================= СЛОТ-МАШИНА 🎰 =================
+@router.message(F.text.regexp(SLOT_CMD_RE))
+async def slot_machine_handler(message: Message):
+    """
+    Обработчик команды «мряу ставка N».
+    1. Парсим сумму ставки.
+    2. Проверяем баланс (нельзя ставить больше, чем есть).
+    3. Списываем ставку.
+    4. Отправляем «прокрут» 🎰.
+    5. Ждём SLOT_SPIN_DELAY секунд.
+    6. Бросаем результат по таблице SLOT_PAYOUTS.
+    7. Начисляем выигрыш (или ничего) и сообщаем итог.
+    Баланс в БД может уйти в отрицательные значения (требование),
+    но при приёме ставки всегда проверяем balance >= bet.
+    """
+    user_id = message.from_user.id
+
+    # Rate-limit: не чаще 4 ставок за 15 секунд на пользователя
+    if rate_limited(f"slot:{user_id}", limit=4, window=15):
+        await message.reply("⏳ Слишком часто. Подождите немного.")
+        return
+
+    # В группах дополнительно ограничиваем общий поток
+    if message.chat.type != "private":
+        if rate_limited(f"slot-chat:{message.chat.id}", limit=8, window=15):
+            return
+
+    text = (message.text or "").strip()
+    m = SLOT_CMD_RE.match(text)
+    if not m:
+        return
+
+    try:
+        bet = int(m.group(1))
+    except (ValueError, IndexError):
+        await message.reply("❌ <b>Ставка должна быть целым числом.</b>\nПример: <code>мряу ставка 50</code>")
+        return
+
+    if bet <= 0:
+        await message.reply("❌ <b>Ставка должна быть больше нуля.</b>")
+        return
+
+    # Максимальная разумная ставка (защита от случайного ввода огромных чисел)
+    if bet > 1_000_000:
+        await message.reply("❌ <b>Слишком большая ставка.</b> Максимум — 1 000 000 🪙")
+        return
+
+    try:
+        await get_or_create_user(
+            user_id, message.from_user.username, message.from_user.full_name
+        )
+        nickname = await get_user_nickname(user_id)
+        mention = user_mention(user_id, nickname, message.from_user.username)
+
+        # --- Проверка и списание ставки ---
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+            )
+            row = await cur.fetchone()
+            balance = row["coins"] if row else 0
+
+            # Нельзя ставить, если на балансе не хватает монет
+            if balance < bet:
+                await message.reply(
+                    f"⚠️ <b>Недостаточно монет.</b>\n"
+                    f"Ставка: <b>{fmt_num(bet)} 🪙</b>\n"
+                    f"У вас: <b>{fmt_num(balance)} 🪙</b>"
+                )
+                return
+
+            # Списываем ставку сразу (баланс может потом стать отрицательным
+            # только если позже кто-то вручную изменит через админ-команды)
+            await db.execute(
+                "UPDATE users SET coins = coins - ? WHERE user_id = ?",
+                (bet, user_id),
+            )
+            new_balance_after_bet = balance - bet
+
+        # --- Прокрут ---
+        spin_msg = await message.reply(
+            f"🎰 <b>{mention}</b> ставит <b>{fmt_num(bet)} 🪙</b>…\n"
+            f"Крутим барабаны…"
+        )
+
+        # Ждём 5 секунд «прокрута»
+        await asyncio.sleep(SLOT_SPIN_DELAY)
+
+        # --- Результат ---
+        mult, result_text = roll_slot()
+        win_amount = int(bet * mult)  # целое число монет
+
+        async with get_db() as db:
+            if win_amount > 0:
+                await db.execute(
+                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                    (win_amount, user_id),
+                )
+            cur = await db.execute(
+                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+            )
+            final_balance = (await cur.fetchone())[0]
+
+        # Формируем итоговое сообщение
+        if mult == 0:
+            delta_str = f"−{fmt_num(bet)}"
+            color_emoji = "📉"
+        else:
+            profit = win_amount - bet
+            if profit > 0:
+                delta_str = f"+{fmt_num(profit)}"
+                color_emoji = "📈"
+            elif profit == 0:
+                delta_str = "±0"
+                color_emoji = "➡️"
+            else:
+                # на случай, если когда-нибудь появится множитель < 1
+                delta_str = f"{fmt_num(profit)}"
+                color_emoji = "📉"
+
+        result_caption = (
+            f"🎰 <b>Результат</b>\n\n"
+            f"{result_text}\n\n"
+            f"💰 Ставка • <b>{fmt_num(bet)} 🪙</b>\n"
+            f"🎁 Выигрыш • <b>{fmt_num(win_amount)} 🪙</b>\n"
+            f"{color_emoji} Итог • <b>{delta_str} 🪙</b>\n"
+            f"🪙 Баланс • <b>{fmt_num(final_balance)}</b>"
+        )
+
+        try:
+            await spin_msg.edit_text(result_caption)
+        except TelegramBadRequest:
+            # если сообщение уже нельзя редактировать — просто отвечаем новым
+            await message.reply(result_caption)
+
+    except Exception as e:
+        logger.error(f"Ошибка в slot_machine_handler: {e}")
+        # На всякий случай пытаемся вернуть ставку, если что-то пошло не так после списания
+        try:
+            async with get_db() as db:
+                await db.execute(
+                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                    (bet, user_id),
+                )
+        except Exception:
+            pass
+        await message.reply("❌ <b>Произошла ошибка в слоте. Попробуйте позже.</b>")
 
 
 # ---------- Профиль ----------
@@ -1530,6 +1730,208 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
     except Exception as e:
         logger.error(f"Ошибка обработки действия: {e}")
         await callback.answer("⚠️ Произошла ошибка")
+
+
+# ================= РП-КОМАНДЫ ДЛЯ ГРУПП =================
+
+# Словарь: ключ (без "+") -> данные действия.
+# verb_m / verb_f / verb_n — формы глагола прошедшего времени.
+# "acc" — винительный падеж для текста (кого?).
+RP_ACTIONS = {
+    "обнять": {"verb_m": "обнял", "verb_f": "обняла", "verb_n": "обнял(-а)", "emoji": "🤗"},
+    "поцеловать": {"verb_m": "поцеловал", "verb_f": "поцеловала", "verb_n": "поцеловал(-а)", "emoji": "😘"},
+    "чмок": {"verb_m": "чмокнул", "verb_f": "чмокнула", "verb_n": "чмокнул(-а)", "emoji": "😚"},
+    "погладить": {"verb_m": "погладил", "verb_f": "погладила", "verb_n": "погладил(-а)", "emoji": "🫶"},
+    "ударить": {"verb_m": "ударил", "verb_f": "ударила", "verb_n": "ударил(-а)", "emoji": "👊"},
+    "кусь": {"verb_m": "укусил", "verb_f": "укусила", "verb_n": "укусил(-а)", "emoji": "😈"},
+    "лизь": {"verb_m": "лизнул", "verb_f": "лизнула", "verb_n": "лизнул(-а)", "emoji": "👅"},
+    "шлёп": {"verb_m": "шлёпнул", "verb_f": "шлёпнула", "verb_n": "шлёпнул(-а)", "emoji": "🍑"},  # NSFW
+    "трах": {"verb_m": "трахнул", "verb_f": "трахнула", "verb_n": "трахнул(-а)", "emoji": "🔥"},  # NSFW
+    "выебать": {"verb_m": "выебал", "verb_f": "выебала", "verb_n": "выебал(-а)", "emoji": "🔞"},  # NSFW
+    "пнуть": {"verb_m": "пнул", "verb_f": "пнула", "verb_n": "пнул(-а)", "emoji": "🦶"},
+    "ласка": {"verb_m": "приласкал", "verb_f": "приласкала", "verb_n": "приласкал(-а)", "emoji": "💞"},
+    "фистинг": {"verb_m": "сделал фистинг", "verb_f": "сделала фистинг", "verb_n": "сделал(-а) фистинг", "emoji": "✊"},
+    # NSFW
+    "отсос": {"verb_m": "отсосал", "verb_f": "отсосала", "verb_n": "отсосал(-а)", "emoji": "🌭"},  # NSFW
+    "подрочить": {"verb_m": "подрочил", "verb_f": "подрочила", "verb_n": "подрочил(-а)", "emoji": "🍌"},  # NSFW
+}
+
+# Регулярка: "+команда" в начале сообщения, затем опционально цель
+RP_TRIGGER_RE = re.compile(r"^\+(?P<cmd>[A-Za-zА-Яа-яЁё_]+)\b(?P<rest>.*)$", re.UNICODE)
+
+# Регулярка для id-цели: id123456789
+RP_ID_RE = re.compile(r"^id(?P<uid>\d+)$", re.IGNORECASE)
+
+
+def _rp_verb(action: dict, gender: Optional[str]) -> str:
+    """Выбирает форму глагола по полу инициатора."""
+    if gender == "male":
+        return action["verb_m"]
+    if gender == "female":
+        return action["verb_f"]
+    return action["verb_n"]
+
+
+async def _resolve_target(message: Message, rest: str) -> Optional[int]:
+    """
+    Определяет ID цели РП-действия.
+    Приоритет:
+      1) reply — отвечают на сообщение пользователя;
+      2) @username — Telegram-юзернейм;
+      3) id123456789 — числовой ID.
+    Возвращает user_id или None.
+    """
+    # 1) Reply
+    if message.reply_to_message and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user.id
+
+    rest = (rest or "").strip()
+    if not rest:
+        return None
+
+    # 2) @username
+    if rest.startswith("@"):
+        username = rest[1:].split()[0].strip()
+        if username:
+            try:
+                chat = await message.bot.get_chat("@" + username)
+                if chat and getattr(chat, "id", None):
+                    return chat.id
+            except Exception as e:
+                logger.debug(f"RP: не удалось resolve @{username}: {e}")
+        return None
+
+    # 3) id<число>
+    m = RP_ID_RE.match(rest.split()[0])
+    if m:
+        return int(m.group("uid"))
+
+    return None
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.lower().regexp(r"^\+\s*мрп\s*$"))
+async def rp_help_handler(message: Message):
+    """+мрп — список доступных РП-команд."""
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    if rate_limited(f"rphelp:{message.chat.id}", limit=3, window=15):
+        return
+
+    lines = []
+    for cmd, info in RP_ACTIONS.items():
+        lines.append(f"{info['emoji']} <code>+{cmd}</code> — {info['verb_m']} / {info['verb_f']}")
+
+    text = (
+            "💞 <b>РП-команды</b>\n\n"
+            "<b>Как использовать:</b>\n"
+            "• <code>+обнять</code> — ответом на сообщение\n"
+            "• <code>+обнять @username</code> — по юзернейму\n"
+            "• <code>+обнять id123456789</code> — по ID\n\n"
+            "<b>Доступные действия:</b>\n"
+            + "\n".join(lines)
+            + "\n\n💡 Форма глагола подбирается по вашему полу "
+              "(<code>/gender м|ж|др|нет</code>)."
+    )
+    await message.reply(text)
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.startswith("+"))
+async def rp_action_handler(message: Message):
+    """Обработчик РП-команд вида «+обнять @user» / «+поцеловать id123» / реплай + «+погладить»."""
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    text = (message.text or "").strip()
+    m = RP_TRIGGER_RE.match(text)
+    if not m:
+        return
+
+    cmd = m.group("cmd").lower()
+    action = RP_ACTIONS.get(cmd)
+    if not action:
+        # не наша команда — тихо игнорируем, чтобы не спамить
+        return
+
+    # Rate limit: 5 РП в 10 секунд на чат
+    if rate_limited(f"rp:{message.chat.id}", limit=5, window=10):
+        return
+
+    actor_id = message.from_user.id
+    target_id = await _resolve_target(message, m.group("rest"))
+
+    if not target_id:
+        await message.reply(
+            "🎯 <b>Укажите цель:</b>\n"
+            "• ответьте на сообщение пользователя,\n"
+            "• или напишите <code>@username</code>,\n"
+            "• или <code>id123456789</code>."
+        )
+        return
+
+    if target_id == actor_id:
+        await message.reply("🙃 <b>Нельзя применить действие к самому себе.</b>")
+        return
+
+    # Создаём обоих, если их нет в БД
+    try:
+        await get_or_create_user(
+            actor_id, message.from_user.username, message.from_user.full_name
+        )
+        # Цель может быть недоступна через get_chat, но get_or_create_user создаст запись
+        target_username = None
+        target_full_name = None
+        if message.reply_to_message and message.reply_to_message.from_user \
+                and message.reply_to_message.from_user.id == target_id:
+            tu = message.reply_to_message.from_user
+            target_username = tu.username
+            target_full_name = tu.full_name
+        else:
+            try:
+                chat = await message.bot.get_chat(target_id)
+                target_username = getattr(chat, "username", None)
+                target_full_name = getattr(chat, "full_name", None)
+            except Exception as e:
+                logger.debug(f"RP: get_chat({target_id}) failed: {e}")
+        await get_or_create_user(target_id, target_username, target_full_name)
+    except Exception as e:
+        logger.error(f"RP: ошибка создания пользователей: {e}")
+        await message.reply("❌ <b>Не удалось обработать команду.</b>")
+        return
+
+    # Достаём ники и полы
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id, nickname, gender FROM users WHERE user_id IN (?, ?)",
+            (actor_id, target_id),
+        )
+        rows = {r["user_id"]: r for r in await cur.fetchall()}
+
+    actor = rows.get(actor_id)
+    target = rows.get(target_id)
+
+    actor_nick = (actor["nickname"] if actor and actor["nickname"] else None) \
+                 or message.from_user.full_name \
+                 or f"User{actor_id}"
+    actor_gender = actor["gender"] if actor else "none"
+
+    target_nick = (target["nickname"] if target and target["nickname"] else None) \
+                  or target_full_name \
+                  or f"User{target_id}"
+    target_username = target_username or None
+
+    verb = _rp_verb(action, actor_gender)
+    emoji = action["emoji"]
+
+    actor_mention = user_mention(actor_id, actor_nick, message.from_user.username)
+    target_mention = user_mention(target_id, target_nick, target_username)
+
+    text_out = f"{emoji} {actor_mention} {verb} {target_mention}"
+
+    try:
+        await message.reply(text_out)
+    except TelegramBadRequest as e:
+        logger.warning(f"RP reply failed: {e}")
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
