@@ -91,6 +91,12 @@ SLOT_CMD_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Регулярка для перевода: «мряу перевод 123»
+TRANSFER_CMD_RE = re.compile(
+    r"^мряу\s+перевод\s+(\d+)\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -891,6 +897,7 @@ async def cmd_help(message: Message):
             "/start — запуск бота\n"
             "/meow или «мряу» — получить карточку\n"
             "«мряу ставка N» — слот-машина (ставка N монет)\n"
+            "«мряу перевод N» — перевод монет (в группе, реплаем на сообщение получателя)\n"
             "/profile — профиль\n"
             "/collection — мои карточки\n"
             "/top — топ игроков\n"
@@ -908,7 +915,9 @@ async def cmd_help(message: Message):
               "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты.\n\n"
               "🎰 <b>Слот-машина:</b> напишите <code>мряу ставка 50</code>. "
               "Бот случайно выбирает игру (🎲 🎯 🏀 ⚽ 🎰 🎳) и крутит анимированный эмодзи. "
-              "Выигрыш зависит от того, что реально выпало!"
+              "Выигрыш зависит от того, что реально выпало!\n\n"
+              "💸 <b>Перевод монет:</b> в группе ответьте на сообщение пользователя "
+              "командой <code>мряу перевод 100</code>. В личных сообщениях не работает."
     )
     await message.reply(text, reply_markup=get_main_km())
 
@@ -1158,6 +1167,127 @@ async def slot_machine_handler(message: Message):
         except Exception:
             pass
         await message.reply("❌ <b>Произошла ошибка в слоте. Попробуйте позже.</b>")
+
+
+# ================= ПЕРЕВОД МОНЕТ =================
+@router.message(F.text.regexp(TRANSFER_CMD_RE))
+async def transfer_coins_handler(message: Message):
+    """
+    Команда «мряу перевод N».
+    Работает только в группах и только реплаем на сообщение получателя.
+    В ЛС игнорируется (тихо).
+    """
+    # Только группы / супергруппы
+    if message.chat.type == "private":
+        return
+
+    user_id = message.from_user.id
+
+    if rate_limited(f"transfer:{user_id}", limit=5, window=20):
+        await message.reply("⏳ Слишком часто. Подождите немного.")
+        return
+
+    if rate_limited(f"transfer-chat:{message.chat.id}", limit=10, window=20):
+        return
+
+    # Должен быть реплай на сообщение пользователя
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply(
+            "⚠️ <b>Ответьте на сообщение пользователя</b>, которому хотите перевести монеты.\n"
+            "Пример: реплай + <code>мряу перевод 50</code>"
+        )
+        return
+
+    target = message.reply_to_message.from_user
+
+    if target.is_bot:
+        await message.reply("❌ Нельзя переводить монеты боту.")
+        return
+
+    if target.id == user_id:
+        await message.reply("❌ Нельзя перевести монеты самому себе.")
+        return
+
+    text = (message.text or "").strip()
+    m = TRANSFER_CMD_RE.match(text)
+    if not m:
+        return
+
+    try:
+        amount = int(m.group(1))
+    except (ValueError, IndexError):
+        await message.reply("❌ <b>Сумма должна быть целым числом.</b>\nПример: <code>мряу перевод 50</code>")
+        return
+
+    if amount <= 0:
+        await message.reply("❌ <b>Сумма перевода должна быть больше нуля.</b>")
+        return
+
+    if amount > 1_000_000:
+        await message.reply("❌ <b>Слишком большая сумма.</b> Максимум — 1 000 000 🪙")
+        return
+
+    try:
+        # Создаём / обновляем обоих пользователей
+        await get_or_create_user(
+            user_id, message.from_user.username, message.from_user.full_name
+        )
+        await get_or_create_user(
+            target.id, target.username, target.full_name
+        )
+
+        sender_nick = await get_user_nickname(user_id)
+        receiver_nick = await get_user_nickname(target.id)
+        sender_mention = user_mention(user_id, sender_nick, message.from_user.username)
+        receiver_mention = user_mention(target.id, receiver_nick, target.username)
+
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+            )
+            row = await cur.fetchone()
+            balance = row["coins"] if row else 0
+
+            if balance < amount:
+                await message.reply(
+                    f"⚠️ <b>Недостаточно монет.</b>\n"
+                    f"Нужно: <b>{fmt_num(amount)} 🪙</b>\n"
+                    f"У вас: <b>{fmt_num(balance)} 🪙</b>"
+                )
+                return
+
+            # Атомарный перевод
+            await db.execute(
+                "UPDATE users SET coins = coins - ? WHERE user_id = ?",
+                (amount, user_id),
+            )
+            await db.execute(
+                "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                (amount, target.id),
+            )
+
+            cur = await db.execute(
+                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+            )
+            new_sender_balance = (await cur.fetchone())[0]
+
+            cur = await db.execute(
+                "SELECT coins FROM users WHERE user_id = ?", (target.id,)
+            )
+            new_receiver_balance = (await cur.fetchone())[0]
+
+        await message.reply(
+            f"💸 <b>Перевод выполнен</b>\n\n"
+            f"От: {sender_mention}\n"
+            f"Кому: {receiver_mention}\n"
+            f"Сумма: <b>{fmt_num(amount)} 🪙</b>\n\n"
+            f"🪙 Баланс отправителя: <b>{fmt_num(new_sender_balance)}</b>\n"
+            f"🪙 Баланс получателя: <b>{fmt_num(new_receiver_balance)}</b>"
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка в transfer_coins_handler: {e}")
+        await message.reply("❌ <b>Произошла ошибка при переводе. Попробуйте позже.</b>")
 
 
 # ---------- Профиль ----------
