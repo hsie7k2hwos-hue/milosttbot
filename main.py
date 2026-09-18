@@ -48,30 +48,20 @@ GROUP_AUTODELETE_SECONDS = 30
 # п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 
-# ================= СЛОТ-МАШИНА (🎰) =================
+# ================= СЛОТ-МАШИНА =================
 # Команда: «мряу ставка [монеты]»
 # Пример: мряу ставка 50
 # Логика:
-#   1. Проверяем, что на балансе хватает монет (нельзя ставить больше, чем есть).
+#   1. Проверяем баланс >= ставка.
 #   2. Списываем ставку сразу.
-#   3. Отправляем «прокрут» 🎰.
-#   4. Ждём 5 секунд.
-#   5. По вероятности определяем множитель и начисляем выигрыш (или 0).
-#   6. Баланс в БД может стать отрицательным (если когда-то будет нужно),
-#      но при ставке мы всегда проверяем balance >= bet.
-SLOT_SPIN_DELAY = 5  # секунд до результата
+#   3. Случайно выбираем эмодзи (🎲 🎯 🏀 ⚽ 🎰 🎳).
+#   4. Отправляем анимированный dice.
+#   5. Берём реальный value из сообщения.
+#   6. По value определяем множитель и начисляем выигрыш.
+SLOT_SPIN_DELAY = 4  # секунд до показа результата (анимация)
 
-# Таблица выплат слот-машины (множитель × ставка):
-#   (шанс, множитель, текст результата)
-# Сумма шансов = 1.0
-SLOT_PAYOUTS = [
-    (0.35, 0, "💀 Пусто… ставка сгорела"),  # 35% — проигрыш
-    (0.28, 1.5, "🍋 x1.5 — небольшой выигрыш"),  # 28%
-    (0.18, 2, "🍒 x2 — неплохо!"),  # 18%
-    (0.10, 3, "🍊 x3 — солидно!"),  # 10%
-    (0.06, 5, "🍇 x5 — крупный куш!"),  # 6%
-    (0.03, 10, "💎 JACKPOT x10!!!"),  # 3%
-]
+# Доступные эмодзи для слота
+SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎰", "🎳"]
 
 RARITIES = {
     "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "reward": 10},
@@ -121,7 +111,6 @@ def fmt_num(n) -> str:
         n = int(n)
     except (TypeError, ValueError):
         return str(n)
-    # f"{n:,}" даёт '123,456' с запятыми — заменяем на неразрывный пробел
     return f"{n:,}".replace(",", "\u00a0")
 
 
@@ -180,20 +169,84 @@ def instant_cost(remaining_seconds: int) -> int:
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
 
 
-def roll_slot() -> Tuple[float, str]:
+def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
     """
-    Бросок слот-машины.
+    Определяет множитель и текст результата по реальному значению dice.
     Возвращает (множитель, текст_результата).
     Множитель 0 = полный проигрыш ставки.
     """
-    r = random.random()
-    cumulative = 0.0
-    for chance, mult, text in SLOT_PAYOUTS:
-        cumulative += chance
-        if r <= cumulative:
-            return mult, text
-    # на всякий случай (если сумма шансов < 1 из-за округления)
-    return 0.0, "💀 Пусто… ставка сгорела"
+    if emoji == "🎲":  # 1–6
+        if value == 6:
+            return 5.0, "🎲 Шестёрка! x5 — отличный бросок!"
+        if value == 5:
+            return 2.5, "🎲 Пятёрка! x2.5"
+        if value == 4:
+            return 1.5, "🎲 Четвёрка — x1.5"
+        if value == 3:
+            return 1.0, "🎲 Тройка — возврат ставки"
+        return 0.0, f"🎲 Выпало {value}… ставка сгорела"
+
+    if emoji == "🎯":  # 1–6 (6 = в яблочко)
+        if value == 6:
+            return 8.0, "🎯 В яблочко!!! x8 — идеальный выстрел!"
+        if value == 5:
+            return 3.0, "🎯 Почти центр! x3"
+        if value == 4:
+            return 1.5, "🎯 Хороший бросок — x1.5"
+        if value == 3:
+            return 1.0, "🎯 Тройка — возврат ставки"
+        return 0.0, f"🎯 Промах ({value})… ставка сгорела"
+
+    if emoji == "🎳":  # 1–6 (6 = страйк)
+        if value == 6:
+            return 6.0, "🎳 СТРАЙК!!! x6 — все кегли сбиты!"
+        if value == 5:
+            return 2.5, "🎳 Почти страйк! x2.5"
+        if value == 4:
+            return 1.5, "🎳 Четыре кегли — x1.5"
+        if value == 3:
+            return 1.0, "🎳 Три кегли — возврат ставки"
+        return 0.0, f"🎳 Всего {value}… ставка сгорела"
+
+    if emoji == "🏀":  # 1–5 (4–5 = попал)
+        if value == 5:
+            return 4.0, "🏀 Красивый данк! x4"
+        if value == 4:
+            return 2.0, "🏀 Мяч в кольце! x2"
+        if value == 3:
+            return 1.0, "🏀 Почти… возврат ставки"
+        return 0.0, f"🏀 Мимо ({value})… ставка сгорела"
+
+    if emoji == "⚽":  # 1–5 (4–5 = гол)
+        if value == 5:
+            return 4.0, "⚽ Гол!!! x4 — красивый удар!"
+        if value == 4:
+            return 2.0, "⚽ Гол! x2"
+        if value == 3:
+            return 1.0, "⚽ Штанга… возврат ставки"
+        return 0.0, f"⚽ Мимо ({value})… ставка сгорела"
+
+    if emoji == "🎰":  # 1–64
+        # 64 = три семёрки (джекпот)
+        if value == 64:
+            return 12.0, "🎰 JACKPOT 777!!! x12 — невероятно!"
+        # Две семёрки (примерно 16, 32, 48)
+        if value in (16, 32, 48):
+            return 4.0, "🎰 Две семёрки! x4"
+        # Три одинаковых (кроме семёрок)
+        if value in (1, 22, 43):
+            return 3.0, "🎰 Три одинаковых! x3"
+        # Высокие значения — небольшой выигрыш
+        if value >= 50:
+            return 2.0, "🎰 Хорошая комбинация — x2"
+        if value >= 30:
+            return 1.5, "🎰 Неплохо — x1.5"
+        if value >= 15:
+            return 1.0, "🎰 Возврат ставки"
+        return 0.0, "🎰 Пусто… ставка сгорела"
+
+    # fallback
+    return 0.0, "💀 Что-то пошло не так… ставка сгорела"
 
 
 # ================= CALLBACK DATA =================
@@ -230,14 +283,13 @@ class TopCallback(CallbackData, prefix="top"):
 
 class NickConfirmCallback(CallbackData, prefix="nickconf"):
     action: str  # apply | reset | cancel
-    value: str = ""  # для apply — новый ник (url-safe? используем как есть)
+    value: str = ""  # для apply — новый ник
 
 
 class GenderCallback(CallbackData, prefix="gender"):
     value: str
 
 
-# Новые callback-данные для админки
 class AdminCardPageCallback(CallbackData, prefix="admin_card_page"):
     page: int
 
@@ -329,7 +381,7 @@ async def init_db():
         ):
             await db.execute(sql)
 
-        # Безопасные миграции (п."важно" — не ломаем прод)
+        # Безопасные миграции
         for table, column, definition in [
             ("users", "registration", "INTEGER DEFAULT 0"),
             ("users", "streak", "INTEGER DEFAULT 0"),
@@ -490,7 +542,6 @@ def get_card_action_keyboard(user_id: int, balance: int = 0,
 
 
 def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
-    # После выдачи карточки кулдаун полный -> максимальная цена
     cost = instant_cost(COOLDOWN_SECONDS)
     b = InlineKeyboardBuilder()
     if balance >= cost:
@@ -628,7 +679,6 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
             card = None
             selected_rarity = None
 
-            # п.7 — если не всё собрано, стараемся дать новую, но с шансом DUPLICATE_CHANCE — дубликат
             want_duplicate = all_collected or (random.random() < DUPLICATE_CHANCE and owned_unique > 0)
 
             if want_duplicate:
@@ -647,7 +697,6 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                     is_duplicate = True
 
             if not card:
-                # ищем новую карточку (не в инвентаре)
                 for _ in range(10):
                     selected_rarity = random.choices(rarities_list, weights=weights, k=1)[0]
                     cur = await db.execute(
@@ -665,7 +714,6 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                         break
 
                 if not card:
-                    # fallback — любая не в инвентаре
                     cur = await db.execute(
                         """SELECT id, name, photo_id, rarity
                            FROM cards
@@ -679,7 +727,6 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                         selected_rarity = card["rarity"]
 
             if not card:
-                # всё собрано — берём случайную из инвентаря
                 cur = await db.execute(
                     """SELECT c.id, c.name, c.photo_id, c.rarity
                        FROM inventory i
@@ -714,7 +761,6 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                     (coins_earned, user_id),
                 )
 
-            # п.7.2 — учитываем количество
             await db.execute(
                 """INSERT INTO inventory (user_id, card_id, claim_time, amount)
                    VALUES (?, ?, ?, 1)
@@ -739,13 +785,8 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 # ================= СТРИК =================
 async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
     """
-    Обновляет стрик по факту захода (вызывается при любом получении карточки,
-    в т.ч. на кулдауне). Возвращает (streak, bonus, balance):
-
-      - первый заход за сегодня и streak стал 1  -> (1, 0, balance)
-      - первый заход за сегодня и streak >= 2    -> (new_streak, new_bonus, new_balance)
-      - заход уже был сегодня                    -> (current_streak, 0, balance)
-      - пользователь не найден / ошибка          -> (0, 0, 0)
+    Обновляет стрик по факту захода.
+    Возвращает (streak, bonus, balance).
     """
     try:
         now = datetime.now()
@@ -768,19 +809,15 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int]:
             last_date = row["last_streak_date"] or 0
             balance = row["coins"] or 0
 
-            # Сегодня уже заходил — просто возвращаем текущий стрик, без бонуса.
-            # last_date == today означает, что стрик уже учтён сегодня.
             if today_start <= last_date <= today_end:
                 return streak, 0, balance
 
-            # Новый день. Считаем новый стрик.
             new_streak = (
                 streak + 1
                 if streak > 0 and yesterday_start <= last_date <= yesterday_end
                 else 1
             )
 
-            # п.2 — за 1-й день бонус не начисляется
             new_bonus = 0 if new_streak == 1 else next(
                 b for d, b in STREAK_BONUSES if new_streak <= d
             )
@@ -813,7 +850,6 @@ def rate_limited(key: str, limit: int, window: float) -> bool:
 
 
 # ================= АВТО-УДАЛЕНИЕ СООБЩЕНИЯ (п.14) =================
-
 async def _auto_delete(message: Message, delay: int):
     """Удаляет сообщение через delay секунд (тихо игнорирует ошибки)."""
     await asyncio.sleep(delay)
@@ -849,13 +885,12 @@ async def cmd_start(message: Message):
 @router.message(Command("help"))
 @router.message(F.text == "❓ Помощь")
 async def cmd_help(message: Message):
-    # п.3 — команда /help
     text = (
             "📖 <b>Помощь</b>\n\n"
             "<b>Основные команды:</b>\n"
             "/start — запуск бота\n"
             "/meow или «мряу» — получить карточку\n"
-            "«мряу ставка N» — слот-машина 🎰 (ставка N монет)\n"
+            "«мряу ставка N» — слот-машина (ставка N монет)\n"
             "/profile — профиль\n"
             "/collection — мои карточки\n"
             "/top — топ игроков\n"
@@ -871,11 +906,9 @@ async def cmd_help(message: Message):
             + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно: "
               f"цена зависит от остатка таймера (от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙).\n"
               "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты.\n\n"
-              "🎰 <b>Слот-машина:</b> напишите <code>мряу ставка 50</code> — "
-              "бот крутит 🎰 и через 5 секунд показывает результат. "
-              "Можно выиграть x1.5 … x10 или потерять ставку.\n\n"
-              "💞 <b>РП-команды (в группах):</b> напишите <code>+мрп</code>, "
-              "чтобы увидеть список доступных действий."
+              "🎰 <b>Слот-машина:</b> напишите <code>мряу ставка 50</code>. "
+              "Бот случайно выбирает игру (🎲 🎯 🏀 ⚽ 🎰 🎳) и крутит анимированный эмодзи. "
+              "Выигрыш зависит от того, что реально выпало!"
     )
     await message.reply(text, reply_markup=get_main_km())
 
@@ -888,7 +921,6 @@ async def get_card_handler(message: Message):
     user_id = message.from_user.id
     now = int(time.time())
 
-    # п.11 — rate limit для групп
     if message.chat.type != "private":
         if rate_limited(f"card:{message.chat.id}", limit=5, window=10):
             return
@@ -917,10 +949,6 @@ async def get_card_handler(message: Message):
             h, m = remaining // 3600, (remaining % 3600) // 60
             s = remaining % 60
 
-            # Формируем строку с оставшимся временем:
-            # - если есть часы — показываем часы и минуты
-            # - если часов нет, но есть минуты — показываем только минуты
-            # - если и минут нет — показываем только секунды
             if h > 0:
                 time_str = f"{h} ч {m} мин"
             elif m > 0:
@@ -939,7 +967,6 @@ async def get_card_handler(message: Message):
                 reply_markup=get_card_action_keyboard(user_id, balance, remaining=remaining),
             )
 
-            # п.14 — в группах авто-удаление сообщения о кулдауне через 30 секунд
             if message.chat.type != "private":
                 asyncio.create_task(_auto_delete(sent, GROUP_AUTODELETE_SECONDS))
             return
@@ -994,29 +1021,25 @@ def _card_caption(mention: str, card: dict) -> str:
     )
 
 
-# ================= СЛОТ-МАШИНА 🎰 =================
+# ================= СЛОТ-МАШИНА =================
 @router.message(F.text.regexp(SLOT_CMD_RE))
 async def slot_machine_handler(message: Message):
     """
     Обработчик команды «мряу ставка N».
     1. Парсим сумму ставки.
-    2. Проверяем баланс (нельзя ставить больше, чем есть).
+    2. Проверяем баланс.
     3. Списываем ставку.
-    4. Отправляем «прокрут» 🎰.
-    5. Ждём SLOT_SPIN_DELAY секунд.
-    6. Бросаем результат по таблице SLOT_PAYOUTS.
-    7. Начисляем выигрыш (или ничего) и сообщаем итог.
-    Баланс в БД может уйти в отрицательные значения (требование),
-    но при приёме ставки всегда проверяем balance >= bet.
+    4. Случайно выбираем эмодзи и отправляем dice.
+    5. Берём реальный value из сообщения.
+    6. Определяем множитель по evaluate_dice.
+    7. Начисляем выигрыш.
     """
     user_id = message.from_user.id
 
-    # Rate-limit: не чаще 4 ставок за 15 секунд на пользователя
     if rate_limited(f"slot:{user_id}", limit=4, window=15):
         await message.reply("⏳ Слишком часто. Подождите немного.")
         return
 
-    # В группах дополнительно ограничиваем общий поток
     if message.chat.type != "private":
         if rate_limited(f"slot-chat:{message.chat.id}", limit=8, window=15):
             return
@@ -1036,7 +1059,6 @@ async def slot_machine_handler(message: Message):
         await message.reply("❌ <b>Ставка должна быть больше нуля.</b>")
         return
 
-    # Максимальная разумная ставка (защита от случайного ввода огромных чисел)
     if bet > 1_000_000:
         await message.reply("❌ <b>Слишком большая ставка.</b> Максимум — 1 000 000 🪙")
         return
@@ -1056,7 +1078,6 @@ async def slot_machine_handler(message: Message):
             row = await cur.fetchone()
             balance = row["coins"] if row else 0
 
-            # Нельзя ставить, если на балансе не хватает монет
             if balance < bet:
                 await message.reply(
                     f"⚠️ <b>Недостаточно монет.</b>\n"
@@ -1065,23 +1086,24 @@ async def slot_machine_handler(message: Message):
                 )
                 return
 
-            # Списываем ставку сразу (баланс может потом стать отрицательным
-            # только если позже кто-то вручную изменит через админ-команды)
             await db.execute(
                 "UPDATE users SET coins = coins - ? WHERE user_id = ?",
                 (bet, user_id),
             )
-            new_balance_after_bet = balance - bet
 
-        # --- Прокрут ---
-        spin_msg = await message.reply_dice(emoji="🎰")
+        # --- Выбираем эмодзи и крутим ---
+        emoji = random.choice(SLOT_EMOJIS)
+        spin_msg = await message.reply_dice(emoji=emoji)
 
-        # Ждём 5 секунд «прокрута»
+        # Реальный результат уже есть в spin_msg.dice
+        dice_value = spin_msg.dice.value if spin_msg.dice else 1
+
+        # Ждём окончания анимации
         await asyncio.sleep(SLOT_SPIN_DELAY)
 
-        # --- Результат ---
-        mult, result_text = roll_slot()
-        win_amount = int(bet * mult)  # целое число монет
+        # --- Результат по реальному value ---
+        mult, result_text = evaluate_dice(emoji, dice_value)
+        win_amount = int(bet * mult)
 
         async with get_db() as db:
             if win_amount > 0:
@@ -1107,12 +1129,11 @@ async def slot_machine_handler(message: Message):
                 delta_str = "±0"
                 color_emoji = "➡️"
             else:
-                # на случай, если когда-нибудь появится множитель < 1
                 delta_str = f"{fmt_num(profit)}"
                 color_emoji = "📉"
 
         result_caption = (
-            f"🎰 <b>Результат</b>\n\n"
+            f"{emoji} <b>Результат</b>\n\n"
             f"{result_text}\n\n"
             f"💰 Ставка • <b>{fmt_num(bet)} 🪙</b>\n"
             f"🎁 Выигрыш • <b>{fmt_num(win_amount)} 🪙</b>\n"
@@ -1121,14 +1142,13 @@ async def slot_machine_handler(message: Message):
         )
 
         try:
-            await spin_msg.edit_text(result_caption)
+            await spin_msg.reply(result_caption)
         except TelegramBadRequest:
-            # если сообщение уже нельзя редактировать — просто отвечаем новым
             await message.reply(result_caption)
 
     except Exception as e:
         logger.error(f"Ошибка в slot_machine_handler: {e}")
-        # На всякий случай пытаемся вернуть ставку, если что-то пошло не так после списания
+        # Пытаемся вернуть ставку при ошибке
         try:
             async with get_db() as db:
                 await db.execute(
@@ -1171,7 +1191,7 @@ async def process_back_to_profile(callback: CallbackQuery):
         await callback.answer("⚠️ Произошла ошибка")
 
 
-# ---------- Смена ника (п.5.4/5.5/5.6) ----------
+# ---------- Смена ника ----------
 def validate_nickname(raw: str) -> Optional[str]:
     raw = raw.strip()
     if not (2 <= len(raw) <= 32):
@@ -1190,7 +1210,6 @@ async def nickname_cmd(message: Message, command: Command):
 
     arg = (command.args or "").strip()
 
-    # /nickname reset
     if arg.lower() == "reset":
         default = default_nickname(message.from_user.username, message.from_user.full_name, user_id)
         b = InlineKeyboardBuilder()
@@ -1205,7 +1224,6 @@ async def nickname_cmd(message: Message, command: Command):
         )
         return
 
-    # /nickname [ник]
     if not arg:
         await message.reply(
             f"✏️ Использование: <code>/nickname НовыйНик</code>\n"
@@ -1222,7 +1240,6 @@ async def nickname_cmd(message: Message, command: Command):
         )
         return
 
-    # проверяем баланс
     row = await get_user_row(user_id)
     balance = row["coins"] if row else 0
     if balance < NICKNAME_COST:
@@ -1232,7 +1249,6 @@ async def nickname_cmd(message: Message, command: Command):
         return
 
     b = InlineKeyboardBuilder()
-    # value передаём как есть — callback_data должна быть короткой, ник <=32
     b.button(
         text="✅ Подтвердить",
         callback_data=NickConfirmCallback(action="apply", value=new_nick).pack(),
@@ -1294,7 +1310,6 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
         await callback.answer()
 
 
-# Старый вход «Изменить ник» из профиля — теперь просто подсказка
 @router.callback_query(NicknameCallback.filter(F.action == "change"))
 async def change_nickname_hint(callback: CallbackQuery):
     await callback.answer(
@@ -1374,13 +1389,12 @@ async def gender_cmd(message: Message, command: Command):
     await message.reply(f"✅ <b>Пол сохранён:</b> {g['icon']} {g['name']}")
 
 
-# ---------- Топ (п.6) ----------
+# ---------- Топ ----------
 async def build_top_text(kind: str, current_user_id: int) -> str:
     """Возвращает готовый текст топа с позицией пользователя."""
     limit = 10
     async with get_db() as db:
         if kind == "cards":
-            # топ по сумме amount
             cur = await db.execute(
                 """SELECT u.user_id, u.nickname, COALESCE(SUM(i.amount), 0) AS value
                    FROM users u
@@ -1445,7 +1459,6 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             unit = "🪙"
             title = "🪙 Топ по монетам"
 
-        # текущий ник пользователя для отображения
         cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (current_user_id,))
         my_row2 = await cur.fetchone()
         my_nick = my_row2["nickname"] if my_row2 and my_row2["nickname"] else f"User{current_user_id}"
@@ -1455,7 +1468,6 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
     for i, row in enumerate(top, 1):
         medal = medals[i - 1] if i <= 3 else f"{i}."
         nick = row["nickname"] or f"User{row['user_id']}"
-        # п.8 — упоминание. username у нас нет в БД, даём ссылку по id.
         mention = user_mention(row["user_id"], nick, None)
         text += f"{medal} {mention} • <b>{fmt_num(row['value'])}</b> {unit}\n"
 
@@ -1516,7 +1528,6 @@ async def get_collection_main_keyboard(user_id: int):
         total_cards = sum(stats.values())
         for r_key, r_info in RARITIES.items():
             user_amount = stats.get(r_key, 0)
-            # Пропускаем редкость, если у пользователя 0 карточек
             if user_amount == 0:
                 continue
             cur = await db.execute("SELECT COUNT(*) FROM cards WHERE rarity = ?", (r_key,))
@@ -1587,7 +1598,6 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         page = max(0, min(page, total_pages - 1))
         card = cards[page]
         info = RARITIES.get(rarity, {})
-        # п.7.2 — количество
         caption = (
             f"🀄️ <b>{esc(card['name'])}</b>\n\n"
             f"{info.get('icon', '')} Редкость • <b>{info.get('name', rarity)}</b>\n"
@@ -1662,8 +1672,6 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             balance = row["coins"] if row else 0
             last_claim = row["last_claim"] if row else 0
 
-            # Если кулдаун уже прошёл — пользователь мог бы получить карточку бесплатно.
-            # Тогда просто перенаправляем на обычную выдачу.
             time_passed = now - last_claim
             if time_passed >= COOLDOWN_SECONDS:
                 await callback.answer("⏳ Кулдаун уже прошёл — получайте бесплатно!", show_alert=True)
@@ -1729,208 +1737,6 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
         await callback.answer("⚠️ Произошла ошибка")
 
 
-# ================= РП-КОМАНДЫ ДЛЯ ГРУПП =================
-
-# Словарь: ключ (без "+") -> данные действия.
-# verb_m / verb_f / verb_n — формы глагола прошедшего времени.
-# "acc" — винительный падеж для текста (кого?).
-RP_ACTIONS = {
-    "обнять": {"verb_m": "обнял", "verb_f": "обняла", "verb_n": "обнял(-а)", "emoji": "🤗"},
-    "поцеловать": {"verb_m": "поцеловал", "verb_f": "поцеловала", "verb_n": "поцеловал(-а)", "emoji": "😘"},
-    "чмок": {"verb_m": "чмокнул", "verb_f": "чмокнула", "verb_n": "чмокнул(-а)", "emoji": "😚"},
-    "погладить": {"verb_m": "погладил", "verb_f": "погладила", "verb_n": "погладил(-а)", "emoji": "🫶"},
-    "ударить": {"verb_m": "ударил", "verb_f": "ударила", "verb_n": "ударил(-а)", "emoji": "👊"},
-    "кусь": {"verb_m": "укусил", "verb_f": "укусила", "verb_n": "укусил(-а)", "emoji": "😈"},
-    "лизь": {"verb_m": "лизнул", "verb_f": "лизнула", "verb_n": "лизнул(-а)", "emoji": "👅"},
-    "шлёп": {"verb_m": "шлёпнул", "verb_f": "шлёпнула", "verb_n": "шлёпнул(-а)", "emoji": "🍑"},  # NSFW
-    "трах": {"verb_m": "трахнул", "verb_f": "трахнула", "verb_n": "трахнул(-а)", "emoji": "🔥"},  # NSFW
-    "выебать": {"verb_m": "выебал", "verb_f": "выебала", "verb_n": "выебал(-а)", "emoji": "🔞"},  # NSFW
-    "пнуть": {"verb_m": "пнул", "verb_f": "пнула", "verb_n": "пнул(-а)", "emoji": "🦶"},
-    "ласка": {"verb_m": "приласкал", "verb_f": "приласкала", "verb_n": "приласкал(-а)", "emoji": "💞"},
-    "фистинг": {"verb_m": "сделал фистинг", "verb_f": "сделала фистинг", "verb_n": "сделал(-а) фистинг", "emoji": "✊"},
-    # NSFW
-    "отсос": {"verb_m": "отсосал", "verb_f": "отсосала", "verb_n": "отсосал(-а)", "emoji": "🌭"},  # NSFW
-    "подрочить": {"verb_m": "подрочил", "verb_f": "подрочила", "verb_n": "подрочил(-а)", "emoji": "🍌"},  # NSFW
-}
-
-# Регулярка: "+команда" в начале сообщения, затем опционально цель
-RP_TRIGGER_RE = re.compile(r"^\+(?P<cmd>[A-Za-zА-Яа-яЁё_]+)\b(?P<rest>.*)$", re.UNICODE)
-
-# Регулярка для id-цели: id123456789
-RP_ID_RE = re.compile(r"^id(?P<uid>\d+)$", re.IGNORECASE)
-
-
-def _rp_verb(action: dict, gender: Optional[str]) -> str:
-    """Выбирает форму глагола по полу инициатора."""
-    if gender == "male":
-        return action["verb_m"]
-    if gender == "female":
-        return action["verb_f"]
-    return action["verb_n"]
-
-
-async def _resolve_target(message: Message, rest: str) -> Optional[int]:
-    """
-    Определяет ID цели РП-действия.
-    Приоритет:
-      1) reply — отвечают на сообщение пользователя;
-      2) @username — Telegram-юзернейм;
-      3) id123456789 — числовой ID.
-    Возвращает user_id или None.
-    """
-    # 1) Reply
-    if message.reply_to_message and message.reply_to_message.from_user:
-        return message.reply_to_message.from_user.id
-
-    rest = (rest or "").strip()
-    if not rest:
-        return None
-
-    # 2) @username
-    if rest.startswith("@"):
-        username = rest[1:].split()[0].strip()
-        if username:
-            try:
-                chat = await message.bot.get_chat("@" + username)
-                if chat and getattr(chat, "id", None):
-                    return chat.id
-            except Exception as e:
-                logger.debug(f"RP: не удалось resolve @{username}: {e}")
-        return None
-
-    # 3) id<число>
-    m = RP_ID_RE.match(rest.split()[0])
-    if m:
-        return int(m.group("uid"))
-
-    return None
-
-
-@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.lower().regexp(r"^\+\s*мрп\s*$"))
-async def rp_help_handler(message: Message):
-    """+мрп — список доступных РП-команд."""
-    if not message.from_user or message.from_user.is_bot:
-        return
-
-    if rate_limited(f"rphelp:{message.chat.id}", limit=3, window=15):
-        return
-
-    lines = []
-    for cmd, info in RP_ACTIONS.items():
-        lines.append(f"{info['emoji']} <code>+{cmd}</code> — {info['verb_m']} / {info['verb_f']}")
-
-    text = (
-            "💞 <b>РП-команды</b>\n\n"
-            "<b>Как использовать:</b>\n"
-            "• <code>+обнять</code> — ответом на сообщение\n"
-            "• <code>+обнять @username</code> — по юзернейму\n"
-            "• <code>+обнять id123456789</code> — по ID\n\n"
-            "<b>Доступные действия:</b>\n"
-            + "\n".join(lines)
-            + "\n\n💡 Форма глагола подбирается по вашему полу "
-              "(<code>/gender м|ж|др|нет</code>)."
-    )
-    await message.reply(text)
-
-
-@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.startswith("+"))
-async def rp_action_handler(message: Message):
-    """Обработчик РП-команд вида «+обнять @user» / «+поцеловать id123» / реплай + «+погладить»."""
-    if not message.from_user or message.from_user.is_bot:
-        return
-
-    text = (message.text or "").strip()
-    m = RP_TRIGGER_RE.match(text)
-    if not m:
-        return
-
-    cmd = m.group("cmd").lower()
-    action = RP_ACTIONS.get(cmd)
-    if not action:
-        # не наша команда — тихо игнорируем, чтобы не спамить
-        return
-
-    # Rate limit: 5 РП в 10 секунд на чат
-    if rate_limited(f"rp:{message.chat.id}", limit=5, window=10):
-        return
-
-    actor_id = message.from_user.id
-    target_id = await _resolve_target(message, m.group("rest"))
-
-    if not target_id:
-        await message.reply(
-            "🎯 <b>Укажите цель:</b>\n"
-            "• ответьте на сообщение пользователя,\n"
-            "• или напишите <code>@username</code>,\n"
-            "• или <code>id123456789</code>."
-        )
-        return
-
-    if target_id == actor_id:
-        await message.reply("🙃 <b>Нельзя применить действие к самому себе.</b>")
-        return
-
-    # Создаём обоих, если их нет в БД
-    try:
-        await get_or_create_user(
-            actor_id, message.from_user.username, message.from_user.full_name
-        )
-        # Цель может быть недоступна через get_chat, но get_or_create_user создаст запись
-        target_username = None
-        target_full_name = None
-        if message.reply_to_message and message.reply_to_message.from_user \
-                and message.reply_to_message.from_user.id == target_id:
-            tu = message.reply_to_message.from_user
-            target_username = tu.username
-            target_full_name = tu.full_name
-        else:
-            try:
-                chat = await message.bot.get_chat(target_id)
-                target_username = getattr(chat, "username", None)
-                target_full_name = getattr(chat, "full_name", None)
-            except Exception as e:
-                logger.debug(f"RP: get_chat({target_id}) failed: {e}")
-        await get_or_create_user(target_id, target_username, target_full_name)
-    except Exception as e:
-        logger.error(f"RP: ошибка создания пользователей: {e}")
-        await message.reply("❌ <b>Не удалось обработать команду.</b>")
-        return
-
-    # Достаём ники и полы
-    async with get_db() as db:
-        cur = await db.execute(
-            "SELECT user_id, nickname, gender FROM users WHERE user_id IN (?, ?)",
-            (actor_id, target_id),
-        )
-        rows = {r["user_id"]: r for r in await cur.fetchall()}
-
-    actor = rows.get(actor_id)
-    target = rows.get(target_id)
-
-    actor_nick = (actor["nickname"] if actor and actor["nickname"] else None) \
-                 or message.from_user.full_name \
-                 or f"User{actor_id}"
-    actor_gender = actor["gender"] if actor else "none"
-
-    target_nick = (target["nickname"] if target and target["nickname"] else None) \
-                  or target_full_name \
-                  or f"User{target_id}"
-    target_username = target_username or None
-
-    verb = _rp_verb(action, actor_gender)
-    emoji = action["emoji"]
-
-    actor_mention = user_mention(actor_id, actor_nick, message.from_user.username)
-    target_mention = user_mention(target_id, target_nick, target_username)
-
-    text_out = f"{emoji} {actor_mention} {verb} {target_mention}"
-
-    try:
-        await message.reply(text_out)
-    except TelegramBadRequest as e:
-        logger.warning(f"RP reply failed: {e}")
-
-
 # ================= АДМИН-ПАНЕЛЬ =================
 async def admin_filter(message: Message) -> bool:
     return await is_admin(message.from_user.id)
@@ -1954,7 +1760,6 @@ async def add_card_start(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# ----- Быстрое добавление карточки через /addcard НАЗВ РЕДК с фото -----
 @router.message(Command("addcard"), admin_filter, F.photo)
 async def quick_add_card(message: Message, command: Command):
     if not message.photo:
@@ -2044,10 +1849,8 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# ================= АДМИН: СПИСОК КАРТОЧЕК С ПАГИНАЦИЕЙ И СТАТИСТИКОЙ =================
-
+# ================= АДМИН: СПИСОК КАРТОЧЕК =================
 async def build_admin_cards_page(page: int = 0):
-    """Возвращает (caption, keyboard, current_page)."""
     per_page = 5
     async with get_db() as db:
         cur = await db.execute("SELECT COUNT(*) FROM cards")
@@ -2072,7 +1875,6 @@ async def build_admin_cards_page(page: int = 0):
         text = f"📜 <b>Карточки</b> (стр. {page + 1}/{total_pages})\n\n"
         for c in cards:
             r = RARITIES.get(c["rarity"], {})
-            # Собираем статистику по карточке
             cur = await db.execute(
                 "SELECT COUNT(DISTINCT user_id), COALESCE(SUM(amount), 0) FROM inventory WHERE card_id = ?",
                 (c["id"],),
@@ -2087,7 +1889,6 @@ async def build_admin_cards_page(page: int = 0):
                 callback_data=AdminCardManageCallback(card_id=c["id"]).pack(),
             )
 
-        # Пагинация
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton(text="◀️", callback_data=AdminCardPageCallback(page=page - 1).pack()))
@@ -2130,7 +1931,6 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
         if not card:
             await call.answer("❌ Карточка не найдена")
             return
-        # Статистика
         cur = await db.execute(
             "SELECT COUNT(DISTINCT user_id), COALESCE(SUM(amount), 0) FROM inventory WHERE card_id = ?",
             (card_id,),
@@ -2153,7 +1953,6 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
     b.button(text="🔙 Назад к списку", callback_data=AdminCardPageCallback(page=0).pack())
     b.adjust(1)
 
-    # Пытаемся отредактировать текущее сообщение
     try:
         if call.message.photo:
             await call.message.edit_media(
@@ -2167,7 +1966,6 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
     await call.answer()
 
 
-# ================= АДМИН: ИЗМЕНЕНИЕ ФОТО КАРТОЧКИ =================
 @router.callback_query(AdminCardEditPhotoCallback.filter())
 async def admin_card_edit_photo_start(call: CallbackQuery, callback_data: AdminCardEditPhotoCallback,
                                       state: FSMContext):
@@ -2301,8 +2099,7 @@ async def edit_card_rarity_save(call: CallbackQuery, callback_data: AdminRarityC
     await call.answer()
 
 
-# ================= АДМИН: СПИСОК ПОЛЬЗОВАТЕЛЕЙ С ПАГИНАЦИЕЙ =================
-
+# ================= АДМИН: СПИСОК ПОЛЬЗОВАТЕЛЕЙ =================
 async def build_admin_users_page(page: int = 0):
     per_page = 5
     async with get_db() as db:
@@ -2454,7 +2251,6 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
         await call.answer()
 
 
-# ----- Команда /setnick для админа -----
 @router.message(Command("setnick"), admin_filter)
 async def admin_setnick(message: Message, command: Command):
     if message.chat.type != "private":
@@ -2491,13 +2287,8 @@ async def admin_setnick(message: Message, command: Command):
 
 
 # ================= ПРОЧИЕ АДМИН-КОМАНДЫ =================
-
 @router.message(Command("adminhelp"), admin_filter)
 async def admin_help(message: Message):
-    """
-    Скрытая справка для администраторов.
-    Не упоминается в общей /help. Доступна только role='admin'.
-    """
     text = (
         "🛠 <b>Справка администратора</b>\n\n"
 
@@ -2542,10 +2333,6 @@ async def admin_help(message: Message):
 
 @router.message(Command("setadmin"), admin_filter)
 async def set_admin_cmd(message: Message, command: Command):
-    """
-    /setadmin USERID — назначить пользователя администратором.
-    Доступно только текущим админам.
-    """
     if message.chat.type != "private":
         await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
         return
@@ -2600,10 +2387,6 @@ async def set_admin_cmd(message: Message, command: Command):
 
 @router.message(Command("unsetadmin"), admin_filter)
 async def unset_admin_cmd(message: Message, command: Command):
-    """
-    /unsetadmin USERID — разжаловать администратора.
-    Доступно только текущим админам.
-    """
     if message.chat.type != "private":
         await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
         return
@@ -2626,7 +2409,6 @@ async def unset_admin_cmd(message: Message, command: Command):
         await message.reply("❌ <b>Некорректный USERID.</b>")
         return
 
-    # Защита от разжалования самого себя — иначе можно потерять доступ
     if target_id == message.from_user.id:
         await message.reply(
             "⚠️ <b>Нельзя разжаловать самого себя.</b>\n"
@@ -2661,14 +2443,10 @@ async def unset_admin_cmd(message: Message, command: Command):
     )
 
 
-# ================= СТАТИСТИКА И УПРАВЛЕНИЕ =================
-
 @router.message(Command("stats"), admin_filter)
 async def admin_stats(message: Message):
-    """📊 Общая статистика бота."""
     try:
         async with get_db() as db:
-            # Пользователи
             cur = await db.execute("SELECT COUNT(*) FROM users")
             total_users = (await cur.fetchone())[0]
 
@@ -2687,7 +2465,6 @@ async def admin_stats(message: Message):
             )
             admins = (await cur.fetchone())[0]
 
-            # Монеты
             cur = await db.execute("SELECT COALESCE(SUM(coins), 0) FROM users")
             total_coins = (await cur.fetchone())[0]
 
@@ -2697,7 +2474,6 @@ async def admin_stats(message: Message):
             cur = await db.execute("SELECT COALESCE(MAX(coins), 0) FROM users")
             max_coins = (await cur.fetchone())[0]
 
-            # Карточки в игре
             cur = await db.execute("SELECT COUNT(*) FROM cards")
             total_cards = (await cur.fetchone())[0]
 
@@ -2706,7 +2482,6 @@ async def admin_stats(message: Message):
             )
             cards_by_rarity = dict(await cur.fetchall())
 
-            # Инвентарь
             cur = await db.execute(
                 "SELECT COALESCE(SUM(amount), 0) FROM inventory"
             )
@@ -2722,13 +2497,11 @@ async def admin_stats(message: Message):
             )
             unique_owned = (await cur.fetchone())[0]
 
-            # Топ-1 по монетам
             cur = await db.execute(
                 "SELECT nickname, coins FROM users ORDER BY coins DESC LIMIT 1"
             )
             top_user = await cur.fetchone()
 
-            # Самая популярная карточка
             cur = await db.execute(
                 """SELECT c.name, COALESCE(SUM(i.amount), 0) AS cnt
                    FROM inventory i
@@ -2783,10 +2556,6 @@ async def admin_stats(message: Message):
 
 @router.message(Command("setcoins"), admin_filter)
 async def admin_setcoins(message: Message, command: Command):
-    """
-    /setcoins [USERID] COINS — установить баланс.
-    Без USERID — применяется к самому админу.
-    """
     if message.chat.type != "private":
         await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
         return
@@ -2855,10 +2624,6 @@ async def admin_setcoins(message: Message, command: Command):
 
 @router.message(Command("resetcd"), admin_filter)
 async def admin_resetcd(message: Message, command: Command):
-    """
-    /resetcd [USERID] — сбросить кулдаун.
-    Без USERID — применяется к самому админу.
-    """
     if message.chat.type != "private":
         await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
         return
@@ -2919,7 +2684,6 @@ async def admin_resetcd(message: Message, command: Command):
 
 @router.message(Command("getusers"), admin_filter)
 async def admin_getusers(message: Message):
-    """👥 Список всех пользователей с основной информацией."""
     try:
         async with get_db() as db:
             cur = await db.execute(
@@ -2982,9 +2746,6 @@ async def admin_getusers(message: Message):
 
 @router.message(Command("delcard"), admin_filter)
 async def admin_delcard(message: Message, command: Command):
-    """
-    /delcard ID — быстрое удаление карточки по ID.
-    """
     if message.chat.type != "private":
         await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
         return
@@ -3043,7 +2804,6 @@ async def admin_delcard(message: Message, command: Command):
 
 
 # ================= [TEST] ТЕСТОВЫЕ КОМАНДЫ =================
-
 @router.message(Command("reset_all_nicknames"), admin_filter)
 async def test_reset_all_nicknames(message: Message):
     async with get_db() as db:
