@@ -43,7 +43,7 @@ DUPLICATE_CHANCE = 0.25  # п.7 — шанс дубликата
 DUPLICATE_REFUND = 0.5  # 50% от стоимости
 
 # Кристаллы и маркет
-CRYSTAL_TO_COINS = 100  # 1 кристалл = 100 монет
+GEM_TO_COINS = 100  # 1 кристалл = 100 монет
 # Цены карточек в маркете (кристаллы) по редкости
 MARKET_PRICES = {
     "common": 1,
@@ -53,12 +53,12 @@ MARKET_PRICES = {
     "legendary": 50,
 }
 # Кристаллы за получение карточки (не дубликат)
-CRYSTAL_REWARDS = {
+GEM_REWARDS = {
     "mythical": 1,
     "legendary": 2,
 }
 # Бонус кристаллов за стрик (ежедневно при обновлении стрика)
-STREAK_CRYSTAL_BONUSES = [(7, 5), (30, 20)]  # (мин. дней, кристаллы)
+STREAK_GEM_BONUSES = [(7, 5), (30, 20)]  # (мин. дней, кристаллы)
 
 # п.14 — авто-удаление сообщений бота о кулдауне в группах (в секундах)
 GROUP_AUTODELETE_SECONDS = 30
@@ -191,17 +191,17 @@ def fmt_coins(n: int) -> str:
     return f"{fmt_num(n)} {plural(n, 'монета', 'монеты', 'монет')}"
 
 
-def fmt_crystals(n: int) -> str:
+def fmt_gems(n: int) -> str:
     """1 кристалл, 2 кристалла, 5 кристаллов."""
     return f"{fmt_num(n)} {plural(n, 'кристалл', 'кристалла', 'кристаллов')}"
 
 
-def streak_crystal_bonus(streak: int) -> int:
+def streak_gem_bonus(streak: int) -> int:
     """Кристаллы за текущий стрик (берём максимальный подходящий порог)."""
     bonus = 0
-    for days, crystals in STREAK_CRYSTAL_BONUSES:
+    for days, gems_amt in STREAK_GEM_BONUSES:
         if streak >= days:
-            bonus = crystals
+            bonus = gems_amt
     return bonus
 
 
@@ -390,7 +390,7 @@ class MarketBuyCallback(CallbackData, prefix="mkt_buy"):
 
 
 class MarketExchangeCallback(CallbackData, prefix="mkt_ex"):
-    action: str  # buy_crystals | menu
+    action: str  # buy_gems | menu
     amount: int = 0
     user_id: int = 0
 
@@ -437,7 +437,7 @@ async def init_db():
                              role             TEXT    DEFAULT 'user',
                              nickname         TEXT,
                              coins            INTEGER DEFAULT 0,
-                             crystals         INTEGER DEFAULT 0,
+                             gems             INTEGER DEFAULT 0,
                              registration     INTEGER DEFAULT 0,
                              streak           INTEGER DEFAULT 0,
                              last_streak_date INTEGER DEFAULT 0,
@@ -473,7 +473,7 @@ async def init_db():
             ("users", "last_streak_date", "INTEGER DEFAULT 0"),
             ("users", "streak_bonus", "INTEGER DEFAULT 0"),
             ("users", "gender", "TEXT DEFAULT 'none'"),
-            ("users", "crystals", "INTEGER DEFAULT 0"),
+            ("users", "gems", "INTEGER DEFAULT 0"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("inventory", "amount", "INTEGER DEFAULT 1"),
         ]:
@@ -678,7 +678,7 @@ async def render_profile(bot: Bot, user_id: int):
         cur = await db.execute("""
                                SELECT u.nickname,
                                       u.coins,
-                                      u.crystals,
+                                      u.gems,
                                       u.registration,
                                       u.streak,
                                       u.streak_bonus,
@@ -707,7 +707,7 @@ async def render_profile(bot: Bot, user_id: int):
     g = GENDERS.get(gender, GENDERS["none"])
     gender_display = f"{g['icon']} {g['name']}"
 
-    crystals = row["crystals"] if row["crystals"] is not None else 0
+    gems = row["gems"] if row["gems"] is not None else 0
 
     caption = (
         f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
@@ -717,7 +717,7 @@ async def render_profile(bot: Bot, user_id: int):
         f"📅 Регистрация • <b>{reg_date}</b>\n\n"
         f"🀄️ Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
         f"🪙 Монеты • <b>{fmt_num(row['coins'])}</b>\n"
-        f"💎 Кристаллы • <b>{fmt_num(crystals)}</b>\n"
+        f"💎 Кристаллы • <b>{fmt_num(gems)}</b>\n"
         f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
     )
     return await get_user_photo(bot, user_id, nickname), caption, get_profile_kb(user_id)
@@ -846,25 +846,25 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
             card_id, card_name, photo_id = card[0], card[1], card[2]
             base_coins = RARITIES[selected_rarity]["reward"]
             coins_earned = int(base_coins * DUPLICATE_REFUND) if is_duplicate else base_coins
-            crystals_earned = 0
+            gems_earned = 0
             if not is_duplicate:
-                crystals_earned = CRYSTAL_REWARDS.get(selected_rarity, 0)
+                gems_earned = GEM_REWARDS.get(selected_rarity, 0)
             now = int(time.time())
 
             if check_cooldown:
                 await db.execute(
-                    """INSERT INTO users (user_id, last_claim, coins, crystals)
+                    """INSERT INTO users (user_id, last_claim, coins, gems)
                        VALUES (?, ?, ?, ?)
                        ON CONFLICT(user_id) DO UPDATE SET last_claim = ?,
                                                           coins      = coins + ?,
-                                                          crystals   = crystals + ?""",
-                    (user_id, now, coins_earned, crystals_earned,
-                     now, coins_earned, crystals_earned),
+                                                          gems       = gems + ?""",
+                    (user_id, now, coins_earned, gems_earned,
+                     now, coins_earned, gems_earned),
                 )
             else:
                 await db.execute(
-                    "UPDATE users SET coins = coins + ?, crystals = crystals + ? WHERE user_id = ?",
-                    (coins_earned, crystals_earned, user_id),
+                    "UPDATE users SET coins = coins + ?, gems = gems + ? WHERE user_id = ?",
+                    (coins_earned, gems_earned, user_id),
                 )
 
             await db.execute(
@@ -876,17 +876,17 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
             )
 
             cur = await db.execute(
-                "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+                "SELECT coins, gems FROM users WHERE user_id = ?", (user_id,)
             )
             row_bal = await cur.fetchone()
             balance = row_bal["coins"]
-            crystals_balance = row_bal["crystals"] or 0
+            gems_balance = row_bal["gems"] or 0
 
             return {
                 "id": card_id, "name": card_name, "photo_id": photo_id,
                 "rarity": selected_rarity, "coins_earned": coins_earned,
-                "crystals_earned": crystals_earned,
-                "balance": balance, "crystals": crystals_balance,
+                "gems_earned": gems_earned,
+                "balance": balance, "gems": gems_balance,
                 "is_duplicate": is_duplicate,
             }, "success"
     except Exception as e:
@@ -898,7 +898,7 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
     """
     Обновляет стрик по факту захода.
-    Возвращает (streak, coin_bonus, balance, crystal_bonus).
+    Возвращает (streak, coin_bonus, balance, gem_bonus).
     """
     try:
         now = datetime.now()
@@ -933,17 +933,17 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
             new_bonus = 0 if new_streak == 1 else next(
                 b for d, b in STREAK_BONUSES if new_streak <= d
             )
-            crystal_bonus = streak_crystal_bonus(new_streak)
+            gem_bonus = streak_gem_bonus(new_streak)
 
             await db.execute(
                 "UPDATE users SET streak = ?, last_streak_date = ?, "
-                "streak_bonus = ?, coins = coins + ?, crystals = crystals + ? "
+                "streak_bonus = ?, coins = coins + ?, gems = gems + ? "
                 "WHERE user_id = ?",
-                (new_streak, int(time.time()), new_bonus, new_bonus, crystal_bonus, user_id),
+                (new_streak, int(time.time()), new_bonus, new_bonus, gem_bonus, user_id),
             )
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
             new_balance = (await cur.fetchone())[0]
-            return new_streak, new_bonus, new_balance, crystal_bonus
+            return new_streak, new_bonus, new_balance, gem_bonus
     except Exception as e:
         logger.error(f"Ошибка обновления стрика: {e}")
         return 0, 0, 0, 0
@@ -1036,7 +1036,7 @@ async def cmd_help(message: Message):
               "💎 <b>Кристаллы:</b>\n"
               "  • 1 мифическая карта (новая) → +1 💎\n"
               "  • 1 легендарная карта (новая) → +2 💎\n"
-              f"  • Обмен: 1 💎 = {CRYSTAL_TO_COINS} 🪙 (купить кристаллы за монеты в маркете)\n\n"
+              f"  • Обмен: 1 💎 = {GEM_TO_COINS} 🪙 (купить кристаллы за монеты в маркете)\n\n"
               "🛒 <b>Маркет:</b> покупайте карточки, которых у вас ещё нет, за кристаллы.\n"
               f"Цены:\n{market_prices}\n\n"
               "🎰 <b>Слот-машина:</b> напишите <code>мряу ставка 50</code>. "
@@ -1079,7 +1079,7 @@ async def get_card_handler(message: Message):
 
         time_passed = now - last_claim
         if time_passed < COOLDOWN_SECONDS:
-            streak, bonus, new_balance, crystal_bonus = await check_and_update_streak(user_id)
+            streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             h, m = remaining // 3600, (remaining % 3600) // 60
             s = remaining % 60
@@ -1095,7 +1095,7 @@ async def get_card_handler(message: Message):
                 f"🕘 <b>{mention}</b>, придётся немного подождать!\n"
                 f"Следующую карточку можно будет получить через <b>{time_str}</b>"
             )
-            text += _streak_text(streak, bonus, new_balance, crystal_bonus)
+            text += _streak_text(streak, bonus, new_balance, gem_bonus)
 
             sent = await message.reply(
                 text,
@@ -1111,10 +1111,10 @@ async def get_card_handler(message: Message):
             await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
             return
 
-        streak, bonus, new_balance, crystal_bonus = await check_and_update_streak(user_id)
+        streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
 
         caption = _card_caption(mention, card)
-        caption += _streak_text(streak, bonus, new_balance, crystal_bonus)
+        caption += _streak_text(streak, bonus, new_balance, gem_bonus)
 
         try:
             await message.reply_photo(
@@ -1130,7 +1130,7 @@ async def get_card_handler(message: Message):
         await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
-def _streak_text(streak: int, bonus: int, new_balance: int, crystal_bonus: int = 0) -> str:
+def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) -> str:
     """Формирует текст про стрик для сообщения."""
     if bonus > 0 and streak == 1:
         return (
@@ -1142,8 +1142,8 @@ def _streak_text(streak: int, bonus: int, new_balance: int, crystal_bonus: int =
             f"\n\n<blockquote>🔥 Стрик • <b>{fmt_days(streak)}</b>\n"
             f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]"
         )
-        if crystal_bonus > 0:
-            text += f"\n💎 Кристаллы • +{fmt_num(crystal_bonus)}"
+        if gem_bonus > 0:
+            text += f"\n💎 Кристаллы • +{fmt_num(gem_bonus)}"
         text += (
             "\n💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
         )
@@ -1159,12 +1159,12 @@ def _card_caption(mention: str, card: dict) -> str:
         f"{r['icon']} Редкость • <b>{r['name']}</b>\n"
         f"🪙 Монеты • <b>+{fmt_num(card['coins_earned'])}</b> [{fmt_num(card['balance'])}]"
     )
-    crystals_earned = card.get("crystals_earned") or 0
-    if crystals_earned > 0:
-        crystals_bal = card.get("crystals") or 0
+    gems_earned = card.get("gems_earned") or 0
+    if gems_earned > 0:
+        gems_bal = card.get("gems") or 0
         text += (
-            f"\n💎 Кристаллы • <b>+{fmt_num(crystals_earned)}</b> "
-            f"[{fmt_num(crystals_bal)}]"
+            f"\n💎 Кристаллы • <b>+{fmt_num(gems_earned)}</b> "
+            f"[{fmt_num(gems_bal)}]"
         )
     return text
 
@@ -2045,10 +2045,10 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 await callback.message.answer("❌ <b>Ошибка. Монеты возвращены.</b>")
                 return
 
-            streak, bonus, new_balance, crystal_bonus = await check_and_update_streak(user_id)
+            streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
 
             caption = _card_caption(mention, card)
-            caption += _streak_text(streak, bonus, new_balance, crystal_bonus)
+            caption += _streak_text(streak, bonus, new_balance, gem_bonus)
 
             try:
                 await callback.message.answer_photo(
@@ -2080,18 +2080,18 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
 
 
 # ================= МАРКЕТ =================
-async def get_user_crystals(user_id: int) -> int:
+async def get_user_gems(user_id: int) -> int:
     async with get_db() as db:
         cur = await db.execute(
-            "SELECT crystals FROM users WHERE user_id = ?", (user_id,)
+            "SELECT gems FROM users WHERE user_id = ?", (user_id,)
         )
         row = await cur.fetchone()
-        return (row["crystals"] or 0) if row else 0
+        return (row["gems"] or 0) if row else 0
 
 
 async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     """Главное меню маркета: баланс + категории по редкости + обмен."""
-    crystals = await get_user_crystals(user_id)
+    gems = await get_user_gems(user_id)
     async with get_db() as db:
         cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
@@ -2113,9 +2113,9 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     nickname = await get_user_nickname(user_id)
     text = (
         f"🛒 <b>Маркет</b> • {esc(nickname)}\n\n"
-        f"💎 Кристаллы: <b>{fmt_num(crystals)}</b>\n"
+        f"💎 Кристаллы: <b>{fmt_num(gems)}</b>\n"
         f"🪙 Монеты: <b>{fmt_num(coins)}</b>\n"
-        f"💱 Курс: 1 💎 = {CRYSTAL_TO_COINS} 🪙\n\n"
+        f"💱 Курс: 1 💎 = {GEM_TO_COINS} 🪙\n\n"
         f"Выберите редкость, чтобы купить недостающие карточки:"
     )
 
@@ -2162,7 +2162,7 @@ async def build_market_rarity_page(
             (rarity, user_id),
         )
         cards = await cur.fetchall()
-        crystals = await get_user_crystals(user_id)
+        gems = await get_user_gems(user_id)
 
     if not cards:
         text = (
@@ -2182,12 +2182,12 @@ async def build_market_rarity_page(
         f"🛒 <b>Маркет</b> • {r_info.get('icon', '')} {r_info.get('name', rarity)}\n\n"
         f"🀄️ <b>{esc(card['name'])}</b>\n"
         f"💎 Цена • <b>{fmt_num(price)}</b>\n"
-        f"💎 Ваш баланс • <b>{fmt_num(crystals)}</b>\n"
+        f"💎 Ваш баланс • <b>{fmt_num(gems)}</b>\n"
         f"📄 {page + 1}/{total}"
     )
 
     b = InlineKeyboardBuilder()
-    can_buy = crystals >= price
+    can_buy = gems >= price
     buy_label = (
         f"✅ Купить ({fmt_num(price)} 💎)"
         if can_buy
@@ -2368,21 +2368,21 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
                 return
 
             cur = await db.execute(
-                "SELECT crystals FROM users WHERE user_id = ?", (user_id,)
+                "SELECT gems FROM users WHERE user_id = ?", (user_id,)
             )
             row = await cur.fetchone()
-            crystals = (row["crystals"] or 0) if row else 0
+            gems = (row["gems"] or 0) if row else 0
 
-            if crystals < price:
+            if gems < price:
                 await callback.answer(
-                    f"⚠️ Недостаточно кристаллов. Нужно {price} 💎, у вас {crystals} 💎",
+                    f"⚠️ Недостаточно кристаллов. Нужно {price} 💎, у вас {gems} 💎",
                     show_alert=True,
                 )
                 return
 
             now = int(time.time())
             await db.execute(
-                "UPDATE users SET crystals = crystals - ? WHERE user_id = ?",
+                "UPDATE users SET gems = gems - ? WHERE user_id = ?",
                 (price, user_id),
             )
             await db.execute(
@@ -2393,9 +2393,9 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
                 (user_id, card_id, now, now),
             )
             cur = await db.execute(
-                "SELECT crystals FROM users WHERE user_id = ?", (user_id,)
+                "SELECT gems FROM users WHERE user_id = ?", (user_id,)
             )
-            new_crystals = (await cur.fetchone())[0] or 0
+            new_gems = (await cur.fetchone())[0] or 0
 
         r_info = RARITIES.get(rarity, {})
         caption = (
@@ -2403,7 +2403,7 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
             f"🀄️ <b>{esc(card['name'])}</b>\n"
             f"{r_info.get('icon', '')} {r_info.get('name', rarity)}\n"
             f"💎 Списано • <b>{fmt_num(price)}</b>\n"
-            f"💎 Баланс • <b>{fmt_num(new_crystals)}</b>"
+            f"💎 Баланс • <b>{fmt_num(new_gems)}</b>"
         )
         b = InlineKeyboardBuilder()
         b.button(
@@ -2440,37 +2440,37 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
         if action == "menu":
             async with get_db() as db:
                 cur = await db.execute(
-                    "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+                    "SELECT coins, gems FROM users WHERE user_id = ?", (user_id,)
                 )
                 row = await cur.fetchone()
             coins = (row["coins"] or 0) if row else 0
-            crystals = (row["crystals"] or 0) if row else 0
-            max_buy = coins // CRYSTAL_TO_COINS
+            gems = (row["gems"] or 0) if row else 0
+            max_buy = coins // GEM_TO_COINS
 
             text = (
                 f"💱 <b>Обмен монет на кристаллы</b>\n\n"
-                f"Курс: <b>1 💎 = {CRYSTAL_TO_COINS} 🪙</b>\n"
+                f"Курс: <b>1 💎 = {GEM_TO_COINS} 🪙</b>\n"
                 f"🪙 Монеты: <b>{fmt_num(coins)}</b>\n"
-                f"💎 Кристаллы: <b>{fmt_num(crystals)}</b>\n"
+                f"💎 Кристаллы: <b>{fmt_num(gems)}</b>\n"
                 f"Можно купить до: <b>{fmt_num(max_buy)}</b> 💎\n\n"
                 f"Выберите количество:"
             )
             b = InlineKeyboardBuilder()
             for n in (1, 5, 10, 25, 50):
-                cost = n * CRYSTAL_TO_COINS
+                cost = n * GEM_TO_COINS
                 if coins >= cost:
                     b.button(
                         text=f"+{n} 💎 ({fmt_num(cost)} 🪙)",
                         callback_data=MarketExchangeCallback(
-                            action="buy_crystals", amount=n, user_id=user_id
+                            action="buy_gems", amount=n, user_id=user_id
                         ).pack(),
                     )
             if max_buy >= 1 and max_buy not in (1, 5, 10, 25, 50):
-                cost = max_buy * CRYSTAL_TO_COINS
+                cost = max_buy * GEM_TO_COINS
                 b.button(
                     text=f"+{fmt_num(max_buy)} 💎 (все, {fmt_num(cost)} 🪙)",
                     callback_data=MarketExchangeCallback(
-                        action="buy_crystals", amount=max_buy, user_id=user_id
+                        action="buy_gems", amount=max_buy, user_id=user_id
                     ).pack(),
                 )
             b.button(text="🔙 Назад", callback_data=MarketMainCallback(user_id=user_id).pack())
@@ -2486,7 +2486,7 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
             await callback.answer()
             return
 
-        if action == "buy_crystals":
+        if action == "buy_gems":
             if amount <= 0:
                 await callback.answer("❌ Некорректное количество")
                 return
@@ -2494,10 +2494,10 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 await callback.answer("❌ Слишком много за раз", show_alert=True)
                 return
 
-            cost = amount * CRYSTAL_TO_COINS
+            cost = amount * GEM_TO_COINS
             async with get_db() as db:
                 cur = await db.execute(
-                    "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+                    "SELECT coins, gems FROM users WHERE user_id = ?", (user_id,)
                 )
                 row = await cur.fetchone()
                 coins = (row["coins"] or 0) if row else 0
@@ -2508,22 +2508,22 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                     )
                     return
                 await db.execute(
-                    "UPDATE users SET coins = coins - ?, crystals = crystals + ? "
+                    "UPDATE users SET coins = coins - ?, gems = gems + ? "
                     "WHERE user_id = ?",
                     (cost, amount, user_id),
                 )
                 cur = await db.execute(
-                    "SELECT coins, crystals FROM users WHERE user_id = ?", (user_id,)
+                    "SELECT coins, gems FROM users WHERE user_id = ?", (user_id,)
                 )
                 row = await cur.fetchone()
                 new_coins = row["coins"] or 0
-                new_crystals = row["crystals"] or 0
+                new_gems = row["gems"] or 0
 
             text = (
                 f"✅ <b>Обмен выполнен</b>\n\n"
                 f"💎 Получено: <b>+{fmt_num(amount)}</b>\n"
                 f"🪙 Списано: <b>−{fmt_num(cost)}</b>\n\n"
-                f"💎 Баланс: <b>{fmt_num(new_crystals)}</b>\n"
+                f"💎 Баланс: <b>{fmt_num(new_gems)}</b>\n"
                 f"🪙 Монеты: <b>{fmt_num(new_coins)}</b>"
             )
             b = InlineKeyboardBuilder()
@@ -2922,7 +2922,7 @@ async def build_admin_users_page(page: int = 0):
         offset = page * per_page
 
         cur = await db.execute(
-            """SELECT u.user_id, u.nickname, u.coins, u.crystals, u.streak, u.role, u.registration, u.gender
+            """SELECT u.user_id, u.nickname, u.coins, u.gems, u.streak, u.role, u.registration, u.gender
                FROM users u
                ORDER BY u.registration DESC
                LIMIT ? OFFSET ?""",
@@ -2940,7 +2940,7 @@ async def build_admin_users_page(page: int = 0):
             text += (
                 f"{role_mark} <b>{esc(nick)}</b>\n"
                 f"   🆔 <code>{u['user_id']}</code> | 🪙 {fmt_num(u['coins'] or 0)} | "
-                f"💎 {fmt_num(u['crystals'] or 0)} | 🔥 {u['streak'] or 0} | {g['icon']} | 📅 {reg}\n\n"
+                f"💎 {fmt_num(u['gems'] or 0)} | 🔥 {u['streak'] or 0} | {g['icon']} | 📅 {reg}\n\n"
             )
             b.button(
                 text=f"{role_mark} {nick}",
@@ -2999,7 +2999,7 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
     g = GENDERS.get(user["gender"] or "none", GENDERS["none"])
     reg = datetime.fromtimestamp(user["registration"]).strftime("%d.%m.%Y %H:%M") if user["registration"] else "—"
 
-    crystals = user["crystals"] if user["crystals"] is not None else 0
+    gems = user["gems"] if user["gems"] is not None else 0
     caption = (
         f"👤 <b>{esc(nick)}</b>\n\n"
         f"🆔 <code>{user_id}</code>\n"
@@ -3007,7 +3007,7 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
         f"⚧ Пол: {g['icon']} {g['name']}\n"
         f"📅 Регистрация: {reg}\n"
         f"🪙 Монеты: <b>{fmt_num(user['coins'])}</b>\n"
-        f"💎 Кристаллы: <b>{fmt_num(crystals)}</b>\n"
+        f"💎 Кристаллы: <b>{fmt_num(gems)}</b>\n"
         f"🀄️ Карточек: <b>{fmt_num(user['cards_count'])}</b>\n"
         f"🔥 Стрик: <b>{fmt_days(user['streak'])}</b>"
     )
@@ -3015,7 +3015,7 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
     b = InlineKeyboardBuilder()
     b.button(text="✏️ Ник", callback_data=AdminUserActionCallback(action="nick", user_id=user_id).pack())
     b.button(text="🪙 Монеты", callback_data=AdminUserActionCallback(action="coins", user_id=user_id).pack())
-    b.button(text="💎 Кристаллы", callback_data=AdminUserActionCallback(action="crystals", user_id=user_id).pack())
+    b.button(text="💎 Кристаллы", callback_data=AdminUserActionCallback(action="gems", user_id=user_id).pack())
     if user["role"] == "admin":
         b.button(text="❌ Разжаловать", callback_data=AdminUserActionCallback(action="unadmin", user_id=user_id).pack())
     else:
@@ -3062,10 +3062,10 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
             f"выполните команду:\n<code>/setcoins {target_id} 1000</code>"
         )
         await call.answer()
-    elif action == "crystals":
+    elif action == "gems":
         await call.message.answer(
             f"💎 Чтобы изменить кристаллы пользователя <code>{target_id}</code>, "
-            f"выполните команду:\n<code>/setcrystals {target_id} 50</code>"
+            f"выполните команду:\n<code>/setgems {target_id} 50</code>"
         )
         await call.answer()
 
@@ -3130,12 +3130,13 @@ async def admin_help(message: Message):
 
         "<b>🪙 Управление пользователями:</b>\n"
         "<code>/setcoins [USERID] COINS</code> — установить баланс монет\n"
-        "<code>/setcrystals [USERID] N</code> — установить баланс кристаллов\n"
+        "<code>/setgems [USERID] N</code> — установить баланс кристаллов\n"
         "<code>/setnick USERID НовыйНик</code> — установить ник\n"
         "<code>/resetcd [USERID]</code> — сбросить кулдаун\n"
         "<i>Все команды работают только в ЛС.</i>\n\n"
 
         "<b>🧪 Тестовые команды:</b>\n"
+        "<code>/migrate_crystals_to_gems</code> — переименовать колонку crystals → gems\n"
         "<code>/reset_all_nicknames</code> — сбросить ники всех\n"
         "<code>/promote_to_mythical</code> — 10 случайных epic/legendary в mythical\n"
         "<code>/getfileid</code> — file_id картинки (фото с командой в подписи)\n"
@@ -3294,11 +3295,11 @@ async def admin_stats(message: Message):
             cur = await db.execute("SELECT COALESCE(MAX(coins), 0) FROM users")
             max_coins = (await cur.fetchone())[0]
 
-            cur = await db.execute("SELECT COALESCE(SUM(crystals), 0) FROM users")
-            total_crystals = (await cur.fetchone())[0]
+            cur = await db.execute("SELECT COALESCE(SUM(gems), 0) FROM users")
+            total_gems = (await cur.fetchone())[0]
 
-            cur = await db.execute("SELECT COALESCE(MAX(crystals), 0) FROM users")
-            max_crystals = (await cur.fetchone())[0]
+            cur = await db.execute("SELECT COALESCE(MAX(gems), 0) FROM users")
+            max_gems = (await cur.fetchone())[0]
 
             cur = await db.execute("SELECT COUNT(*) FROM cards")
             total_cards = (await cur.fetchone())[0]
@@ -3355,8 +3356,8 @@ async def admin_stats(message: Message):
                 f"  • В среднем: <b>{fmt_num(int(avg_coins))}</b>\n"
                 f"  • Максимум: <b>{fmt_num(max_coins)}</b>\n\n"
                 f"<b>💎 Кристаллы:</b>\n"
-                f"  • В обороте: <b>{fmt_num(total_crystals)}</b>\n"
-                f"  • Максимум: <b>{fmt_num(max_crystals)}</b>\n\n"
+                f"  • В обороте: <b>{fmt_num(total_gems)}</b>\n"
+                f"  • Максимум: <b>{fmt_num(max_gems)}</b>\n\n"
                 f"<b>🀄️ Карточки в игре:</b>\n"
                 f"  • Всего: <b>{fmt_num(total_cards)}</b>\n"
                 + "\n".join(rarity_lines) + "\n\n"
@@ -3451,8 +3452,8 @@ async def admin_setcoins(message: Message, command: Command):
     )
 
 
-@router.message(Command("setcrystals"), admin_filter)
-async def admin_setcrystals(message: Message, command: Command):
+@router.message(Command("setgems"), admin_filter)
+async def admin_setgems(message: Message, command: Command):
     if message.chat.type != "private":
         await message.reply("⚠️ Команда доступна только в личных сообщениях с ботом.")
         return
@@ -3461,9 +3462,9 @@ async def admin_setcrystals(message: Message, command: Command):
     if not args:
         await message.reply(
             "✏️ Использование:\n"
-            "<code>/setcrystals N</code> — себе\n"
-            "<code>/setcrystals USERID N</code> — другому пользователю\n\n"
-            "Например: <code>/setcrystals 50</code> или <code>/setcrystals 123456789 100</code>"
+            "<code>/setgems N</code> — себе\n"
+            "<code>/setgems USERID N</code> — другому пользователю\n\n"
+            "Например: <code>/setgems 50</code> или <code>/setgems 123456789 100</code>"
         )
         return
 
@@ -3471,33 +3472,33 @@ async def admin_setcrystals(message: Message, command: Command):
 
     if len(args) == 1:
         try:
-            crystals = int(args[0])
+            gems = int(args[0])
         except ValueError:
             await message.reply("❌ <b>N должно быть числом.</b>")
             return
     elif len(args) == 2:
         try:
             target_id = int(args[0])
-            crystals = int(args[1])
+            gems = int(args[1])
         except ValueError:
             await message.reply("❌ <b>USERID и N должны быть числами.</b>")
             return
     else:
         await message.reply(
-            "❌ <b>Слишком много аргументов.</b> Используйте /setcrystals [USERID] N"
+            "❌ <b>Слишком много аргументов.</b> Используйте /setgems [USERID] N"
         )
         return
 
     if target_id <= 0:
         await message.reply("❌ <b>Некорректный USERID.</b>")
         return
-    if crystals < 0:
+    if gems < 0:
         await message.reply("❌ <b>Баланс не может быть отрицательным.</b>")
         return
 
     async with get_db() as db:
         cur = await db.execute(
-            "SELECT user_id, nickname, crystals FROM users WHERE user_id = ?",
+            "SELECT user_id, nickname, gems FROM users WHERE user_id = ?",
             (target_id,),
         )
         row = await cur.fetchone()
@@ -3508,9 +3509,9 @@ async def admin_setcrystals(message: Message, command: Command):
             )
             return
 
-        old_crystals = row["crystals"] or 0
+        old_gems = row["gems"] or 0
         await db.execute(
-            "UPDATE users SET crystals = ? WHERE user_id = ?", (crystals, target_id)
+            "UPDATE users SET gems = ? WHERE user_id = ?", (gems, target_id)
         )
 
     who = (
@@ -3521,7 +3522,7 @@ async def admin_setcrystals(message: Message, command: Command):
     await message.reply(
         f"✅ <b>Кристаллы обновлены</b> ({who}):\n"
         f"🆔 <code>{target_id}</code>\n"
-        f"💎 Было: <b>{fmt_num(old_crystals)}</b> → Стало: <b>{fmt_num(crystals)}</b>"
+        f"💎 Было: <b>{fmt_num(old_gems)}</b> → Стало: <b>{fmt_num(gems)}</b>"
     )
 
 
@@ -3707,6 +3708,91 @@ async def admin_delcard(message: Message, command: Command):
 
 
 # ================= [TEST] ТЕСТОВЫЕ КОМАНДЫ =================
+
+@router.message(Command("migrate_crystals_to_gems"), admin_filter)
+async def test_migrate_crystals_to_gems(message: Message):
+    """
+    [TEST] Переименовывает колонку users.crystals → users.gems.
+    Безопасно: если gems уже есть — просто копирует/удаляет crystals.
+    Если crystals нет и gems есть — ничего не делает.
+    """
+    if message.chat.type != "private":
+        await message.reply("⚠️ Только в ЛС.")
+        return
+
+    try:
+        async with get_db() as db:
+            cur = await db.execute("PRAGMA table_info(users)")
+            cols = {row[1] for row in await cur.fetchall()}  # name is index 1
+
+            has_crystals = "crystals" in cols
+            has_gems = "gems" in cols
+
+            if has_gems and not has_crystals:
+                await message.reply(
+                    "✅ <b>[TEST] Миграция не нужна</b>\n\n"
+                    "Колонка <code>gems</code> уже есть, <code>crystals</code> отсутствует."
+                )
+                return
+
+            if has_crystals and not has_gems:
+                # SQLite 3.25+ поддерживает RENAME COLUMN
+                try:
+                    await db.execute(
+                        "ALTER TABLE users RENAME COLUMN crystals TO gems"
+                    )
+                    await message.reply(
+                        "✅ <b>[TEST] Миграция выполнена</b>\n\n"
+                        "Колонка <code>users.crystals</code> переименована в "
+                        "<code>users.gems</code>."
+                    )
+                    return
+                except Exception as e:
+                    # Fallback: создать gems, скопировать, удалить crystals через recreate
+                    logger.warning(f"RENAME COLUMN failed, fallback: {e}")
+                    await db.execute(
+                        "ALTER TABLE users ADD COLUMN gems INTEGER DEFAULT 0"
+                    )
+                    await db.execute(
+                        "UPDATE users SET gems = COALESCE(crystals, 0)"
+                    )
+                    # SQLite cannot DROP COLUMN easily on old versions — leave crystals
+                    await message.reply(
+                        "✅ <b>[TEST] Миграция (fallback)</b>\n\n"
+                        "Добавлена колонка <code>gems</code>, данные скопированы из "
+                        "<code>crystals</code>.\n"
+                        f"Примечание: старую колонку <code>crystals</code> не удалось "
+                        f"удалить автоматически ({esc(str(e))})."
+                    )
+                    return
+
+            if has_crystals and has_gems:
+                # Обе есть — сливаем: gems = COALESCE(gems, crystals, 0)
+                await db.execute(
+                    "UPDATE users SET gems = COALESCE(gems, crystals, 0)"
+                )
+                await message.reply(
+                    "✅ <b>[TEST] Миграция (merge)</b>\n\n"
+                    "Обе колонки существовали. Данные слиты в <code>gems</code> "
+                    "(<code>gems = COALESCE(gems, crystals, 0)</code>).\n"
+                    "Колонку <code>crystals</code> при желании можно удалить вручную."
+                )
+                return
+
+            # Нет ни crystals, ни gems
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN gems INTEGER DEFAULT 0"
+            )
+            await message.reply(
+                "✅ <b>[TEST] Колонка gems создана</b>\n\n"
+                "Ни <code>crystals</code>, ни <code>gems</code> не было — "
+                "добавлена пустая <code>gems INTEGER DEFAULT 0</code>."
+            )
+    except Exception as e:
+        logger.error(f"migrate_crystals_to_gems error: {e}")
+        await message.reply(f"❌ <b>Ошибка миграции:</b> {esc(str(e))}")
+
+
 @router.message(Command("reset_all_nicknames"), admin_filter)
 async def test_reset_all_nicknames(message: Message):
     async with get_db() as db:
