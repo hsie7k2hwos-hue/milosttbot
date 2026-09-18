@@ -115,6 +115,20 @@ TRANSFER_CMD_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+# Регулярки для просмотра чужого профиля / маркета / коллекции
+PROFILE_CMD_RE = re.compile(
+    r"^мряу\s+профиль\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+MARKET_CMD_RE = re.compile(
+    r"^мряу\s+маркет\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+COLLECTION_CMD_RE = re.compile(
+    r"^мряу\s+(коллекция|карточки)\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -291,14 +305,15 @@ def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
 class RaritySelectCallback(CallbackData, prefix="coll_rarity"):
     rarity: str
     page: int = 0
+    user_id: int = 0
 
 
 class MainMenuCallback(CallbackData, prefix="coll_main"):
-    pass
+    user_id: int = 0
 
 
 class BackToProfileCallback(CallbackData, prefix="back_to_profile"):
-    pass
+    user_id: int = 0
 
 
 class AdminRarityCallback(CallbackData, prefix="admin_rarity"):
@@ -308,6 +323,7 @@ class AdminRarityCallback(CallbackData, prefix="admin_rarity"):
 
 class NicknameCallback(CallbackData, prefix="nickname"):
     action: str
+    user_id: int = 0
 
 
 class CardActionCallback(CallbackData, prefix="card_action"):
@@ -326,6 +342,7 @@ class NickConfirmCallback(CallbackData, prefix="nickconf"):
 
 class GenderCallback(CallbackData, prefix="gender"):
     value: str
+    user_id: int = 0
 
 
 class AdminCardPageCallback(CallbackData, prefix="admin_card_page"):
@@ -356,19 +373,22 @@ class AdminUserActionCallback(CallbackData, prefix="admin_user_action"):
 class MarketRarityCallback(CallbackData, prefix="mkt_rarity"):
     rarity: str
     page: int = 0
+    user_id: int = 0
 
 
 class MarketBuyCallback(CallbackData, prefix="mkt_buy"):
     card_id: int
+    user_id: int = 0
 
 
 class MarketExchangeCallback(CallbackData, prefix="mkt_ex"):
     action: str  # buy_crystals | menu
     amount: int = 0
+    user_id: int = 0
 
 
 class MarketMainCallback(CallbackData, prefix="mkt_main"):
-    pass
+    user_id: int = 0
 
 
 # ================= БАЗА ДАННЫХ =================
@@ -509,6 +529,13 @@ async def get_user_row(user_id: int):
         return await cur.fetchone()
 
 
+def _owner_check(callback: CallbackQuery, target_user_id: int) -> bool:
+    """True если нажал владелец кнопки (или target_user_id == 0 — старые кнопки)."""
+    if target_user_id and callback.from_user.id != target_user_id:
+        return False
+    return True
+
+
 # ================= FSM =================
 class AddCardSG(StatesGroup):
     photo = State()
@@ -548,25 +575,25 @@ def get_admin_main_kb():
     return b.as_markup()
 
 
-def get_profile_kb():
+def get_profile_kb(owner_id: int):
     b = InlineKeyboardBuilder()
-    b.button(text="🀄️ Мои карточки", callback_data="collection")
-    b.button(text="⚧ Выбрать пол", callback_data=GenderCallback(value="menu").pack())
+    b.button(text="🀄️ Мои карточки", callback_data=MainMenuCallback(user_id=owner_id).pack())
+    b.button(text="⚧ Выбрать пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
     b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)",
-             callback_data=NicknameCallback(action="change").pack())
+             callback_data=NicknameCallback(action="change", user_id=owner_id).pack())
     b.adjust(1)
     return b.as_markup()
 
 
-def get_gender_kb(current: str = "none") -> InlineKeyboardMarkup:
+def get_gender_kb(current: str = "none", owner_id: int = 0) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for key, info in GENDERS.items():
         mark = "✅ " if key == current else ""
         b.button(
             text=f"{mark}{info['icon']} {info['name']}",
-            callback_data=GenderCallback(value=key).pack(),
+            callback_data=GenderCallback(value=key, user_id=owner_id).pack(),
         )
-    b.button(text="🔙 Назад в профиль", callback_data=BackToProfileCallback().pack())
+    b.button(text="🔙 Назад в профиль", callback_data=BackToProfileCallback(user_id=owner_id).pack())
     b.adjust(1)
     return b.as_markup()
 
@@ -659,6 +686,9 @@ async def render_profile(bot: Bot, user_id: int):
         cur = await db.execute("SELECT COUNT(*) FROM cards")
         total_cards = (await cur.fetchone())[0]
 
+    if not row:
+        return DEFAULT_AVATAR_FILE_ID, "❌ Пользователь не найден в базе.", None
+
     nickname = row["nickname"] or f"User{user_id}"
     reg_date = datetime.fromtimestamp(row["registration"] or time.time()).strftime("%d.%m.%Y")
 
@@ -682,7 +712,7 @@ async def render_profile(bot: Bot, user_id: int):
         f"💎 Кристаллы • <b>{fmt_num(crystals)}</b>\n"
         f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
     )
-    return await get_user_photo(bot, user_id, nickname), caption, get_profile_kb()
+    return await get_user_photo(bot, user_id, nickname), caption, get_profile_kb(user_id)
 
 
 async def render_collection(bot: Bot, user_id: int):
@@ -690,7 +720,7 @@ async def render_collection(bot: Bot, user_id: int):
     nickname = await get_user_nickname(user_id)
     photo = await get_user_photo(bot, user_id, nickname)
     caption = (
-        f"🀄️ <b>Ваши карточки</b>\n"
+        f"🀄️ <b>Карточки</b> • {esc(nickname)}\n"
         f"Всего: {fmt_num(total)} из {fmt_num(total_in_game)}"
     )
     return photo, caption, keyboard, total
@@ -972,6 +1002,9 @@ async def cmd_help(message: Message):
             "/meow или «мряу» — получить карточку\n"
             "«мряу ставка N» — слот-машина (ставка N монет)\n"
             "«мряу перевод N» — перевод монет (в группе, реплаем на сообщение получателя)\n"
+            "«мряу профиль» — свой профиль (в группе реплаем — профиль другого)\n"
+            "«мряу маркет» — маркет (в группе реплаем — маркет другого)\n"
+            "«мряу коллекция» / «мряу карточки» — коллекция (реплаем — чужая)\n"
             "/profile — профиль\n"
             "/collection — мои карточки\n"
             "/market или «🛒 Маркет» — купить недостающие карточки\n"
@@ -1389,12 +1422,34 @@ async def transfer_coins_handler(message: Message):
 @router.message(F.text == "👤 Профиль")
 @router.message(F.text.lower().strip() == "профиль")
 @router.message(Command("profile"))
+@router.message(F.text.regexp(PROFILE_CMD_RE))
 async def show_profile(message: Message):
     try:
+        # Определяем, чей профиль показывать
+        target_user = message.from_user
+        if (
+            message.chat.type != "private"
+            and message.reply_to_message
+            and message.reply_to_message.from_user
+            and not message.reply_to_message.from_user.is_bot
+        ):
+            target_user = message.reply_to_message.from_user
+
         await get_or_create_user(
-            message.from_user.id, message.from_user.username, message.from_user.full_name
+            target_user.id, target_user.username, target_user.full_name
         )
-        photo, caption, kb = await render_profile(message.bot, message.from_user.id)
+        # Также регистрируем того, кто смотрит (если это чужой профиль)
+        if target_user.id != message.from_user.id:
+            await get_or_create_user(
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.full_name,
+            )
+
+        photo, caption, kb = await render_profile(message.bot, target_user.id)
+        if kb is None:
+            await message.reply(caption)
+            return
         try:
             await message.reply_photo(photo=photo, caption=caption, reply_markup=kb)
         except TelegramBadRequest as e:
@@ -1406,9 +1461,16 @@ async def show_profile(message: Message):
 
 
 @router.callback_query(BackToProfileCallback.filter())
-async def process_back_to_profile(callback: CallbackQuery):
+async def process_back_to_profile(callback: CallbackQuery, callback_data: BackToProfileCallback):
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
     try:
-        photo, caption, kb = await render_profile(callback.message.bot, callback.from_user.id)
+        target_id = callback_data.user_id or callback.from_user.id
+        photo, caption, kb = await render_profile(callback.message.bot, target_id)
+        if kb is None:
+            await callback.answer("Пользователь не найден")
+            return
         await show_or_edit_photo(callback.message, photo, caption, kb)
         await callback.answer()
     except Exception as e:
@@ -1536,7 +1598,10 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
 
 
 @router.callback_query(NicknameCallback.filter(F.action == "change"))
-async def change_nickname_hint(callback: CallbackQuery):
+async def change_nickname_hint(callback: CallbackQuery, callback_data: NicknameCallback):
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
     await callback.answer(
         f"Для изменения ника используйте команду /nickname НовыйНик ({NICKNAME_COST} 🪙) "
         f"или /nickname reset для сброса",
@@ -1546,22 +1611,28 @@ async def change_nickname_hint(callback: CallbackQuery):
 
 # ---------- Смена пола ----------
 @router.callback_query(GenderCallback.filter(F.value == "menu"))
-async def gender_menu(callback: CallbackQuery):
-    user_id = callback.from_user.id
+async def gender_menu(callback: CallbackQuery, callback_data: GenderCallback):
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
+    user_id = callback_data.user_id or callback.from_user.id
     async with get_db() as db:
         cur = await db.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
     current = (row["gender"] if row and row["gender"] else "none")
     await callback.message.edit_caption(
         caption="⚧ <b>Выберите пол</b>\n\n<i>Это необязательное поле — можно оставить «Не задан».</i>",
-        reply_markup=get_gender_kb(current),
+        reply_markup=get_gender_kb(current, owner_id=user_id),
     )
     await callback.answer()
 
 
 @router.callback_query(GenderCallback.filter(F.value != "menu"))
 async def gender_set(callback: CallbackQuery, callback_data: GenderCallback):
-    user_id = callback.from_user.id
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
+    user_id = callback_data.user_id or callback.from_user.id
     value = callback_data.value
     if value not in GENDERS:
         await callback.answer("⚠️ Неизвестное значение")
@@ -1574,7 +1645,7 @@ async def gender_set(callback: CallbackQuery, callback_data: GenderCallback):
     await callback.message.edit_caption(
         caption=f"✅ <b>Пол сохранён:</b> {g['icon']} {g['name']}\n\n"
                 f"<i>Вернуться в профиль:</i>",
-        reply_markup=get_gender_kb(value),
+        reply_markup=get_gender_kb(value, owner_id=user_id),
     )
     await callback.answer("✅ Сохранено")
 
@@ -1590,7 +1661,7 @@ async def gender_cmd(message: Message, command: Command):
             cur = await db.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
             row = await cur.fetchone()
         current = (row["gender"] if row and row["gender"] else "none")
-        await message.reply("⚧ <b>Выберите пол:</b>", reply_markup=get_gender_kb(current))
+        await message.reply("⚧ <b>Выберите пол:</b>", reply_markup=get_gender_kb(current, owner_id=user_id))
         return
 
     aliases = {
@@ -1760,26 +1831,49 @@ async def get_collection_main_keyboard(user_id: int):
             rows.append([
                 InlineKeyboardButton(
                     text=f"{r_info['icon']} {r_info['name']} ({fmt_num(user_amount)}/{fmt_num(total_of_rarity)})",
-                    callback_data=RaritySelectCallback(rarity=r_key, page=0).pack(),
+                    callback_data=RaritySelectCallback(rarity=r_key, page=0, user_id=user_id).pack(),
                 )
             ])
         rows.append([
             InlineKeyboardButton(
                 text="👤 Перейти в профиль",
-                callback_data=BackToProfileCallback().pack(),
+                callback_data=BackToProfileCallback(user_id=user_id).pack(),
             )
         ])
         return InlineKeyboardMarkup(inline_keyboard=rows), total_cards, total_in_game
 
 
 @router.message(Command("collection"))
+@router.message(F.text.regexp(COLLECTION_CMD_RE))
 @router.callback_query(F.data == "collection")
 async def show_collection(event):
     callback = event if isinstance(event, CallbackQuery) else None
     message = event.message if callback else event
-    user_id = event.from_user.id
+    viewer_id = event.from_user.id
+
+    # Определяем владельца коллекции
+    target_id = viewer_id
+    if (
+        not callback
+        and message.chat.type != "private"
+        and message.reply_to_message
+        and message.reply_to_message.from_user
+        and not message.reply_to_message.from_user.is_bot
+    ):
+        target_id = message.reply_to_message.from_user.id
+        await get_or_create_user(
+            target_id,
+            message.reply_to_message.from_user.username,
+            message.reply_to_message.from_user.full_name,
+        )
+
     try:
-        photo, caption, keyboard, total = await render_collection(message.bot, user_id)
+        await get_or_create_user(
+            viewer_id,
+            event.from_user.username,
+            event.from_user.full_name,
+        )
+        photo, caption, keyboard, total = await render_collection(message.bot, target_id)
         if callback:
             await callback.answer()
         if total == 0:
@@ -1801,7 +1895,11 @@ async def show_collection(event):
 
 @router.callback_query(RaritySelectCallback.filter())
 async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySelectCallback):
-    user_id, rarity, page = callback.from_user.id, callback_data.rarity, callback_data.page
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
+    user_id = callback_data.user_id or callback.from_user.id
+    rarity, page = callback_data.rarity, callback_data.page
     try:
         async with get_db() as db:
             cur = await db.execute(
@@ -1834,18 +1932,21 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         if page > 0:
             nav.append(InlineKeyboardButton(
                 text="◀️",
-                callback_data=RaritySelectCallback(rarity=rarity, page=page - 1).pack(),
+                callback_data=RaritySelectCallback(rarity=rarity, page=page - 1, user_id=user_id).pack(),
             ))
         nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="ignore"))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton(
                 text="▶️",
-                callback_data=RaritySelectCallback(rarity=rarity, page=page + 1).pack(),
+                callback_data=RaritySelectCallback(rarity=rarity, page=page + 1, user_id=user_id).pack(),
             ))
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             nav,
-            [InlineKeyboardButton(text="🔙 К категориям", callback_data=MainMenuCallback().pack())],
+            [InlineKeyboardButton(
+                text="🔙 К категориям",
+                callback_data=MainMenuCallback(user_id=user_id).pack(),
+            )],
         ])
         await show_or_edit_photo(callback.message, card["photo_id"], caption, keyboard)
         await callback.answer()
@@ -1855,9 +1956,13 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
 
 
 @router.callback_query(MainMenuCallback.filter())
-async def process_back_to_main(callback: CallbackQuery):
+async def process_back_to_main(callback: CallbackQuery, callback_data: MainMenuCallback):
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
+    target_id = callback_data.user_id or callback.from_user.id
     photo, caption, keyboard, _ = await render_collection(
-        callback.message.bot, callback.from_user.id
+        callback.message.bot, target_id
     )
     await show_or_edit_photo(callback.message, photo, caption, keyboard)
     await callback.answer()
@@ -1876,7 +1981,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
     target = callback_data.user_id or user_id
 
     if user_id != target:
-        await callback.answer("⚠️ Кнопка предназначена не для вас")
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
         return
 
     if rate_limited(f"card-action:{user_id}", limit=6, window=10):
@@ -1993,8 +2098,9 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             )
             missing_by_rarity[r_key] = (await cur.fetchone())[0]
 
+    nickname = await get_user_nickname(user_id)
     text = (
-        f"🛒 <b>Маркет</b>\n\n"
+        f"🛒 <b>Маркет</b> • {esc(nickname)}\n\n"
         f"💎 Кристаллы: <b>{fmt_num(crystals)}</b>\n"
         f"🪙 Монеты: <b>{fmt_num(coins)}</b>\n"
         f"💱 Курс: 1 💎 = {CRYSTAL_TO_COINS} 🪙\n\n"
@@ -2014,11 +2120,11 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
             label = f"{r_info['icon']} {r_info['name']} — собрано ✅"
         b.button(
             text=label,
-            callback_data=MarketRarityCallback(rarity=r_key, page=0).pack(),
+            callback_data=MarketRarityCallback(rarity=r_key, page=0, user_id=user_id).pack(),
         )
     b.button(
         text="💱 Купить кристаллы за монеты",
-        callback_data=MarketExchangeCallback(action="menu").pack(),
+        callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack(),
     )
     b.adjust(1)
     return text, b.as_markup()
@@ -2052,7 +2158,7 @@ async def build_market_rarity_page(
             f"У вас уже есть все карточки этой редкости! 🎉"
         )
         b = InlineKeyboardBuilder()
-        b.button(text="🔙 Назад в маркет", callback_data=MarketMainCallback().pack())
+        b.button(text="🔙 Назад в маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
         b.adjust(1)
         return text, b.as_markup(), None
 
@@ -2077,7 +2183,7 @@ async def build_market_rarity_page(
     )
     b.button(
         text=buy_label,
-        callback_data=MarketBuyCallback(card_id=card["id"]).pack(),
+        callback_data=MarketBuyCallback(card_id=card["id"], user_id=user_id).pack(),
     )
 
     nav = []
@@ -2085,7 +2191,7 @@ async def build_market_rarity_page(
         nav.append(
             InlineKeyboardButton(
                 text="◀️",
-                callback_data=MarketRarityCallback(rarity=rarity, page=page - 1).pack(),
+                callback_data=MarketRarityCallback(rarity=rarity, page=page - 1, user_id=user_id).pack(),
             )
         )
     nav.append(
@@ -2095,14 +2201,14 @@ async def build_market_rarity_page(
         nav.append(
             InlineKeyboardButton(
                 text="▶️",
-                callback_data=MarketRarityCallback(rarity=rarity, page=page + 1).pack(),
+                callback_data=MarketRarityCallback(rarity=rarity, page=page + 1, user_id=user_id).pack(),
             )
         )
 
     b.row(*nav)
     b.row(
         InlineKeyboardButton(
-            text="🔙 К редкостям", callback_data=MarketMainCallback().pack()
+            text="🔙 К редкостям", callback_data=MarketMainCallback(user_id=user_id).pack()
         )
     )
     return text, b.as_markup(), dict(card)
@@ -2111,16 +2217,31 @@ async def build_market_rarity_page(
 @router.message(F.text == "🛒 Маркет")
 @router.message(Command("market"))
 @router.message(F.text.lower().strip() == "маркет")
+@router.message(F.text.regexp(MARKET_CMD_RE))
 async def show_market(message: Message):
     try:
+        target_user = message.from_user
+        if (
+            message.chat.type != "private"
+            and message.reply_to_message
+            and message.reply_to_message.from_user
+            and not message.reply_to_message.from_user.is_bot
+        ):
+            target_user = message.reply_to_message.from_user
+
         await get_or_create_user(
-            message.from_user.id,
-            message.from_user.username,
-            message.from_user.full_name,
+            target_user.id, target_user.username, target_user.full_name
         )
+        if target_user.id != message.from_user.id:
+            await get_or_create_user(
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.full_name,
+            )
+
         if rate_limited(f"market:{message.from_user.id}", limit=5, window=8):
             return
-        text, kb = await build_market_main(message.from_user.id)
+        text, kb = await build_market_main(target_user.id)
         await message.reply(text, reply_markup=kb)
     except Exception as e:
         logger.error(f"Ошибка маркета: {e}")
@@ -2128,9 +2249,13 @@ async def show_market(message: Message):
 
 
 @router.callback_query(MarketMainCallback.filter())
-async def market_main_callback(callback: CallbackQuery):
+async def market_main_callback(callback: CallbackQuery, callback_data: MarketMainCallback):
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
     try:
-        text, kb = await build_market_main(callback.from_user.id)
+        target_id = callback_data.user_id or callback.from_user.id
+        text, kb = await build_market_main(target_id)
         try:
             if callback.message.photo:
                 await callback.message.delete()
@@ -2147,9 +2272,13 @@ async def market_main_callback(callback: CallbackQuery):
 
 @router.callback_query(MarketRarityCallback.filter())
 async def market_rarity_view(callback: CallbackQuery, callback_data: MarketRarityCallback):
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
     try:
+        target_id = callback_data.user_id or callback.from_user.id
         text, kb, card = await build_market_rarity_page(
-            callback.from_user.id, callback_data.rarity, callback_data.page
+            target_id, callback_data.rarity, callback_data.page
         )
         if card and card.get("photo_id"):
             try:
@@ -2189,6 +2318,11 @@ async def market_rarity_view(callback: CallbackQuery, callback_data: MarketRarit
 async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallback):
     user_id = callback.from_user.id
     card_id = callback_data.card_id
+    target_id = callback_data.user_id or user_id
+
+    if user_id != target_id:
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
 
     if rate_limited(f"mkt-buy:{user_id}", limit=5, window=10):
         await callback.answer("Слишком часто", show_alert=True)
@@ -2262,9 +2396,9 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
         b = InlineKeyboardBuilder()
         b.button(
             text="🛒 Продолжить покупки",
-            callback_data=MarketRarityCallback(rarity=rarity, page=0).pack(),
+            callback_data=MarketRarityCallback(rarity=rarity, page=0, user_id=user_id).pack(),
         )
-        b.button(text="🏠 В маркет", callback_data=MarketMainCallback().pack())
+        b.button(text="🏠 В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
         b.adjust(1)
 
         try:
@@ -2284,6 +2418,11 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
     user_id = callback.from_user.id
     action = callback_data.action
     amount = callback_data.amount
+    target_id = callback_data.user_id or user_id
+
+    if user_id != target_id:
+        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        return
 
     try:
         if action == "menu":
@@ -2311,7 +2450,7 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                     b.button(
                         text=f"+{n} 💎 ({fmt_num(cost)} 🪙)",
                         callback_data=MarketExchangeCallback(
-                            action="buy_crystals", amount=n
+                            action="buy_crystals", amount=n, user_id=user_id
                         ).pack(),
                     )
             if max_buy >= 1 and max_buy not in (1, 5, 10, 25, 50):
@@ -2319,10 +2458,10 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 b.button(
                     text=f"+{fmt_num(max_buy)} 💎 (все, {fmt_num(cost)} 🪙)",
                     callback_data=MarketExchangeCallback(
-                        action="buy_crystals", amount=max_buy
+                        action="buy_crystals", amount=max_buy, user_id=user_id
                     ).pack(),
                 )
-            b.button(text="🔙 Назад", callback_data=MarketMainCallback().pack())
+            b.button(text="🔙 Назад", callback_data=MarketMainCallback(user_id=user_id).pack())
             b.adjust(2)
             try:
                 if callback.message.photo:
@@ -2378,9 +2517,9 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
             b = InlineKeyboardBuilder()
             b.button(
                 text="💱 Ещё обмен",
-                callback_data=MarketExchangeCallback(action="menu").pack(),
+                callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack(),
             )
-            b.button(text="🛒 В маркет", callback_data=MarketMainCallback().pack())
+            b.button(text="🛒 В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
             b.adjust(1)
             try:
                 await callback.message.edit_text(text, reply_markup=b.as_markup())
