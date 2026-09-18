@@ -1207,8 +1207,8 @@ async def slot_machine_handler(message: Message):
         await message.reply("❌ <b>Ставка должна быть больше нуля.</b>")
         return
 
-    if bet > 1_000_000:
-        await message.reply("❌ <b>Слишком большая ставка.</b> Максимум — 1 000 000 🪙")
+    if bet > 100_000_000:
+        await message.reply("❌ <b>Слишком большая ставка.</b> Максимум — 100 000 000 🪙")
         return
 
     try:
@@ -1362,8 +1362,8 @@ async def transfer_coins_handler(message: Message):
         await message.reply("❌ <b>Сумма перевода должна быть больше нуля.</b>")
         return
 
-    if amount > 1_000_000:
-        await message.reply("❌ <b>Слишком большая сумма.</b> Максимум — 1 000 000 🪙")
+    if amount > 100_000_000:
+        await message.reply("❌ <b>Слишком большая сумма.</b> Максимум — 100 000 000 🪙")
         return
 
     try:
