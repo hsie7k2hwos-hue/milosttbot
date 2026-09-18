@@ -305,7 +305,7 @@ def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
         return 0.0, "🎰 Пусто… ставка сгорела"
 
     # fallback
-    return 0.0, "💀 Что-то пошло не так… ставка сгорела"
+    return 1.0, "⚠️ Что-то пошло не так… возврат ставки"
 
 
 # ================= CALLBACK DATA =================
