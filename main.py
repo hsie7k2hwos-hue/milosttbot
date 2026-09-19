@@ -7,20 +7,20 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ChatMemberStatus, ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command, CommandStart, BaseFilter, ChatMemberUpdatedFilter, IS_MEMBER, IS_NOT_MEMBER
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    CallbackQuery, ChatMemberUpdated, InlineKeyboardButton,
+    CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
     ReplyKeyboardMarkup, LinkPreviewOptions,
 )
@@ -36,7 +36,6 @@ if not BOT_TOKEN:
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 COOLDOWN_SECONDS = 4 * 3600
-VIP_COOLDOWN_SECONDS = 2 * 3600
 INSTANT_COST = 150  # максимум (полный кулдаун)
 INSTANT_MIN_COST = 5  # минимум (кулдаун почти истёк)
 NICKNAME_COST = 100
@@ -101,24 +100,6 @@ GENDERS = {
 # п.2 — стрик начисляется со 2-го дня
 STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
 
-
-# ================= АЧИВКИ =================
-ACHIEVEMENTS = {
-    "cards_10": {"title": "Коллекционер I", "description": "Собрать 10 карточек", "check": "cards", "threshold": 10, "coins": 50, "gems": 0},
-    "cards_25": {"title": "Коллекционер II", "description": "Собрать 25 карточек", "check": "cards", "threshold": 25, "coins": 150, "gems": 1},
-    "cards_50": {"title": "Коллекционер III", "description": "Собрать 50 карточек", "check": "cards", "threshold": 50, "coins": 400, "gems": 3},
-    "cards_100": {"title": "Мастер коллекции", "description": "Собрать 100 карточек", "check": "cards", "threshold": 100, "coins": 1000, "gems": 10},
-    "first_legendary": {"title": "Легенда", "description": "Получить первую легендарную карточку", "check": "rarity", "threshold": "legendary", "coins": 200, "gems": 2},
-    "first_mythical": {"title": "Миф", "description": "Получить первую мифическую карточку", "check": "rarity", "threshold": "mythical", "coins": 100, "gems": 1},
-    "streak_7": {"title": "Неделя подряд", "description": "Стрик 7 дней", "check": "streak", "threshold": 7, "coins": 100, "gems": 2},
-    "streak_30": {"title": "Месяц верности", "description": "Стрик 30 дней", "check": "streak", "threshold": 30, "coins": 500, "gems": 10},
-    "coins_1000": {"title": "Богач", "description": "Накопить 1000 монет", "check": "coins", "threshold": 1000, "coins": 100, "gems": 0},
-    "gems_10": {"title": "Кристальный", "description": "Накопить 10 кристаллов", "check": "gems", "threshold": 10, "coins": 200, "gems": 1},
-    "unique_20": {"title": "Разнообразие", "description": "Собрать 20 уникальных карточек", "check": "unique", "threshold": 20, "coins": 250, "gems": 2},
-    "trade_1": {"title": "Торговец", "description": "Совершить первый обмен карточками", "check": "trades", "threshold": 1, "coins": 75, "gems": 0},
-}
-
-
 # п.5.2 — валидация ника
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
@@ -154,14 +135,6 @@ TOP_CMD_RE = re.compile(
 )
 HELP_CMD_RE = re.compile(
     r"^мряу\s+помощь\s*$",
-    re.IGNORECASE | re.UNICODE,
-)
-PROMO_CMD_RE = re.compile(
-    r"^мряу\s+промо\s+(\S+)\s*$",
-    re.IGNORECASE | re.UNICODE,
-)
-TRADE_CMD_RE = re.compile(
-    r"^мряу\s+обмен\s+(\d+)\s+(\d+)\s*$",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -413,39 +386,6 @@ class MarketMainCallback(CallbackData, prefix="mkt_main"):
     user_id: int = 0
 
 
-
-class HelpTopicCallback(CallbackData, prefix="help_topic"):
-    topic: str
-
-
-class AchievementsCallback(CallbackData, prefix="ach"):
-    user_id: int = 0
-    page: int = 0
-
-
-class SettingsCallback(CallbackData, prefix="settings"):
-    action: str
-    user_id: int = 0
-
-
-class DeleteProfileConfirmCallback(CallbackData, prefix="delprof"):
-    action: str  # confirm | cancel
-
-
-class TradeCallback(CallbackData, prefix="trade"):
-    action: str  # accept | decline | cancel
-    trade_id: int = 0
-
-
-class PromoAdminCallback(CallbackData, prefix="promo_adm"):
-    action: str
-    promo_id: int = 0
-
-
-class BroadcastCallback(CallbackData, prefix="bcast"):
-    action: str  # confirm | cancel
-
-
 # ================= БАЗА ДАННЫХ =================
 @asynccontextmanager
 async def get_db():
@@ -503,52 +443,6 @@ async def init_db():
                              FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
                          )
                          """)
-        await db.execute("""
-                         CREATE TABLE IF NOT EXISTS user_achievements
-                         (
-                             user_id         INTEGER,
-                             achievement_key TEXT,
-                             unlocked_at     INTEGER DEFAULT 0,
-                             PRIMARY KEY (user_id, achievement_key)
-                         )
-                         """)
-        await db.execute("""
-                         CREATE TABLE IF NOT EXISTS promo_codes
-                         (
-                             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                             code          TEXT UNIQUE NOT NULL,
-                             reward_type   TEXT NOT NULL,
-                             reward_value  INTEGER DEFAULT 0,
-                             card_id       INTEGER DEFAULT NULL,
-                             max_uses      INTEGER DEFAULT 1,
-                             used_count    INTEGER DEFAULT 0,
-                             expires_at    INTEGER DEFAULT 0,
-                             created_at    INTEGER DEFAULT 0,
-                             active        INTEGER DEFAULT 1
-                         )
-                         """)
-        await db.execute("""
-                         CREATE TABLE IF NOT EXISTS promo_activations
-                         (
-                             promo_id     INTEGER,
-                             user_id      INTEGER,
-                             activated_at INTEGER DEFAULT 0,
-                             PRIMARY KEY (promo_id, user_id),
-                             FOREIGN KEY (promo_id) REFERENCES promo_codes (id) ON DELETE CASCADE
-                         )
-                         """)
-        await db.execute("""
-                         CREATE TABLE IF NOT EXISTS trades
-                         (
-                             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                             from_user_id INTEGER NOT NULL,
-                             to_user_id   INTEGER NOT NULL,
-                             from_card_id INTEGER NOT NULL,
-                             to_card_id   INTEGER NOT NULL,
-                             status       TEXT DEFAULT 'pending',
-                             created_at   INTEGER DEFAULT 0
-                         )
-                         """)
 
         for sql in (
                 "CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)",
@@ -567,10 +461,6 @@ async def init_db():
             ("users", "streak_bonus", "INTEGER DEFAULT 0"),
             ("users", "gender", "TEXT DEFAULT 'none'"),
             ("users", "gems", "INTEGER DEFAULT 0"),
-            ("users", "vip", "INTEGER DEFAULT 0"),
-            ("users", "banned", "INTEGER DEFAULT 0"),
-            ("users", "ban_reason", "TEXT DEFAULT NULL"),
-            ("users", "trades_count", "INTEGER DEFAULT 0"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("inventory", "amount", "INTEGER DEFAULT 1"),
         ]:
@@ -578,25 +468,6 @@ async def init_db():
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             except aiosqlite.OperationalError:
                 pass
-
-        # Тестовые промокоды
-        now = int(time.time())
-        for code_s, rtype, rval, max_u, days in [
-            ("WELCOME100", "coins", 100, 100, 365),
-            ("GEMS5", "gems", 5, 50, 90),
-            ("RESETCD", "reset_cd", 0, 30, 30),
-            ("STARTER", "coins", 50, 200, 180),
-        ]:
-            try:
-                await db.execute(
-                    """INSERT OR IGNORE INTO promo_codes
-                       (code, reward_type, reward_value, card_id, max_uses, used_count, expires_at, created_at, active)
-                       VALUES (?, ?, ?, NULL, ?, 0, ?, ?, 1)""",
-                    (code_s, rtype, rval, max_u, now + days * 86400, now),
-                )
-            except Exception:
-                pass
-        await db.execute("UPDATE users SET vip = 1 WHERE role = 'admin'")
 
 
 async def is_admin(user_id: int) -> bool:
@@ -608,64 +479,6 @@ async def is_admin(user_id: int) -> bool:
     except Exception as e:
         logger.error(f"Ошибка проверки админа: {e}")
         return False
-
-
-async def is_banned(user_id: int):
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT banned, ban_reason FROM users WHERE user_id = ?", (user_id,)
-            )
-            row = await cur.fetchone()
-            if row and row["banned"]:
-                return True, row["ban_reason"]
-            return False, None
-    except Exception as e:
-        logger.error(f"Ошибка проверки бана: {e}")
-        return False, None
-
-
-async def is_vip(user_id: int) -> bool:
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT vip, role FROM users WHERE user_id = ?", (user_id,)
-            )
-            row = await cur.fetchone()
-            if not row:
-                return False
-            if row["role"] == "admin":
-                return True
-            return bool(row["vip"])
-    except Exception as e:
-        logger.error(f"Ошибка проверки VIP: {e}")
-        return False
-
-
-def get_cooldown(is_vip_flag: bool) -> int:
-    return VIP_COOLDOWN_SECONDS if is_vip_flag else COOLDOWN_SECONDS
-
-
-async def check_ban_and_reply(message: Message) -> bool:
-    banned, reason = await is_banned(message.from_user.id)
-    if banned:
-        text = "🚫 <b>Вы заблокированы</b> и не можете пользоваться ботом."
-        if reason:
-            text += f"\nПричина: {esc(reason)}"
-        await message.reply(text)
-        return True
-    return False
-
-
-async def check_ban_callback(callback: CallbackQuery) -> bool:
-    banned, reason = await is_banned(callback.from_user.id)
-    if banned:
-        text = "🚫 Вы заблокированы"
-        if reason:
-            text += f": {reason}"
-        await callback.answer(text, show_alert=True)
-        return True
-    return False
 
 
 def default_nickname(username: Optional[str], full_name: Optional[str], user_id: int) -> str:
@@ -740,19 +553,6 @@ class NicknameSG(StatesGroup):
     pending = State()
 
 
-class PromoCreateSG(StatesGroup):
-    code = State()
-    reward_type = State()
-    reward_value = State()
-    max_uses = State()
-    expires_days = State()
-
-
-class BroadcastSG(StatesGroup):
-    text = State()
-    confirm = State()
-
-
 router = Router()
 
 
@@ -771,8 +571,6 @@ def get_admin_main_kb():
     b.button(text="➕ Добавить карточку", callback_data="admin_add_card")
     b.button(text="📜 Список карточек", callback_data=AdminCardPageCallback(page=0).pack())
     b.button(text="👥 Список пользователей", callback_data=AdminUserPageCallback(page=0).pack())
-    b.button(text="🎟 Промокоды", callback_data="admin_promos")
-    b.button(text="📢 Рассылка", callback_data="admin_broadcast")
     b.adjust(1)
     return b.as_markup()
 
@@ -780,11 +578,9 @@ def get_admin_main_kb():
 def get_profile_kb(owner_id: int):
     b = InlineKeyboardBuilder()
     b.button(text="🀄️ Мои карточки", callback_data=MainMenuCallback(user_id=owner_id).pack())
-    b.button(text="🏅 Ачивки", callback_data=AchievementsCallback(user_id=owner_id, page=0).pack())
     b.button(text="⚧ Выбрать пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
-    b.button(text="✏️ Сменить ник",
+    b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)",
              callback_data=NicknameCallback(action="change", user_id=owner_id).pack())
-    b.button(text="⚙️ Настройки", callback_data=SettingsCallback(action="menu", user_id=owner_id).pack())
     b.adjust(1)
     return b.as_markup()
 
@@ -822,8 +618,8 @@ def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str,
 
 
 def get_card_action_keyboard(user_id: int, balance: int = 0,
-                             remaining: int = COOLDOWN_SECONDS, is_vip: bool = False) -> InlineKeyboardMarkup:
-    cost = instant_cost(remaining, is_vip)
+                             remaining: int = COOLDOWN_SECONDS) -> InlineKeyboardMarkup:
+    cost = instant_cost(remaining)
     b = InlineKeyboardBuilder()
     if balance >= cost:
         _instant_button(b, user_id, "✨ Получить сейчас", "instant", cost)
@@ -831,8 +627,8 @@ def get_card_action_keyboard(user_id: int, balance: int = 0,
     return b.as_markup()
 
 
-def get_after_card_keyboard(user_id: int, balance: int = 0, is_vip: bool = False) -> InlineKeyboardMarkup:
-    cost = instant_cost(get_cooldown(is_vip), is_vip)
+def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
+    cost = instant_cost(COOLDOWN_SECONDS)
     b = InlineKeyboardBuilder()
     if balance >= cost:
         _instant_button(b, user_id, "✨ Получить ещё одну", "another", cost)
@@ -881,8 +677,6 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
                                       u.streak_bonus,
                                       u.role,
                                       u.gender,
-                                      u.vip,
-                                      u.banned,
                                       COALESCE(SUM(i.amount), 0) AS cards_count
                                FROM users u
                                         LEFT JOIN inventory i ON u.user_id = i.user_id
@@ -901,10 +695,6 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
 
     role = row["role"] or "user"
     role_display = "👑 Администратор" if role == "admin" else "👤 Пользователь"
-    vip_flag = bool(row["vip"]) if "vip" in row.keys() else False
-    if role == "admin":
-        vip_flag = True
-    vip_display = "⭐ VIP" if vip_flag else "—"
 
     gender = row["gender"] or "none"
     g = GENDERS.get(gender, GENDERS["none"])
@@ -916,7 +706,6 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
         f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
         f"🆔 ID • <code>{user_id}</code>\n"
         f"🎭 Роль • <b>{role_display}</b>\n"
-        f"⭐ Статус • <b>{vip_display}</b>\n"
         f"⚧ Пол • <b>{gender_display}</b>\n"
         f"📅 Регистрация • <b>{reg_date}</b>\n\n"
         f"🀄️ Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
@@ -962,124 +751,8 @@ async def show_or_edit_photo(message: Message, photo, caption: str, keyboard=Non
             pass
 
 
-
-# ================= АЧИВКИ: ПРОВЕРКА =================
-async def check_and_grant_achievements(user_id: int) -> list:
-    """Проверяет и выдаёт новые ачивки. Возвращает список только что полученных."""
-    newly = []
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT achievement_key FROM user_achievements WHERE user_id = ?",
-                (user_id,),
-            )
-            owned = {r[0] for r in await cur.fetchall()}
-
-            cur = await db.execute(
-                "SELECT COALESCE(SUM(amount), 0) FROM inventory WHERE user_id = ?",
-                (user_id,),
-            )
-            total_cards = (await cur.fetchone())[0]
-
-            cur = await db.execute(
-                "SELECT COUNT(DISTINCT card_id) FROM inventory WHERE user_id = ?",
-                (user_id,),
-            )
-            unique_cards = (await cur.fetchone())[0]
-
-            cur = await db.execute(
-                """SELECT COUNT(*) FROM inventory i
-                   JOIN cards c ON i.card_id = c.id
-                   WHERE i.user_id = ? AND c.rarity = 'legendary'""",
-                (user_id,),
-            )
-            has_legendary = (await cur.fetchone())[0] > 0
-
-            cur = await db.execute(
-                """SELECT COUNT(*) FROM inventory i
-                   JOIN cards c ON i.card_id = c.id
-                   WHERE i.user_id = ? AND c.rarity = 'mythical'""",
-                (user_id,),
-            )
-            has_mythical = (await cur.fetchone())[0] > 0
-
-            cur = await db.execute(
-                "SELECT streak, coins, gems, trades_count FROM users WHERE user_id = ?",
-                (user_id,),
-            )
-            urow = await cur.fetchone()
-            if not urow:
-                return []
-            streak = urow["streak"] or 0
-            coins = urow["coins"] or 0
-            gems = urow["gems"] or 0
-            trades = urow["trades_count"] or 0
-
-            now = int(time.time())
-            total_coins_reward = 0
-            total_gems_reward = 0
-
-            for key, ach in ACHIEVEMENTS.items():
-                if key in owned:
-                    continue
-                ok = False
-                check = ach["check"]
-                th = ach["threshold"]
-                if check == "cards" and total_cards >= th:
-                    ok = True
-                elif check == "unique" and unique_cards >= th:
-                    ok = True
-                elif check == "streak" and streak >= th:
-                    ok = True
-                elif check == "coins" and coins >= th:
-                    ok = True
-                elif check == "gems" and gems >= th:
-                    ok = True
-                elif check == "trades" and trades >= th:
-                    ok = True
-                elif check == "rarity":
-                    if th == "legendary" and has_legendary:
-                        ok = True
-                    elif th == "mythical" and has_mythical:
-                        ok = True
-
-                if ok:
-                    await db.execute(
-                        "INSERT OR IGNORE INTO user_achievements (user_id, achievement_key, unlocked_at) "
-                        "VALUES (?, ?, ?)",
-                        (user_id, key, now),
-                    )
-                    total_coins_reward += ach["coins"]
-                    total_gems_reward += ach["gems"]
-                    newly.append(ach)
-
-            if total_coins_reward or total_gems_reward:
-                await db.execute(
-                    "UPDATE users SET coins = coins + ?, gems = gems + ? WHERE user_id = ?",
-                    (total_coins_reward, total_gems_reward, user_id),
-                )
-    except Exception as e:
-        logger.error(f"Ошибка ачивок: {e}")
-    return newly
-
-
-def format_achievements_text(newly: list) -> str:
-    if not newly:
-        return ""
-    lines = ["\n\n🏅 <b>Новые ачивки!</b>"]
-    for a in newly:
-        reward = []
-        if a["coins"]:
-            reward.append(f"+{fmt_num(a['coins'])} 🪙")
-        if a["gems"]:
-            reward.append(f"+{fmt_num(a['gems'])} 💎")
-        rew = " · ".join(reward) if reward else ""
-        lines.append(f"• <b>{esc(a['title'])}</b> — {esc(a['description'])}" + (f" ({rew})" if rew else ""))
-    return "\n".join(lines)
-
-
 # ================= ВЫДАЧА КАРТОЧКИ =================
-async def issue_card(user_id: int, check_cooldown: bool = True, vip_multiplier: int = 1) -> Tuple[Optional[dict], str]:
+async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optional[dict], str]:
     """п.7 — допускаем дубликаты, но с меньшим шансом."""
     try:
         async with get_db() as db:
@@ -1169,10 +842,9 @@ async def issue_card(user_id: int, check_cooldown: bool = True, vip_multiplier: 
             photo_id = card["photo_id"]
             base_coins = RARITIES[selected_rarity]["reward"]
             coins_earned = int(base_coins * DUPLICATE_REFUND) if is_duplicate else base_coins
-            coins_earned *= vip_multiplier
             gems_earned = 0
             if not is_duplicate:
-                gems_earned = GEM_REWARDS.get(selected_rarity, 0) * vip_multiplier
+                gems_earned = GEM_REWARDS.get(selected_rarity, 0)
             now = int(time.time())
 
             if check_cooldown:
@@ -1219,7 +891,7 @@ async def issue_card(user_id: int, check_cooldown: bool = True, vip_multiplier: 
 
 
 # ================= СТРИК =================
-async def check_and_update_streak(user_id: int, vip_multiplier: int = 1) -> Tuple[int, int, int, int]:
+async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
     """
     Обновляет стрик по факту захода / получения карточки.
     Авто-сброс: если с last_claim прошло >= 24ч — стрик = 0.
@@ -1269,13 +941,12 @@ async def check_and_update_streak(user_id: int, vip_multiplier: int = 1) -> Tupl
             new_bonus = 0 if new_streak == 1 else next(
                 b for d, b in STREAK_BONUSES if new_streak <= d
             )
-            new_bonus *= vip_multiplier
 
             # Кристаллы только при ПЕРВОМ пересечении порога
             gem_bonus = 0
             for days, gems_amt in STREAK_GEM_BONUSES:
                 if old_streak < days <= new_streak:
-                    gem_bonus += gems_amt * vip_multiplier
+                    gem_bonus += gems_amt
 
             await db.execute(
                 "UPDATE users SET streak = ?, last_streak_date = ?, "
@@ -1388,12 +1059,6 @@ async def cmd_start(message: Message):
 @router.message(F.text == "❓ Помощь")
 @router.message(F.text.regexp(HELP_CMD_RE))
 async def cmd_help(message: Message):
-    if await check_ban_and_reply(message):
-        return
-    # Use topic-based help
-    text = _help_text('main')
-    await message.reply(text, reply_markup=get_help_keyboard('main'))
-    return
     market_prices = "\n".join(
         f"  {v['icon']} {v['name']} — {MARKET_PRICES[k]} 💎"
         for k, v in RARITIES.items()
@@ -1447,13 +1112,8 @@ async def cmd_help(message: Message):
 @router.message(F.text.lower().strip() == "милость")
 @router.message(Command("meow"))
 async def get_card_handler(message: Message):
-    if await check_ban_and_reply(message):
-        return
     user_id = message.from_user.id
     now = int(time.time())
-    vip = await is_vip(user_id)
-    vip_mult = 2 if vip else 1
-    cd = get_cooldown(vip)
 
     # Повышенные лимиты для групп
     if message.chat.type != "private":
@@ -1478,9 +1138,9 @@ async def get_card_handler(message: Message):
             balance = row["coins"] if row else 0
 
         time_passed = now - last_claim
-        if time_passed < cd:
+        if time_passed < COOLDOWN_SECONDS:
             streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
-            remaining = int(cd - time_passed)
+            remaining = int(COOLDOWN_SECONDS - time_passed)
             h, m = remaining // 3600, (remaining % 3600) // 60
             s = remaining % 60
 
@@ -1504,23 +1164,21 @@ async def get_card_handler(message: Message):
             )
             return
 
-        card, status = await issue_card(user_id, check_cooldown=True, vip_multiplier=vip_mult)
+        card, status = await issue_card(user_id, check_cooldown=True)
         if status != "success" or card is None:
             await reply_ephemeral(message, "❌ <b>Произошла ошибка. Попробуйте позже.</b>")
             return
 
-        streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id, vip_mult)
-        newly_ach = await check_and_grant_achievements(user_id)
+        streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
 
         caption = _card_caption(mention, card)
         caption += _streak_text(streak, bonus, new_balance, gem_bonus)
-        caption += format_achievements_text(newly_ach)
 
         try:
             await message.reply_photo(
                 photo=card["photo_id"],
                 caption=caption,
-                reply_markup=get_after_card_keyboard(user_id, card["balance"], is_vip=vip),
+                reply_markup=get_after_card_keyboard(user_id, card["balance"]),
             )
         except TelegramBadRequest as e:
             logger.error(f"reply_photo bad request: {e}")
@@ -1874,8 +1532,6 @@ async def transfer_coins_handler(message: Message):
 @router.message(Command("profile"))
 @router.message(F.text.regexp(PROFILE_CMD_RE))
 async def show_profile(message: Message):
-    if await check_ban_and_reply(message):
-        return
     try:
         # Определяем, чей профиль показывать
         target_user = message.from_user
@@ -1987,8 +1643,7 @@ async def nickname_cmd(message: Message, command: Command, state: FSMContext):
 
     row = await get_user_row(user_id)
     balance = row["coins"] if row else 0
-    vip = await is_vip(user_id)
-    if not vip and balance < NICKNAME_COST:
+    if balance < NICKNAME_COST:
         await message.reply(
             f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
             f"у вас <b>{fmt_num(balance)} 🪙</b>."
@@ -2004,11 +1659,10 @@ async def nickname_cmd(message: Message, command: Command, state: FSMContext):
     b.adjust(2)
     await state.set_state(NicknameSG.pending)
     await state.update_data(pending_nick=new_nick, pending_action="apply")
-    cost_line = "бесплатно (VIP)" if vip else f"{NICKNAME_COST} 🪙 (баланс: {fmt_num(balance)})"
     await message.reply(
         f"✏️ <b>Сменить ник?</b>\n\n"
         f"Новый ник: <b>{esc(new_nick)}</b>\n"
-        f"Стоимость: <b>{cost_line}</b>",
+        f"Стоимость: <b>{NICKNAME_COST} 🪙</b> (баланс: {fmt_num(balance)})",
         reply_markup=b.as_markup(),
     )
 
@@ -2058,8 +1712,7 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
             )
             row = await cur.fetchone()
             balance = row["coins"] if row else 0
-            vip = await is_vip(user_id)
-            if not vip and balance < NICKNAME_COST:
+            if balance < NICKNAME_COST:
                 await state.clear()
                 await callback.message.edit_text(
                     f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
@@ -2067,16 +1720,10 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
                 )
                 await callback.answer()
                 return
-            if vip:
-                await db.execute(
-                    "UPDATE users SET nickname = ? WHERE user_id = ?",
-                    (new_nick, user_id),
-                )
-            else:
-                await db.execute(
-                    "UPDATE users SET nickname = ?, coins = coins - ? WHERE user_id = ?",
-                    (new_nick, NICKNAME_COST, user_id),
-                )
+            await db.execute(
+                "UPDATE users SET nickname = ?, coins = coins - ? WHERE user_id = ?",
+                (new_nick, NICKNAME_COST, user_id),
+            )
         await state.clear()
         await callback.message.edit_text(
             f"✅ <b>Ник изменён:</b> {esc(new_nick)}\n"
@@ -2464,14 +2111,9 @@ async def ignore_callback(callback: CallbackQuery):
 # ---------- Действия с карточкой ----------
 @router.callback_query(CardActionCallback.filter())
 async def handle_card_action(callback: CallbackQuery, callback_data: CardActionCallback):
-    if await check_ban_callback(callback):
-        return
     user_id = callback.from_user.id
     action = callback_data.action
     target = callback_data.user_id or user_id
-    vip = await is_vip(user_id)
-    vip_mult = 2 if vip else 1
-    cd = get_cooldown(vip)
 
     if user_id != target:
         await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
@@ -2496,12 +2138,12 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             last_claim = row["last_claim"] if row else 0
 
             time_passed = now - last_claim
-            if time_passed >= cd:
+            if time_passed >= COOLDOWN_SECONDS:
                 await callback.answer("⏳ Кулдаун уже прошёл — получайте бесплатно!", show_alert=True)
                 return
 
-            remaining = int(cd - time_passed)
-            cost = instant_cost(remaining, vip)
+            remaining = int(COOLDOWN_SECONDS - time_passed)
+            cost = instant_cost(remaining)
 
             if balance < cost:
                 await callback.answer(f"⚠️ Требуется {cost} 🪙, у вас {balance} 🪙")
@@ -2515,7 +2157,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                     (cost, now, user_id),
                 )
 
-            card, status = await issue_card(user_id, check_cooldown=False, vip_multiplier=vip_mult)
+            card, status = await issue_card(user_id, check_cooldown=False)
 
             if status != "success" or card is None:
                 async with get_db() as db:
@@ -3524,7 +3166,7 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
 
     if action == "admin":
         async with get_db() as db:
-            await db.execute("UPDATE users SET role = 'admin', vip = 1 WHERE user_id = ?", (target_id,))
+            await db.execute("UPDATE users SET role = 'admin' WHERE user_id = ?", (target_id,))
         await call.message.answer(f"✅ Пользователь <code>{target_id}</code> назначен админом.")
         await call.answer()
     elif action == "unadmin":
@@ -3681,7 +3323,7 @@ async def set_admin_cmd(message: Message, command: Command):
             return
 
         await db.execute(
-            "UPDATE users SET role = 'admin', vip = 1 WHERE user_id = ?", (target_id,)
+            "UPDATE users SET role = 'admin' WHERE user_id = ?", (target_id,)
         )
 
     await message.reply(
@@ -4370,753 +4012,6 @@ async def test_set_registration_now(message: Message):
         f"👥 Обновлено пользователей: <b>{fmt_num(affected)}</b>\n"
         f"🕐 Время: <b>{datetime.fromtimestamp(now).strftime('%d.%m.%Y %H:%M:%S')}</b>"
     )
-
-
-
-# ================= ПРОМОКОДЫ =================
-@router.message(Command("promo"))
-@router.message(F.text.regexp(PROMO_CMD_RE))
-async def promo_activate(message: Message, command: Command = None):
-    if await check_ban_and_reply(message):
-        return
-    user_id = message.from_user.id
-    await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
-    code_val = None
-    if command and command.args:
-        code_val = command.args.strip().upper()
-    else:
-        m = PROMO_CMD_RE.match((message.text or "").strip())
-        if m:
-            code_val = m.group(1).upper()
-    if not code_val:
-        await message.reply("🎟 Использование: <code>мряу промо КОД</code> или <code>/promo КОД</code>")
-        return
-    if rate_limited(f"promo:{user_id}", limit=5, window=30):
-        await reply_ephemeral(message, "⏳ Слишком часто.")
-        return
-    now = int(time.time())
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT * FROM promo_codes WHERE code = ? AND active = 1", (code_val,)
-            )
-            promo = await cur.fetchone()
-            if not promo:
-                await reply_ephemeral(message, "❌ <b>Промокод не найден или неактивен.</b>")
-                return
-            if promo["expires_at"] and promo["expires_at"] < now:
-                await reply_ephemeral(message, "❌ <b>Срок действия промокода истёк.</b>")
-                return
-            if promo["used_count"] >= promo["max_uses"]:
-                await reply_ephemeral(message, "❌ <b>Лимит активаций исчерпан.</b>")
-                return
-            cur = await db.execute(
-                "SELECT 1 FROM promo_activations WHERE promo_id = ? AND user_id = ?",
-                (promo["id"], user_id),
-            )
-            if await cur.fetchone():
-                await reply_ephemeral(message, "❌ <b>Вы уже активировали этот промокод.</b>")
-                return
-            rtype = promo["reward_type"]
-            rval = promo["reward_value"] or 0
-            result_lines = []
-            if rtype == "coins":
-                await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (rval, user_id))
-                result_lines.append(f"🪙 +{fmt_num(rval)} монет")
-            elif rtype == "gems":
-                await db.execute("UPDATE users SET gems = gems + ? WHERE user_id = ?", (rval, user_id))
-                result_lines.append(f"💎 +{fmt_num(rval)} кристаллов")
-            elif rtype == "reset_cd":
-                await db.execute("UPDATE users SET last_claim = 0 WHERE user_id = ?", (user_id,))
-                result_lines.append("⏱ Кулдаун сброшен")
-            elif rtype == "card":
-                card_id = promo["card_id"]
-                if not card_id:
-                    await reply_ephemeral(message, "❌ Промокод настроен некорректно.")
-                    return
-                cur = await db.execute("SELECT id, name, rarity FROM cards WHERE id = ?", (card_id,))
-                card = await cur.fetchone()
-                if not card:
-                    await reply_ephemeral(message, "❌ Карточка не найдена.")
-                    return
-                await db.execute(
-                    """INSERT INTO inventory (user_id, card_id, claim_time, amount)
-                       VALUES (?, ?, ?, 1)
-                       ON CONFLICT(user_id, card_id) DO UPDATE SET amount = amount + 1, claim_time = ?""",
-                    (user_id, card_id, now, now),
-                )
-                r_info = RARITIES.get(card["rarity"], {})
-                result_lines.append(f"🀄️ {esc(card['name'])} ({r_info.get('name', '')})")
-            else:
-                await reply_ephemeral(message, "❌ Неизвестный тип награды.")
-                return
-            await db.execute(
-                "INSERT INTO promo_activations (promo_id, user_id, activated_at) VALUES (?, ?, ?)",
-                (promo["id"], user_id, now),
-            )
-            await db.execute("UPDATE promo_codes SET used_count = used_count + 1 WHERE id = ?", (promo["id"],))
-        newly = await check_and_grant_achievements(user_id)
-        text = f"✅ <b>Промокод:</b> <code>{esc(code_val)}</code>\n\n" + "\n".join(result_lines) + format_achievements_text(newly)
-        await message.reply(text)
-    except Exception as e:
-        logger.error(f"promo error: {e}")
-        await reply_ephemeral(message, "❌ Ошибка активации.")
-
-
-# ================= ОБМЕН КАРТОЧЕК =================
-@router.message(F.text.regexp(TRADE_CMD_RE))
-async def trade_propose(message: Message):
-    if await check_ban_and_reply(message):
-        return
-    if message.chat.type == "private":
-        await message.reply("🔄 Обмен только в группах (реплаем на сообщение игрока).")
-        return
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await reply_ephemeral(message, "⚠️ Реплай + <code>мряу обмен ID1 ID2</code>")
-        return
-    target = message.reply_to_message.from_user
-    if target.is_bot or target.id == message.from_user.id:
-        await reply_ephemeral(message, "❌ Нельзя обмениваться с ботом/собой.")
-        return
-    m = TRADE_CMD_RE.match((message.text or "").strip())
-    if not m:
-        return
-    my_card_id, their_card_id = int(m.group(1)), int(m.group(2))
-    user_id, target_id = message.from_user.id, target.id
-    await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
-    await get_or_create_user(target_id, target.username, target.full_name)
-    try:
-        async with get_db() as db:
-            cur = await db.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (user_id, my_card_id))
-            a1 = await cur.fetchone()
-            if not a1 or a1["amount"] < 1:
-                await reply_ephemeral(message, "❌ У вас нет этой карточки.")
-                return
-            cur = await db.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (target_id, their_card_id))
-            a2 = await cur.fetchone()
-            if not a2 or a2["amount"] < 1:
-                await reply_ephemeral(message, "❌ У собеседника нет этой карточки.")
-                return
-            cur = await db.execute("SELECT id, name, rarity FROM cards WHERE id = ?", (my_card_id,))
-            my_card = await cur.fetchone()
-            cur = await db.execute("SELECT id, name, rarity FROM cards WHERE id = ?", (their_card_id,))
-            their_card = await cur.fetchone()
-            if not my_card or not their_card:
-                await reply_ephemeral(message, "❌ Карточка не найдена.")
-                return
-            now = int(time.time())
-            cur = await db.execute(
-                """INSERT INTO trades (from_user_id, to_user_id, from_card_id, to_card_id, status, created_at)
-                   VALUES (?, ?, ?, ?, 'pending', ?)""",
-                (user_id, target_id, my_card_id, their_card_id, now),
-            )
-            trade_id = cur.lastrowid
-        my_r = RARITIES.get(my_card["rarity"], {})
-        their_r = RARITIES.get(their_card["rarity"], {})
-        b = InlineKeyboardBuilder()
-        b.button(text="✅ Принять", callback_data=TradeCallback(action="accept", trade_id=trade_id).pack())
-        b.button(text="❌ Отклонить", callback_data=TradeCallback(action="decline", trade_id=trade_id).pack())
-        b.adjust(2)
-        text = (
-            f"🔄 <b>Обмен</b>\n"
-            f"Отдаёт: {my_r.get('icon','')} <b>{esc(my_card['name'])}</b> (ID <code>{my_card_id}</code>)\n"
-            f"Получает: {their_r.get('icon','')} <b>{esc(their_card['name'])}</b> (ID <code>{their_card_id}</code>)"
-        )
-        await message.reply(text, reply_markup=b.as_markup())
-    except Exception as e:
-        logger.error(f"trade propose: {e}")
-        await reply_ephemeral(message, "❌ Ошибка обмена.")
-
-
-@router.callback_query(TradeCallback.filter())
-async def trade_action(callback: CallbackQuery, callback_data: TradeCallback):
-    if await check_ban_callback(callback):
-        return
-    trade_id, action, user_id = callback_data.trade_id, callback_data.action, callback.from_user.id
-    try:
-        async with get_db() as db:
-            cur = await db.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
-            trade = await cur.fetchone()
-            if not trade or trade["status"] != "pending":
-                await callback.answer("Обмен недоступен", show_alert=True)
-                return
-            if action == "decline":
-                if user_id not in (trade["from_user_id"], trade["to_user_id"]):
-                    await callback.answer("Не ваш обмен", show_alert=True)
-                    return
-                await db.execute("UPDATE trades SET status = 'declined' WHERE id = ?", (trade_id,))
-                await callback.message.edit_text((callback.message.html_text or "") + "\n\n❌ Отклонён.")
-                await callback.answer()
-                return
-            if action == "accept":
-                if user_id != trade["to_user_id"]:
-                    await callback.answer("Только получатель", show_alert=True)
-                    return
-                from_uid, to_uid = trade["from_user_id"], trade["to_user_id"]
-                from_cid, to_cid = trade["from_card_id"], trade["to_card_id"]
-                for uid, cid in [(from_uid, from_cid), (to_uid, to_cid)]:
-                    cur = await db.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (uid, cid))
-                    row = await cur.fetchone()
-                    if not row or row["amount"] < 1:
-                        await db.execute("UPDATE trades SET status = 'failed' WHERE id = ?", (trade_id,))
-                        await callback.answer("Карточки уже нет", show_alert=True)
-                        return
-                now = int(time.time())
-                async def _dec(uid, cid):
-                    cur = await db.execute("SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?", (uid, cid))
-                    row = await cur.fetchone()
-                    if row["amount"] <= 1:
-                        await db.execute("DELETE FROM inventory WHERE user_id = ? AND card_id = ?", (uid, cid))
-                    else:
-                        await db.execute("UPDATE inventory SET amount = amount - 1 WHERE user_id = ? AND card_id = ?", (uid, cid))
-                async def _inc(uid, cid):
-                    await db.execute(
-                        """INSERT INTO inventory (user_id, card_id, claim_time, amount) VALUES (?, ?, ?, 1)
-                           ON CONFLICT(user_id, card_id) DO UPDATE SET amount = amount + 1, claim_time = ?""",
-                        (uid, cid, now, now),
-                    )
-                await _dec(from_uid, from_cid)
-                await _dec(to_uid, to_cid)
-                await _inc(from_uid, to_cid)
-                await _inc(to_uid, from_cid)
-                await db.execute("UPDATE trades SET status = 'completed' WHERE id = ?", (trade_id,))
-                await db.execute("UPDATE users SET trades_count = trades_count + 1 WHERE user_id IN (?, ?)", (from_uid, to_uid))
-        await check_and_grant_achievements(trade["from_user_id"])
-        await check_and_grant_achievements(trade["to_user_id"])
-        await callback.message.edit_text((callback.message.html_text or "") + "\n\n✅ Обмен выполнен!")
-        await callback.answer("Принято!")
-    except Exception as e:
-        logger.error(f"trade action: {e}")
-        await callback.answer("Ошибка", show_alert=True)
-
-
-# ================= ПРИВЕТСТВИЕ В ЧАТЕ =================
-@router.my_chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
-async def bot_added_to_chat(event: ChatMemberUpdated):
-    try:
-        if event.chat.type not in ("group", "supergroup"):
-            return
-        await event.answer(
-            "👋 <b>Привет!</b> Я бот карточной игры.\\n\\n"
-            "• <code>мряу</code> — карточка\\n"
-            "• <code>мряу ставка N</code> — слот\\n"
-            "• <code>мряу перевод N</code> — перевод (реплаем)\\n"
-            "• <code>мряу профиль/маркет/коллекция/топ/помощь</code>\\n"
-            "• <code>мряу промо КОД</code> · <code>мряу обмен ID1 ID2</code>\\n\\n"
-            "⭐ VIP нельзя купить — только от администратора."
-        )
-    except Exception as e:
-        logger.error(f"welcome chat: {e}")
-
-
-# ================= АДМИН: БАН / VIP =================
-@router.message(Command("ban"), admin_filter)
-async def admin_ban_cmd(message: Message, command: Command):
-    if message.chat.type != "private":
-        await message.reply("⚠️ Только в ЛС.")
-        return
-    args = (command.args or "").strip().split(maxsplit=1)
-    if not args:
-        await message.reply("✏️ <code>/ban USERID [причина]</code>")
-        return
-    try:
-        target_id = int(args[0])
-    except ValueError:
-        await message.reply("❌ USERID — число.")
-        return
-    if target_id == message.from_user.id:
-        await message.reply("❌ Нельзя забанить себя.")
-        return
-    reason = args[1] if len(args) > 1 else None
-    async with get_db() as db:
-        cur = await db.execute("SELECT role, nickname FROM users WHERE user_id = ?", (target_id,))
-        row = await cur.fetchone()
-        if not row:
-            await message.reply("❌ Не найден.")
-            return
-        if row["role"] == "admin":
-            await message.reply("❌ Нельзя банить админа.")
-            return
-        await db.execute("UPDATE users SET banned = 1, ban_reason = ? WHERE user_id = ?", (reason, target_id))
-    await message.reply(f"🚫 Забанен <code>{target_id}</code>" + (f"\\nПричина: {esc(reason)}" if reason else ""))
-
-
-@router.message(Command("unban"), admin_filter)
-async def admin_unban_cmd(message: Message, command: Command):
-    if message.chat.type != "private":
-        await message.reply("⚠️ Только в ЛС.")
-        return
-    arg = (command.args or "").strip()
-    if not arg:
-        await message.reply("✏️ <code>/unban USERID</code>")
-        return
-    try:
-        target_id = int(arg)
-    except ValueError:
-        await message.reply("❌ Число.")
-        return
-    async with get_db() as db:
-        await db.execute("UPDATE users SET banned = 0, ban_reason = NULL WHERE user_id = ?", (target_id,))
-    await message.reply(f"✅ Разбанен <code>{target_id}</code>")
-
-
-@router.message(Command("setvip"), admin_filter)
-async def admin_setvip(message: Message, command: Command):
-    if message.chat.type != "private":
-        await message.reply("⚠️ Только в ЛС.")
-        return
-    arg = (command.args or "").strip()
-    if not arg:
-        await message.reply("✏️ <code>/setvip USERID</code>")
-        return
-    try:
-        target_id = int(arg)
-    except ValueError:
-        await message.reply("❌ Число.")
-        return
-    async with get_db() as db:
-        cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (target_id,))
-        row = await cur.fetchone()
-        if not row:
-            await message.reply("❌ Не найден.")
-            return
-        await db.execute("UPDATE users SET vip = 1 WHERE user_id = ?", (target_id,))
-    await message.reply(f"⭐ VIP выдан <code>{target_id}</code>")
-
-
-@router.message(Command("unsetvip"), admin_filter)
-async def admin_unsetvip(message: Message, command: Command):
-    if message.chat.type != "private":
-        await message.reply("⚠️ Только в ЛС.")
-        return
-    arg = (command.args or "").strip()
-    if not arg:
-        await message.reply("✏️ <code>/unsetvip USERID</code>")
-        return
-    try:
-        target_id = int(arg)
-    except ValueError:
-        await message.reply("❌ Число.")
-        return
-    async with get_db() as db:
-        cur = await db.execute("SELECT role FROM users WHERE user_id = ?", (target_id,))
-        row = await cur.fetchone()
-        if not row:
-            await message.reply("❌ Не найден.")
-            return
-        if row["role"] == "admin":
-            await message.reply("❌ У админов VIP всегда.")
-            return
-        await db.execute("UPDATE users SET vip = 0 WHERE user_id = ?", (target_id,))
-    await message.reply(f"⭐ VIP снят с <code>{target_id}</code>")
-
-
-# ================= АДМИН: ПРОМОКОДЫ UI =================
-@router.callback_query(F.data == "admin_promos")
-async def admin_promos_list(call: CallbackQuery):
-    if not await is_admin(call.from_user.id):
-        await call.answer("Нет доступа")
-        return
-    async with get_db() as db:
-        cur = await db.execute(
-            "SELECT code, reward_type, reward_value, max_uses, used_count, expires_at, active FROM promo_codes ORDER BY id DESC LIMIT 20"
-        )
-        promos = await cur.fetchall()
-    text = "🎟 <b>Промокоды</b>\\n\\n"
-    now = int(time.time())
-    if not promos:
-        text += "Пусто."
-    else:
-        for p in promos:
-            st = "✅" if p["active"] and (not p["expires_at"] or p["expires_at"] > now) else "❌"
-            exp = datetime.fromtimestamp(p["expires_at"]).strftime("%d.%m.%Y") if p["expires_at"] else "∞"
-            text += f"{st} <code>{esc(p['code'])}</code> {p['reward_type']} {p['reward_value'] or ''} · {p['used_count']}/{p['max_uses']} · {exp}\\n"
-    b = InlineKeyboardBuilder()
-    b.button(text="➕ Создать", callback_data="admin_promo_create")
-    b.button(text="🔙 Назад", callback_data="admin_main")
-    b.adjust(1)
-    try:
-        await call.message.edit_text(text, reply_markup=b.as_markup())
-    except TelegramBadRequest:
-        await call.message.answer(text, reply_markup=b.as_markup())
-    await call.answer()
-
-
-@router.callback_query(F.data == "admin_promo_create")
-async def admin_promo_create_start(call: CallbackQuery, state: FSMContext):
-    if not await is_admin(call.from_user.id):
-        await call.answer("Нет доступа")
-        return
-    await state.set_state(PromoCreateSG.code)
-    await call.message.answer("🎟 Код промокода (A-Z0-9_- , 3-32):\\n/cancel — отмена")
-    await call.answer()
-
-
-@router.message(PromoCreateSG.code, F.text)
-async def admin_promo_code(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        await state.clear()
-        return
-    code_val = (message.text or "").strip().upper()
-    if not re.match(r"^[A-Z0-9_\\-]{3,32}$", code_val):
-        await message.reply("❌ 3–32 символа A-Z 0-9 _ -")
-        return
-    await state.update_data(code=code_val)
-    await state.set_state(PromoCreateSG.reward_type)
-    b = InlineKeyboardBuilder()
-    for t, label in [("coins", "🪙 Монеты"), ("gems", "💎 Кристаллы"), ("reset_cd", "⏱ Сброс КД"), ("card", "🀄️ Карточка")]:
-        b.button(text=label, callback_data=f"promo_rtype:{t}")
-    b.adjust(2)
-    await message.reply("Тип награды:", reply_markup=b.as_markup())
-
-
-@router.callback_query(PromoCreateSG.reward_type, F.data.startswith("promo_rtype:"))
-async def admin_promo_rtype(call: CallbackQuery, state: FSMContext):
-    if not await is_admin(call.from_user.id):
-        await state.clear()
-        return
-    rtype = call.data.split(":")[1]
-    await state.update_data(reward_type=rtype)
-    if rtype == "reset_cd":
-        await state.update_data(reward_value=0, card_id=None)
-        await state.set_state(PromoCreateSG.max_uses)
-        await call.message.answer("Макс. активаций:")
-    else:
-        await state.set_state(PromoCreateSG.reward_value)
-        await call.message.answer("Количество (или ID карточки):")
-    await call.answer()
-
-
-@router.message(PromoCreateSG.reward_value, F.text)
-async def admin_promo_rvalue(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        await state.clear()
-        return
-    data = await state.get_data()
-    try:
-        val = int((message.text or "").strip())
-    except ValueError:
-        await message.reply("❌ Число.")
-        return
-    if data.get("reward_type") == "card":
-        async with get_db() as db:
-            cur = await db.execute("SELECT id FROM cards WHERE id = ?", (val,))
-            if not await cur.fetchone():
-                await message.reply("❌ Карточка не найдена.")
-                return
-        await state.update_data(reward_value=0, card_id=val)
-    else:
-        await state.update_data(reward_value=val, card_id=None)
-    await state.set_state(PromoCreateSG.max_uses)
-    await message.reply("Макс. активаций:")
-
-
-@router.message(PromoCreateSG.max_uses, F.text)
-async def admin_promo_maxuses(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        await state.clear()
-        return
-    try:
-        max_u = int((message.text or "").strip())
-    except ValueError:
-        await message.reply("❌ Число.")
-        return
-    if max_u < 1:
-        await message.reply("❌ Минимум 1.")
-        return
-    await state.update_data(max_uses=max_u)
-    await state.set_state(PromoCreateSG.expires_days)
-    await message.reply("Срок в днях (0 = бессрочно):")
-
-
-@router.message(PromoCreateSG.expires_days, F.text)
-async def admin_promo_expires(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        await state.clear()
-        return
-    try:
-        days = int((message.text or "").strip())
-    except ValueError:
-        await message.reply("❌ Число.")
-        return
-    data = await state.get_data()
-    now = int(time.time())
-    expires = now + days * 86400 if days > 0 else 0
-    async with get_db() as db:
-        try:
-            await db.execute(
-                """INSERT INTO promo_codes
-                   (code, reward_type, reward_value, card_id, max_uses, used_count, expires_at, created_at, active)
-                   VALUES (?, ?, ?, ?, ?, 0, ?, ?, 1)""",
-                (data["code"], data["reward_type"], data.get("reward_value", 0), data.get("card_id"), data["max_uses"], expires, now),
-            )
-        except Exception:
-            await message.reply("❌ Код уже существует.")
-            await state.clear()
-            return
-    await state.clear()
-    await message.reply(f"✅ Промокод <code>{esc(data['code'])}</code> создан.", reply_markup=get_admin_main_kb())
-
-
-# ================= АДМИН: РАССЫЛКА =================
-@router.callback_query(F.data == "admin_broadcast")
-async def admin_broadcast_start(call: CallbackQuery, state: FSMContext):
-    if not await is_admin(call.from_user.id):
-        await call.answer("Нет доступа")
-        return
-    await state.set_state(BroadcastSG.text)
-    await call.message.answer("📢 Текст рассылки (HTML):\\n/cancel — отмена")
-    await call.answer()
-
-
-@router.message(BroadcastSG.text, F.text)
-async def admin_broadcast_text(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        await state.clear()
-        return
-    text = message.text or ""
-    if len(text) > 4000:
-        await message.reply("❌ Макс. 4000 символов.")
-        return
-    await state.update_data(broadcast_text=text)
-    await state.set_state(BroadcastSG.confirm)
-    b = InlineKeyboardBuilder()
-    b.button(text="✅ Отправить", callback_data=BroadcastCallback(action="confirm").pack())
-    b.button(text="❌ Отмена", callback_data=BroadcastCallback(action="cancel").pack())
-    b.adjust(1)
-    await message.reply(f"Предпросмотр:\\n\\n{text}\\n\\nОтправить?", reply_markup=b.as_markup())
-
-
-@router.callback_query(BroadcastCallback.filter())
-async def admin_broadcast_confirm(callback: CallbackQuery, callback_data: BroadcastCallback, state: FSMContext):
-    if not await is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа")
-        return
-    if callback_data.action == "cancel":
-        await state.clear()
-        await callback.message.edit_text("❌ Отменено.")
-        await callback.answer()
-        return
-    data = await state.get_data()
-    text = data.get("broadcast_text")
-    await state.clear()
-    if not text:
-        await callback.answer("Нет текста")
-        return
-    await callback.message.edit_text("⏳ Рассылка...")
-    await callback.answer()
-    async with get_db() as db:
-        cur = await db.execute("SELECT user_id FROM users WHERE banned = 0 OR banned IS NULL")
-        users = [r[0] for r in await cur.fetchall()]
-    ok, fail = 0, 0
-    bot = callback.message.bot
-    for uid in users:
-        try:
-            await bot.send_message(uid, f"📢 <b>От администрации</b>\\n\\n{text}")
-            ok += 1
-            await asyncio.sleep(0.05)
-        except Exception:
-            fail += 1
-    await callback.message.answer(f"✅ Готово: {ok} ок, {fail} ошибок", reply_markup=get_admin_main_kb())
-
-
-# ================= АЧИВКИ UI / НАСТРОЙКИ / УДАЛЕНИЕ ПРОФИЛЯ =================
-@router.callback_query(AchievementsCallback.filter())
-async def show_achievements(callback: CallbackQuery, callback_data: AchievementsCallback):
-    if await check_ban_callback(callback):
-        return
-    user_id = callback_data.user_id or callback.from_user.id
-    page = callback_data.page
-    per_page = 6
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT achievement_key, unlocked_at FROM user_achievements WHERE user_id = ?", (user_id,)
-            )
-            owned = {r["achievement_key"]: r["unlocked_at"] for r in await cur.fetchall()}
-        keys = list(ACHIEVEMENTS.keys())
-        total_pages = max(1, (len(keys) + per_page - 1) // per_page)
-        page = max(0, min(page, total_pages - 1))
-        chunk = keys[page * per_page:(page + 1) * per_page]
-        nickname = await get_user_nickname(user_id)
-        lines = [f"🏅 <b>Ачивки</b> • {esc(nickname)}\\nОткрыто: <b>{len(owned)}/{len(ACHIEVEMENTS)}</b>\\n"]
-        for key in chunk:
-            a = ACHIEVEMENTS[key]
-            mark = f"✅ {datetime.fromtimestamp(owned[key]).strftime('%d.%m.%Y')}" if key in owned else "🔒"
-            rew = []
-            if a["coins"]:
-                rew.append(f"{a['coins']}🪙")
-            if a["gems"]:
-                rew.append(f"{a['gems']}💎")
-            lines.append(f"{mark} <b>{esc(a['title'])}</b>\\n   {esc(a['description'])} · {', '.join(rew)}")
-        text = "\\n".join(lines)
-        b = InlineKeyboardBuilder()
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton(text="◀️", callback_data=AchievementsCallback(user_id=user_id, page=page - 1).pack()))
-        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="ignore"))
-        if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(text="▶️", callback_data=AchievementsCallback(user_id=user_id, page=page + 1).pack()))
-        if nav:
-            b.row(*nav)
-        b.row(InlineKeyboardButton(text="🔙 В профиль", callback_data=BackToProfileCallback(user_id=user_id).pack()))
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
-            else:
-                await callback.message.edit_text(text, reply_markup=b.as_markup())
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=b.as_markup())
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"ach UI: {e}")
-        await callback.answer("Ошибка")
-
-
-@router.callback_query(SettingsCallback.filter())
-async def settings_menu(callback: CallbackQuery, callback_data: SettingsCallback):
-    if await check_ban_callback(callback):
-        return
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("Не для вас", show_alert=True)
-        return
-    user_id = callback_data.user_id or callback.from_user.id
-    if callback_data.action == "menu":
-        text = "⚙️ <b>Настройки</b>\\n\\nУдаление профиля необратимо: коллекция, монеты, VIP, ачивки сгорят."
-        b = InlineKeyboardBuilder()
-        b.button(text="🗑 Удалить профиль", callback_data=SettingsCallback(action="delete_ask", user_id=user_id).pack())
-        b.button(text="🔙 В профиль", callback_data=BackToProfileCallback(user_id=user_id).pack())
-        b.adjust(1)
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
-            else:
-                await callback.message.edit_text(text, reply_markup=b.as_markup())
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=b.as_markup())
-        await callback.answer()
-        return
-    if callback_data.action == "delete_ask":
-        text = "⚠️ <b>Удалить профиль?</b>\\n\\nЭто необратимо."
-        b = InlineKeyboardBuilder()
-        b.button(text="✅ Да", callback_data=DeleteProfileConfirmCallback(action="confirm").pack())
-        b.button(text="❌ Нет", callback_data=DeleteProfileConfirmCallback(action="cancel").pack())
-        b.adjust(1)
-        try:
-            if callback.message.photo:
-                await callback.message.edit_caption(caption=text, reply_markup=b.as_markup())
-            else:
-                await callback.message.edit_text(text, reply_markup=b.as_markup())
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=b.as_markup())
-        await callback.answer()
-
-
-@router.callback_query(DeleteProfileConfirmCallback.filter())
-async def delete_profile_confirm(callback: CallbackQuery, callback_data: DeleteProfileConfirmCallback):
-    if await check_ban_callback(callback):
-        return
-    user_id = callback.from_user.id
-    if callback_data.action == "cancel":
-        photo, caption, kb = await render_profile(callback.message.bot, user_id, viewer_id=user_id)
-        await show_or_edit_photo(callback.message, photo, caption, kb)
-        await callback.answer("Отменено")
-        return
-    try:
-        async with get_db() as db:
-            await db.execute("DELETE FROM inventory WHERE user_id = ?", (user_id,))
-            await db.execute("DELETE FROM user_achievements WHERE user_id = ?", (user_id,))
-            await db.execute("DELETE FROM promo_activations WHERE user_id = ?", (user_id,))
-            await db.execute(
-                "UPDATE trades SET status = 'cancelled' WHERE (from_user_id = ? OR to_user_id = ?) AND status = 'pending'",
-                (user_id, user_id),
-            )
-            await db.execute(
-                """UPDATE users SET coins = 0, gems = 0, streak = 0, last_streak_date = 0,
-                   streak_bonus = 0, last_claim = 0, vip = 0, gender = 'none', trades_count = 0,
-                   nickname = ? WHERE user_id = ?""",
-                (default_nickname(callback.from_user.username, callback.from_user.full_name, user_id), user_id),
-            )
-        await callback.message.answer("✅ Профиль удалён. Начните заново: «мряу».")
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        await callback.answer("Удалено")
-    except Exception as e:
-        logger.error(f"del profile: {e}")
-        await callback.answer("Ошибка", show_alert=True)
-
-
-# ================= HELP TOPICS =================
-def get_help_keyboard(current: str = "main") -> InlineKeyboardMarkup:
-    topics = [
-        ("main", "📖 Основное"), ("cards", "🀄️ Карточки"), ("market", "🛒 Маркет"),
-        ("slot", "🎰 Слот"), ("vip", "⭐ VIP"), ("ach", "🏅 Ачивки"),
-        ("promo", "🎟 Промо"), ("trade", "🔄 Обмен"), ("other", "📌 Прочее"),
-    ]
-    b = InlineKeyboardBuilder()
-    for key, label in topics:
-        mark = "✅ " if key == current else ""
-        b.button(text=f"{mark}{label}", callback_data=HelpTopicCallback(topic=key).pack())
-    b.adjust(3)
-    return b.as_markup()
-
-
-def _help_text(topic: str = "main") -> str:
-    if topic == "main":
-        return (
-            "📖 <b>Основное</b>\\n\\n"
-            "/start · «мряу» — карточка\\n"
-            "«мряу ставка N» · «мряу перевод N» (реплаем)\\n"
-            "«мряу профиль/маркет/коллекция/топ»\\n"
-            "«мряу промо КОД» · «мряу обмен ID1 ID2»\\n"
-            f"/nickname · /gender · /help\\n\\n"
-            f"Кулдаун 4ч (VIP 2ч). Мгновенно: {INSTANT_MIN_COST}–{INSTANT_COST} 🪙."
-        )
-    if topic == "vip":
-        return (
-            "⭐ <b>VIP</b>\\n\\n"
-            "Купить нельзя — только от админа. У админов VIP всегда.\\n\\n"
-            "• Кулдаун 2ч вместо 4ч\\n"
-            "• x2 монеты и кристаллы\\n"
-            "• Бесплатная смена ника\\n"
-            "• Значок ⭐ в профиле"
-        )
-    if topic == "ach":
-        lines = [f"• <b>{a['title']}</b> — {a['description']}" for a in ACHIEVEMENTS.values()]
-        return "🏅 <b>Ачивки</b>\\n\\nОткрываются автоматически.\\n\\n" + "\\n".join(lines)
-    if topic == "promo":
-        return "🎟 <b>Промо</b>\\n\\n<code>мряу промо КОД</code>\\nМонеты, кристаллы, карточка или сброс КД.\\nЛимит активаций и срок."
-    if topic == "trade":
-        return "🔄 <b>Обмен</b>\\n\\nВ группе реплай:\\n<code>мряу обмен ID_вашей ID_его</code>\\nID видно в коллекции."
-    if topic == "cards":
-        rar = "\\n".join(f"{v['icon']} {v['name']} — {v['reward']} 🪙" for v in RARITIES.values())
-        return f"🀄️ <b>Карточки</b>\\n\\n{rar}\\n\\nДубликаты — 50% монет. Миф/Легенда → 💎."
-    if topic == "market":
-        prices = "\\n".join(f"  {v['icon']} {v['name']} — {MARKET_PRICES[k]} 💎" for k, v in RARITIES.items())
-        return f"🛒 <b>Маркет</b>\\n\\nПокупка за 💎.\\n{prices}\\n\\n1 💎 = {GEM_TO_COINS} 🪙"
-    if topic == "slot":
-        return "🎰 <b>Слот</b>\\n\\n<code>мряу ставка 50</code>\\nРезультат по реальному Dice Telegram."
-    return (
-        "📌 <b>Прочее</b>\\n\\n"
-        "• Удаление профиля: Настройки в профиле\\n"
-        "• Бан: только админ\\n"
-        "• VIP: только админ"
-    )
-
-
-@router.callback_query(HelpTopicCallback.filter())
-async def help_topic_switch(callback: CallbackQuery, callback_data: HelpTopicCallback):
-    if await check_ban_callback(callback):
-        return
-    text = _help_text(callback_data.topic)
-    try:
-        await callback.message.edit_text(text, reply_markup=get_help_keyboard(callback_data.topic))
-    except TelegramBadRequest:
-        await callback.message.answer(text, reply_markup=get_help_keyboard(callback_data.topic))
-    await callback.answer()
-
 
 
 # ================= ЗАПУСК =================
