@@ -57,11 +57,12 @@ GEM_REWARDS = {
     "mythical": 1,
     "legendary": 2,
 }
-# Бонус кристаллов за стрик (ежедневно при обновлении стрика)
+# Бонус кристаллов за стрик (начисляется ОДИН раз при достижении порога)
 STREAK_GEM_BONUSES = [(7, 5), (30, 20)]  # (мин. дней, кристаллы)
 
-# п.14 — авто-удаление сообщений бота о кулдауне в группах (в секундах)
+# п.14 — авто-удаление служебных сообщений бота в группах (в секундах)
 GROUP_AUTODELETE_SECONDS = 30
+STREAK_EXPIRE_SECONDS = 24 * 3600  # стрик сбрасывается, если не получал карточку 24ч
 
 # п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
@@ -79,7 +80,7 @@ DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfH
 SLOT_SPIN_DELAY = 4  # секунд до показа результата (анимация)
 
 # Доступные эмодзи для слота
-SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎳"]
+SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"]
 
 RARITIES = {
     "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "reward": 10},
@@ -229,8 +230,6 @@ def instant_cost(remaining_seconds: int) -> int:
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
     
 
-from typing import Tuple
-
 def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
     """
     Определяет множитель и текст результата по реальному значению Telegram Dice.
@@ -292,6 +291,16 @@ def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
         if value == 3:
             return 1.0, "⚽️ Штанга… возврат ставки"
         return 0.0, f"⚽️ Мимо ({value})… ставка сгорела"
+
+    # 🎰 Слот-машина (1–64)
+    if emoji == "🎰":
+        if value == 64:
+            return 5.0, "🎰 ДЖЕКПОТ!!! x5"
+        if value >= 40:
+            return 2.0, "🎰 Хороший выигрыш — x2"
+        if value >= 20:
+            return 1.0, "🎰 Ничья — возврат ставки"
+        return 0.0, f"🎰 Проигрыш ({value})… ставка сгорела"
 
     # fallback
     return 1.0, "⚠️ Что-то пошло не так… возврат ставки"
@@ -885,10 +894,13 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 # ================= СТРИК =================
 async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
     """
-    Обновляет стрик по факту захода.
+    Обновляет стрик по факту захода / получения карточки.
+    Авто-сброс: если с last_claim прошло >= 24ч — стрик = 0.
+    Кристаллы за пороги (7/30) начисляются только ОДИН раз при пересечении порога.
     Возвращает (streak, coin_bonus, balance, gem_bonus).
     """
     try:
+        now_ts = int(time.time())
         now = datetime.now()
         today_start = int(datetime(now.year, now.month, now.day).timestamp())
         today_end = today_start + 86400 - 1
@@ -897,7 +909,7 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
 
         async with get_db() as db:
             cur = await db.execute(
-                "SELECT streak, last_streak_date, streak_bonus, coins "
+                "SELECT streak, last_streak_date, streak_bonus, coins, last_claim "
                 "FROM users WHERE user_id = ?",
                 (user_id,),
             )
@@ -908,26 +920,40 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
             streak = row["streak"] or 0
             last_date = row["last_streak_date"] or 0
             balance = row["coins"] or 0
+            last_claim = row["last_claim"] or 0
+
+            # Авто-сброс стрика, если не получал карточку 24+ часа
+            if last_claim > 0 and (now_ts - last_claim) >= STREAK_EXPIRE_SECONDS:
+                if streak > 0:
+                    await db.execute(
+                        "UPDATE users SET streak = 0, last_streak_date = 0, streak_bonus = 0 "
+                        "WHERE user_id = ?",
+                        (user_id,),
+                    )
+                return 0, 0, balance, 0
 
             if today_start <= last_date <= today_end:
                 return streak, 0, balance, 0
 
-            new_streak = (
-                streak + 1
-                if streak > 0 and yesterday_start <= last_date <= yesterday_end
-                else 1
-            )
+            old_streak = streak
+            is_consecutive = streak > 0 and yesterday_start <= last_date <= yesterday_end
+            new_streak = (streak + 1) if is_consecutive else 1
 
             new_bonus = 0 if new_streak == 1 else next(
                 b for d, b in STREAK_BONUSES if new_streak <= d
             )
-            gem_bonus = streak_gem_bonus(new_streak)
+
+            # Кристаллы только при ПЕРВОМ пересечении порога
+            gem_bonus = 0
+            for days, gems_amt in STREAK_GEM_BONUSES:
+                if old_streak < days <= new_streak:
+                    gem_bonus += gems_amt
 
             await db.execute(
                 "UPDATE users SET streak = ?, last_streak_date = ?, "
                 "streak_bonus = ?, coins = coins + ?, gems = gems + ? "
                 "WHERE user_id = ?",
-                (new_streak, int(time.time()), new_bonus, new_bonus, gem_bonus, user_id),
+                (new_streak, now_ts, new_bonus, new_bonus, gem_bonus, user_id),
             )
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
             new_balance = (await cur.fetchone())[0]
@@ -961,6 +987,25 @@ async def _auto_delete(message: Message, delay: int):
         pass
     except Exception as e:
         logger.debug(f"auto_delete error: {e}")
+
+
+async def reply_ephemeral(message: Message, text: str, **kwargs):
+    """
+    reply + авто-удаление в группах.
+    Используется для кулдаунов, ставок, переводов, ошибок, рейт-лимитов.
+    """
+    sent = await message.reply(text, **kwargs)
+    if message.chat.type != "private":
+        asyncio.create_task(_auto_delete(sent, GROUP_AUTODELETE_SECONDS))
+    return sent
+
+
+async def answer_ephemeral(message: Message, text: str, **kwargs):
+    """answer + авто-удаление в группах."""
+    sent = await message.answer(text, **kwargs)
+    if message.chat.type != "private":
+        asyncio.create_task(_auto_delete(sent, GROUP_AUTODELETE_SECONDS))
+    return sent
 
 
 # ================= ПОЛЬЗОВАТЕЛЬСКИЕ ХЕНДЛЕРЫ =================
@@ -1020,7 +1065,7 @@ async def cmd_help(message: Message):
             + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно: "
               f"цена зависит от остатка таймера (от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙).\n"
               "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты "
-              f"и кристаллы (от 7 дней — +5 💎, от 30 дней — +20 💎).\n\n"
+              f"и кристаллы (один раз при достижении 7 дней — +5 💎, 30 дней — +20 💎).\n\n"
               "💎 <b>Кристаллы:</b>\n"
               "  • 1 мифическая карта (новая) → +1 💎\n"
               "  • 1 легендарная карта (новая) → +2 💎\n"
@@ -1044,10 +1089,11 @@ async def get_card_handler(message: Message):
     user_id = message.from_user.id
     now = int(time.time())
 
+    # Повышенные лимиты для групп
     if message.chat.type != "private":
-        if rate_limited(f"card:{message.chat.id}", limit=5, window=10):
+        if rate_limited(f"card:{message.chat.id}", limit=15, window=10):
             return
-    if rate_limited(f"card-user:{user_id}", limit=10, window=10):
+    if rate_limited(f"card-user:{user_id}", limit=12, window=10):
         return
 
     try:
@@ -1085,18 +1131,16 @@ async def get_card_handler(message: Message):
             )
             text += _streak_text(streak, bonus, new_balance, gem_bonus)
 
-            sent = await message.reply(
+            await reply_ephemeral(
+                message,
                 text,
                 reply_markup=get_card_action_keyboard(user_id, balance, remaining=remaining),
             )
-
-            if message.chat.type != "private":
-                asyncio.create_task(_auto_delete(sent, GROUP_AUTODELETE_SECONDS))
             return
 
         card, status = await issue_card(user_id, check_cooldown=True)
         if status != "success" or card is None:
-            await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
+            await reply_ephemeral(message, "❌ <b>Произошла ошибка. Попробуйте позже.</b>")
             return
 
         streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
@@ -1115,7 +1159,7 @@ async def get_card_handler(message: Message):
             await message.reply(caption, reply_markup=get_after_card_keyboard(user_id, card["balance"]))
     except Exception as e:
         logger.error(f"Ошибка в get_card_handler: {e}")
-        await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
+        await reply_ephemeral(message, "❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
 def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) -> str:
@@ -1172,12 +1216,12 @@ async def slot_machine_handler(message: Message):
     """
     user_id = message.from_user.id
 
-    if rate_limited(f"slot:{user_id}", limit=4, window=15):
-        await message.reply("⏳ Слишком часто. Подождите немного.")
+    if rate_limited(f"slot:{user_id}", limit=6, window=15):
+        await reply_ephemeral(message, "⏳ Слишком часто. Подождите немного.")
         return
 
     if message.chat.type != "private":
-        if rate_limited(f"slot-chat:{message.chat.id}", limit=8, window=15):
+        if rate_limited(f"slot-chat:{message.chat.id}", limit=15, window=15):
             return
 
     text = (message.text or "").strip()
@@ -1188,15 +1232,20 @@ async def slot_machine_handler(message: Message):
     try:
         bet = int(m.group(1))
     except (ValueError, IndexError):
-        await message.reply("❌ <b>Ставка должна быть целым числом.</b>\nПример: <code>мряу ставка 50</code>")
+        await reply_ephemeral(
+            message,
+            "❌ <b>Ставка должна быть целым числом.</b>\nПример: <code>мряу ставка 50</code>",
+        )
         return
 
     if bet <= 0:
-        await message.reply("❌ <b>Ставка должна быть больше нуля.</b>")
+        await reply_ephemeral(message, "❌ <b>Ставка должна быть больше нуля.</b>")
         return
 
     if bet > 100_000_000_000:
-        await message.reply("❌ <b>Слишком большая ставка.</b> Максимум — 100 000 000 000 🪙")
+        await reply_ephemeral(
+            message, "❌ <b>Слишком большая ставка.</b> Максимум — 100 000 000 000 🪙"
+        )
         return
 
     try:
@@ -1215,10 +1264,11 @@ async def slot_machine_handler(message: Message):
             balance = row["coins"] if row else 0
 
             if balance < bet:
-                await message.reply(
+                await reply_ephemeral(
+                    message,
                     f"⚠️ <b>Недостаточно монет.</b>\n"
                     f"Ставка: <b>{fmt_num(bet)} 🪙</b>\n"
-                    f"У вас: <b>{fmt_num(balance)} 🪙</b>"
+                    f"У вас: <b>{fmt_num(balance)} 🪙</b>",
                 )
                 return
 
@@ -1278,9 +1328,11 @@ async def slot_machine_handler(message: Message):
         )
 
         try:
-            await spin_msg.reply(result_caption)
+            result_msg = await spin_msg.reply(result_caption)
+            if message.chat.type != "private":
+                asyncio.create_task(_auto_delete(result_msg, GROUP_AUTODELETE_SECONDS))
         except TelegramBadRequest:
-            await message.reply(result_caption)
+            await reply_ephemeral(message, result_caption)
 
     except Exception as e:
         logger.error(f"Ошибка в slot_machine_handler: {e}")
@@ -1293,7 +1345,7 @@ async def slot_machine_handler(message: Message):
                 )
         except Exception:
             pass
-        await message.reply("❌ <b>Произошла ошибка в слоте. Попробуйте позже.</b>")
+        await reply_ephemeral(message, "❌ <b>Произошла ошибка в слоте. Попробуйте позже.</b>")
 
 
 # ================= ПЕРЕВОД МОНЕТ =================
@@ -1310,29 +1362,30 @@ async def transfer_coins_handler(message: Message):
 
     user_id = message.from_user.id
 
-    if rate_limited(f"transfer:{user_id}", limit=5, window=20):
-        await message.reply("⏳ Слишком часто. Подождите немного.")
+    if rate_limited(f"transfer:{user_id}", limit=8, window=20):
+        await reply_ephemeral(message, "⏳ Слишком часто. Подождите немного.")
         return
 
-    if rate_limited(f"transfer-chat:{message.chat.id}", limit=10, window=20):
+    if rate_limited(f"transfer-chat:{message.chat.id}", limit=20, window=20):
         return
 
     # Должен быть реплай на сообщение пользователя
     if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply(
+        await reply_ephemeral(
+            message,
             "⚠️ <b>Ответьте на сообщение пользователя</b>, которому хотите перевести монеты.\n"
-            "Пример: реплай + <code>мряу перевод 50</code>"
+            "Пример: реплай + <code>мряу перевод 50</code>",
         )
         return
 
     target = message.reply_to_message.from_user
 
     if target.is_bot:
-        await message.reply("❌ Нельзя переводить монеты боту.")
+        await reply_ephemeral(message, "❌ Нельзя переводить монеты боту.")
         return
 
     if target.id == user_id:
-        await message.reply("❌ Нельзя перевести монеты самому себе.")
+        await reply_ephemeral(message, "❌ Нельзя перевести монеты самому себе.")
         return
 
     text = (message.text or "").strip()
@@ -1343,15 +1396,20 @@ async def transfer_coins_handler(message: Message):
     try:
         amount = int(m.group(1))
     except (ValueError, IndexError):
-        await message.reply("❌ <b>Сумма должна быть целым числом.</b>\nПример: <code>мряу перевод 50</code>")
+        await reply_ephemeral(
+            message,
+            "❌ <b>Сумма должна быть целым числом.</b>\nПример: <code>мряу перевод 50</code>",
+        )
         return
 
     if amount <= 0:
-        await message.reply("❌ <b>Сумма перевода должна быть больше нуля.</b>")
+        await reply_ephemeral(message, "❌ <b>Сумма перевода должна быть больше нуля.</b>")
         return
 
     if amount > 100_000_000_000:
-        await message.reply("❌ <b>Слишком большая сумма.</b> Максимум — 100 000 000 000 🪙")
+        await reply_ephemeral(
+            message, "❌ <b>Слишком большая сумма.</b> Максимум — 100 000 000 000 🪙"
+        )
         return
 
     try:
@@ -1376,10 +1434,11 @@ async def transfer_coins_handler(message: Message):
             balance = row["coins"] if row else 0
 
             if balance < amount:
-                await message.reply(
+                await reply_ephemeral(
+                    message,
                     f"⚠️ <b>Недостаточно монет.</b>\n"
                     f"Нужно: <b>{fmt_num(amount)} 🪙</b>\n"
-                    f"У вас: <b>{fmt_num(balance)} 🪙</b>"
+                    f"У вас: <b>{fmt_num(balance)} 🪙</b>",
                 )
                 return
 
@@ -1403,18 +1462,21 @@ async def transfer_coins_handler(message: Message):
             )
             new_receiver_balance = (await cur.fetchone())[0]
 
-        await message.reply(
+        await reply_ephemeral(
+            message,
             f"💸 <b>Перевод выполнен</b>\n\n"
             f"От: {sender_mention}\n"
             f"Кому: {receiver_mention}\n"
             f"Сумма: <b>{fmt_num(amount)} 🪙</b>\n\n"
             f"🪙 Баланс отправителя: <b>{fmt_num(new_sender_balance)}</b>\n"
-            f"🪙 Баланс получателя: <b>{fmt_num(new_receiver_balance)}</b>"
+            f"🪙 Баланс получателя: <b>{fmt_num(new_receiver_balance)}</b>",
         )
 
     except Exception as e:
         logger.error(f"Ошибка в transfer_coins_handler: {e}")
-        await message.reply("❌ <b>Произошла ошибка при переводе. Попробуйте позже.</b>")
+        await reply_ephemeral(
+            message, "❌ <b>Произошла ошибка при переводе. Попробуйте позже.</b>"
+        )
 
 
 # ---------- Профиль ----------
@@ -1774,7 +1836,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
 @router.message(Command("top"))
 @router.message(F.text.regexp(TOP_CMD_RE))
 async def show_top_players(message: Message):
-    if rate_limited(f"top:{message.from_user.id}", limit=3, window=5):
+    if rate_limited(f"top:{message.from_user.id}", limit=6, window=5):
         return
     try:
         text = await build_top_text("coins", message.from_user.id)
@@ -1984,7 +2046,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
         await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
         return
 
-    if rate_limited(f"card-action:{user_id}", limit=6, window=10):
+    if rate_limited(f"card-action:{user_id}", limit=8, window=10):
         await callback.answer("Слишком часто")
         return
 
