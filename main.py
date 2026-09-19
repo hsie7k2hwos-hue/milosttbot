@@ -7,7 +7,6 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from io import BytesIO
 from typing import Optional, Tuple
 
 import aiosqlite
@@ -15,26 +14,27 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, BaseFilter
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    BufferedInputFile, CallbackQuery, InlineKeyboardButton,
+    CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
     ReplyKeyboardMarkup, LinkPreviewOptions,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
-# PIL больше не нужен — заглушка через file_id (п.12)
-# from PIL import Image, ImageDraw, ImageFont
-
 # ================= КОНФИГУРАЦИЯ =================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_NAME = "/app/data/cards_game.db"
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN не задан. Укажите его в .env или окружении.")
+
+DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
+LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 COOLDOWN_SECONDS = 4 * 3600
 INSTANT_COST = 150  # максимум (полный кулдаун)
 INSTANT_MIN_COST = 5  # минимум (кулдаун почти истёк)
@@ -141,7 +141,7 @@ HELP_CMD_RE = re.compile(
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("/app/data/bot.log"), logging.StreamHandler()],
+    handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
@@ -195,15 +195,6 @@ def fmt_coins(n: int) -> str:
 def fmt_gems(n: int) -> str:
     """1 кристалл, 2 кристалла, 5 кристаллов."""
     return f"{fmt_num(n)} {plural(n, 'кристалл', 'кристалла', 'кристаллов')}"
-
-
-def streak_gem_bonus(streak: int) -> int:
-    """Кристаллы за текущий стрик (берём максимальный подходящий порог)."""
-    bonus = 0
-    for days, gems_amt in STREAK_GEM_BONUSES:
-        if streak >= days:
-            bonus = gems_amt
-    return bonus
 
 
 def user_mention(user_id: int, nickname: str, username: Optional[str] = None) -> str:
@@ -342,7 +333,6 @@ class TopCallback(CallbackData, prefix="top"):
 
 class NickConfirmCallback(CallbackData, prefix="nickconf"):
     action: str  # apply | reset | cancel
-    value: str = ""  # для apply — новый ник
 
 
 class GenderCallback(CallbackData, prefix="gender"):
@@ -500,7 +490,7 @@ def default_nickname(username: Optional[str], full_name: Optional[str], user_id:
     return str(user_id)
 
 
-async def get_or_create_user(user_id: int, username: str = None, full_name: str = None):
+async def get_or_create_user(user_id: int, username: Optional[str] = None, full_name: Optional[str] = None):
     async with get_db() as db:
         cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         user = await cur.fetchone()
@@ -556,6 +546,11 @@ class EditCardSG(StatesGroup):
 class EditCardPhotoSG(StatesGroup):
     card_id = State()
     photo = State()
+
+
+class NicknameSG(StatesGroup):
+    """Ожидание подтверждения смены ника (ник храним в FSM, не в callback_data)."""
+    pending = State()
 
 
 router = Router()
@@ -670,7 +665,8 @@ async def get_user_photo(bot: Bot, user_id: int, nickname: str):
     return DEFAULT_AVATAR_FILE_ID
 
 
-async def render_profile(bot: Bot, user_id: int):
+async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None):
+    """viewer_id — кто смотрит профиль. Кнопки действий только для владельца."""
     async with get_db() as db:
         cur = await db.execute("""
                                SELECT u.nickname,
@@ -717,7 +713,8 @@ async def render_profile(bot: Bot, user_id: int):
         f"💎 Кристаллы • <b>{fmt_num(gems)}</b>\n"
         f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
     )
-    return await get_user_photo(bot, user_id, nickname), caption, get_profile_kb(user_id)
+    kb = get_profile_kb(user_id) if (viewer_id is None or viewer_id == user_id) else None
+    return await get_user_photo(bot, user_id, nickname), caption, kb
 
 
 async def render_collection(bot: Bot, user_id: int):
@@ -840,7 +837,9 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                 selected_rarity = card["rarity"]
                 is_duplicate = True
 
-            card_id, card_name, photo_id = card[0], card[1], card[2]
+            card_id = card["id"]
+            card_name = card["name"]
+            photo_id = card["photo_id"]
             base_coins = RARITIES[selected_rarity]["reward"]
             coins_earned = int(base_coins * DUPLICATE_REFUND) if is_duplicate else base_coins
             gems_earned = 0
@@ -965,15 +964,25 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
 
 # ================= RATE LIMIT (п.11) =================
 _rate_bucket: dict = {}
+_RATE_BUCKET_MAX_KEYS = 10_000
 
 
 def rate_limited(key: str, limit: int, window: float) -> bool:
+    """Простой sliding-window rate limit. Периодически чистит пустые ключи."""
     now = time.monotonic()
     bucket = _rate_bucket.setdefault(key, [])
     bucket[:] = [t for t in bucket if now - t < window]
+    if not bucket and key in _rate_bucket and len(bucket) == 0:
+        # оставляем ключ до общей чистки
+        pass
     if len(bucket) >= limit:
         return True
     bucket.append(now)
+    # Ограничиваем рост словаря
+    if len(_rate_bucket) > _RATE_BUCKET_MAX_KEYS:
+        dead = [k for k, v in _rate_bucket.items() if not v]
+        for k in dead[: len(dead) // 2 + 1]:
+            _rate_bucket.pop(k, None)
     return False
 
 
@@ -1289,10 +1298,17 @@ async def slot_machine_handler(message: Message):
                 )
                 return
 
-            await db.execute(
-                "UPDATE users SET coins = coins - ? WHERE user_id = ?",
-                (bet, user_id),
+            cur = await db.execute(
+                "UPDATE users SET coins = coins - ? "
+                "WHERE user_id = ? AND coins >= ?",
+                (bet, user_id, bet),
             )
+            if cur.rowcount != 1:
+                await reply_ephemeral(
+                    message,
+                    "⚠️ <b>Недостаточно монет</b> (баланс изменился). Попробуйте ещё раз.",
+                )
+                return
 
         # --- Выбираем эмодзи и крутим ---
         emoji = random.choice(SLOT_EMOJIS)
@@ -1466,11 +1482,18 @@ async def transfer_coins_handler(message: Message):
                 )
                 return
 
-            # Атомарный перевод
-            await db.execute(
-                "UPDATE users SET coins = coins - ? WHERE user_id = ?",
-                (amount, user_id),
+            # Атомарный перевод: списываем только при достаточном балансе
+            cur = await db.execute(
+                "UPDATE users SET coins = coins - ? "
+                "WHERE user_id = ? AND coins >= ?",
+                (amount, user_id, amount),
             )
+            if cur.rowcount != 1:
+                await reply_ephemeral(
+                    message,
+                    "⚠️ <b>Недостаточно монет</b> (баланс изменился). Попробуйте ещё раз.",
+                )
+                return
             await db.execute(
                 "UPDATE users SET coins = coins + ? WHERE user_id = ?",
                 (amount, target.id),
@@ -1531,8 +1554,10 @@ async def show_profile(message: Message):
                 message.from_user.full_name,
             )
 
-        photo, caption, kb = await render_profile(message.bot, target_user.id)
-        if kb is None:
+        photo, caption, kb = await render_profile(
+            message.bot, target_user.id, viewer_id=message.from_user.id
+        )
+        if photo == DEFAULT_AVATAR_FILE_ID and "не найден" in caption.lower():
             await message.reply(caption)
             return
         try:
@@ -1552,7 +1577,9 @@ async def process_back_to_profile(callback: CallbackQuery, callback_data: BackTo
         return
     try:
         target_id = callback_data.user_id or callback.from_user.id
-        photo, caption, kb = await render_profile(callback.message.bot, target_id)
+        photo, caption, kb = await render_profile(
+            callback.message.bot, target_id, viewer_id=callback.from_user.id
+        )
         if kb is None:
             await callback.answer("Пользователь не найден")
             return
@@ -1576,7 +1603,7 @@ def validate_nickname(raw: str) -> Optional[str]:
 
 
 @router.message(Command("nickname"))
-async def nickname_cmd(message: Message, command: Command):
+async def nickname_cmd(message: Message, command: Command, state: FSMContext):
     user_id = message.from_user.id
     await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
 
@@ -1588,6 +1615,8 @@ async def nickname_cmd(message: Message, command: Command):
         b.button(text="✅ Подтвердить", callback_data=NickConfirmCallback(action="reset").pack())
         b.button(text="❌ Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
         b.adjust(2)
+        await state.set_state(NicknameSG.pending)
+        await state.update_data(pending_nick=None, pending_action="reset")
         await message.reply(
             f"♻️ <b>Сбросить ник?</b>\n\n"
             f"Будет установлен: <b>{esc(default)}</b>\n"
@@ -1616,58 +1645,78 @@ async def nickname_cmd(message: Message, command: Command):
     balance = row["coins"] if row else 0
     if balance < NICKNAME_COST:
         await message.reply(
-            f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, у вас <b>{fmt_num(balance)} 🪙</b>."
+            f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
+            f"у вас <b>{fmt_num(balance)} 🪙</b>."
         )
         return
 
     b = InlineKeyboardBuilder()
     b.button(
         text="✅ Подтвердить",
-        callback_data=NickConfirmCallback(action="apply", value=new_nick).pack(),
+        callback_data=NickConfirmCallback(action="apply").pack(),
     )
     b.button(text="❌ Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
     b.adjust(2)
+    await state.set_state(NicknameSG.pending)
+    await state.update_data(pending_nick=new_nick, pending_action="apply")
     await message.reply(
         f"✏️ <b>Сменить ник?</b>\n\n"
         f"Новый ник: <b>{esc(new_nick)}</b>\n"
-        f"Стоимость: <b>{NICKNAME_COST} 🪙</b> (баланс: {balance})",
+        f"Стоимость: <b>{NICKNAME_COST} 🪙</b> (баланс: {fmt_num(balance)})",
         reply_markup=b.as_markup(),
     )
 
 
 @router.callback_query(NickConfirmCallback.filter())
-async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCallback):
+async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCallback, state: FSMContext):
     user_id = callback.from_user.id
 
     if callback_data.action == "cancel":
+        await state.clear()
         await callback.message.edit_text("✅ <b>Отменено</b>")
         await callback.answer()
         return
 
+    data = await state.get_data()
+    pending_action = data.get("pending_action")
+    pending_nick = data.get("pending_nick")
+
     if callback_data.action == "reset":
+        if pending_action and pending_action != "reset":
+            await callback.answer("⚠️ Сессия устарела, повторите команду", show_alert=True)
+            await state.clear()
+            return
         default = default_nickname(
             callback.from_user.username, callback.from_user.full_name, user_id
         )
         async with get_db() as db:
-            await db.execute("UPDATE users SET nickname = ? WHERE user_id = ?", (default, user_id))
+            await db.execute(
+                "UPDATE users SET nickname = ? WHERE user_id = ?", (default, user_id)
+            )
+        await state.clear()
         await callback.message.edit_text(f"✅ <b>Ник сброшен:</b> {esc(default)}")
         await callback.answer()
         return
 
     if callback_data.action == "apply":
-        new_nick = callback_data.value
-        if not validate_nickname(new_nick):
+        new_nick = pending_nick
+        if not new_nick or not validate_nickname(new_nick):
+            await state.clear()
             await callback.message.edit_text("❌ <b>Неверный ник</b>")
             await callback.answer()
             return
 
         async with get_db() as db:
-            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+            cur = await db.execute(
+                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+            )
             row = await cur.fetchone()
             balance = row["coins"] if row else 0
             if balance < NICKNAME_COST:
+                await state.clear()
                 await callback.message.edit_text(
-                    f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, у вас <b>{fmt_num(balance)} 🪙</b>."
+                    f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
+                    f"у вас <b>{fmt_num(balance)} 🪙</b>."
                 )
                 await callback.answer()
                 return
@@ -1675,11 +1724,15 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
                 "UPDATE users SET nickname = ?, coins = coins - ? WHERE user_id = ?",
                 (new_nick, NICKNAME_COST, user_id),
             )
+        await state.clear()
         await callback.message.edit_text(
             f"✅ <b>Ник изменён:</b> {esc(new_nick)}\n"
             f"Списано: <b>{NICKNAME_COST} 🪙</b>"
         )
         await callback.answer()
+        return
+
+    await callback.answer()
 
 
 @router.callback_query(NicknameCallback.filter(F.action == "change"))
@@ -1981,9 +2034,7 @@ async def show_collection(event):
 
 @router.callback_query(RaritySelectCallback.filter())
 async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySelectCallback):
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
-        return
+    # Просмотр коллекции доступен всем (кнопки привязаны к владельцу коллекции)
     user_id = callback_data.user_id or callback.from_user.id
     rarity, page = callback_data.rarity, callback_data.page
     try:
@@ -2043,9 +2094,7 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
 
 @router.callback_query(MainMenuCallback.filter())
 async def process_back_to_main(callback: CallbackQuery, callback_data: MainMenuCallback):
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
-        return
+    # Навигация по чужой коллекции разрешена (только просмотр)
     target_id = callback_data.user_id or callback.from_user.id
     photo, caption, keyboard, _ = await render_collection(
         callback.message.bot, target_id
@@ -2621,8 +2670,12 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
-async def admin_filter(message: Message) -> bool:
-    return await is_admin(message.from_user.id)
+class AdminFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        return await is_admin(message.from_user.id)
+
+
+admin_filter = AdminFilter()
 
 
 @router.message(Command("admin"), admin_filter)
@@ -3964,6 +4017,9 @@ async def test_set_registration_now(message: Message):
 # ================= ЗАПУСК =================
 async def main():
     try:
+        os.makedirs(os.path.dirname(DB_NAME) or ".", exist_ok=True)
+        if LOG_PATH:
+            os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
         await init_db()
         logger.info("База данных инициализирована")
 
