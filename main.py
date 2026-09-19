@@ -978,33 +978,50 @@ def rate_limited(key: str, limit: int, window: float) -> bool:
 
 
 # ================= АВТО-УДАЛЕНИЕ СООБЩЕНИЯ (п.14) =================
-async def _auto_delete(message: Message, delay: int):
-    """Удаляет сообщение через delay секунд (тихо игнорирует ошибки)."""
-    await asyncio.sleep(delay)
+async def _try_delete(msg: Optional[Message]):
+    """Тихо пытается удалить сообщение (нет прав / уже удалено — игнор)."""
+    if msg is None:
+        return
     try:
-        await message.delete()
+        await msg.delete()
     except TelegramBadRequest:
         pass
     except Exception as e:
-        logger.debug(f"auto_delete error: {e}")
+        logger.debug(f"try_delete error: {e}")
+
+
+async def _auto_delete_pair(bot_msg: Message, user_msg: Optional[Message], delay: int):
+    """
+    Через delay секунд удаляет:
+      1) сообщение бота
+      2) исходное сообщение пользователя (если бот — админ с правом удаления)
+    Если прав нет — удаляется только сообщение бота.
+    """
+    await asyncio.sleep(delay)
+    await _try_delete(bot_msg)
+    await _try_delete(user_msg)
 
 
 async def reply_ephemeral(message: Message, text: str, **kwargs):
     """
-    reply + авто-удаление в группах.
+    reply + авто-удаление в группах (сообщение бота + запрос пользователя).
     Используется для кулдаунов, ставок, переводов, ошибок, рейт-лимитов.
     """
     sent = await message.reply(text, **kwargs)
     if message.chat.type != "private":
-        asyncio.create_task(_auto_delete(sent, GROUP_AUTODELETE_SECONDS))
+        asyncio.create_task(
+            _auto_delete_pair(sent, message, GROUP_AUTODELETE_SECONDS)
+        )
     return sent
 
 
 async def answer_ephemeral(message: Message, text: str, **kwargs):
-    """answer + авто-удаление в группах."""
+    """answer + авто-удаление в группах (сообщение бота + запрос пользователя)."""
     sent = await message.answer(text, **kwargs)
     if message.chat.type != "private":
-        asyncio.create_task(_auto_delete(sent, GROUP_AUTODELETE_SECONDS))
+        asyncio.create_task(
+            _auto_delete_pair(sent, message, GROUP_AUTODELETE_SECONDS)
+        )
     return sent
 
 
@@ -1330,7 +1347,14 @@ async def slot_machine_handler(message: Message):
         try:
             result_msg = await spin_msg.reply(result_caption)
             if message.chat.type != "private":
-                asyncio.create_task(_auto_delete(result_msg, GROUP_AUTODELETE_SECONDS))
+                # Удаляем результат + исходный запрос пользователя.
+                # Dice (spin_msg) тоже почистим для аккуратности.
+                async def _cleanup_slot():
+                    await asyncio.sleep(GROUP_AUTODELETE_SECONDS)
+                    await _try_delete(result_msg)
+                    await _try_delete(spin_msg)
+                    await _try_delete(message)
+                asyncio.create_task(_cleanup_slot())
         except TelegramBadRequest:
             await reply_ephemeral(message, result_caption)
 
