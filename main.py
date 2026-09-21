@@ -345,6 +345,19 @@ class MarketMainCallback(CallbackData, prefix="mkt_main"):
     user_id: int = 0
 
 
+class OkDeleteCallback(CallbackData, prefix="ok_del"):
+    """Кнопка «ОК» — удаляет сообщение бота и (по возможности) запрос пользователя."""
+    pass
+
+
+class HelpCallback(CallbackData, prefix="help"):
+    page: int = 0
+
+
+class TopRefreshCallback(CallbackData, prefix="top_refresh"):
+    kind: str  # coins | cards | streak
+
+
 # ================= БАЗА ДАННЫХ =================
 @asynccontextmanager
 async def get_db():
@@ -541,6 +554,10 @@ def get_profile_kb(owner_id: int):
     b.button(text="⚧ Выбрать пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
     b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)",
              callback_data=NicknameCallback(action="change", user_id=owner_id).pack())
+    b.button(
+        text="💱 Купить кристаллы",
+        callback_data=MarketExchangeCallback(action="menu", user_id=owner_id).pack(),
+    )
     b.adjust(1)
     return b.as_markup()
 
@@ -577,12 +594,20 @@ def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str,
     )
 
 
+def get_ok_kb() -> InlineKeyboardMarkup:
+    """Кнопка «ОК» для сообщений об ошибках / кулдауне."""
+    b = InlineKeyboardBuilder()
+    b.button(text="ОК", callback_data=OkDeleteCallback().pack())
+    return b.as_markup()
+
+
 def get_card_action_keyboard(user_id: int, balance: int = 0,
                              remaining: int = COOLDOWN_SECONDS) -> InlineKeyboardMarkup:
     cost = instant_cost(remaining)
     b = InlineKeyboardBuilder()
     if balance >= cost:
         _instant_button(b, user_id, "✨ Получить сейчас", "instant", cost)
+    b.button(text="ОК", callback_data=OkDeleteCallback().pack())
     b.adjust(1)
     return b.as_markup()
 
@@ -601,7 +626,7 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
 
 
 def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
-    """п.6 — быстрое переключение топов."""
+    """п.6 — быстрое переключение топов + обновить."""
     b = InlineKeyboardBuilder()
     b.button(text=("✅ " if kind == "coins" else "") + "🪙 Монеты",
              callback_data=TopCallback(kind="coins").pack())
@@ -609,7 +634,8 @@ def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
              callback_data=TopCallback(kind="cards").pack())
     b.button(text=("✅ " if kind == "streak" else "") + "🔥 Стрик",
              callback_data=TopCallback(kind="streak").pack())
-    b.adjust(3)
+    b.button(text="🔄 Обновить", callback_data=TopRefreshCallback(kind=kind).pack())
+    b.adjust(3, 1)
     return b.as_markup()
 
 
@@ -626,7 +652,7 @@ async def get_user_photo(bot: Bot, user_id: int, nickname: str):
 
 
 async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None):
-    """viewer_id — кто смотрит профиль. Кнопки действий только для владельца."""
+    """Кнопки всегда показываются с привязкой к user_id владельца (защита через _owner_check)."""
     async with get_db() as db:
         cur = await db.execute("""
                                SELECT u.nickname,
@@ -673,7 +699,9 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
         f"💎 Кристаллы • <b>{fmt_num(gems)}</b>\n"
         f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
     )
-    kb = get_profile_kb(user_id) if (viewer_id is None or viewer_id == user_id) else None
+    # Кнопки всегда отображаются (с привязкой к owner user_id);
+    # действия защищены _owner_check.
+    kb = get_profile_kb(user_id)
     return await get_user_photo(bot, user_id, nickname), caption, kb
 
 
@@ -973,9 +1001,11 @@ async def _auto_delete_pair(bot_msg: Message, user_msg: Optional[Message], delay
 
 async def reply_ephemeral(message: Message, text: str, **kwargs):
     """
-    reply + авто-удаление в группах (сообщение бота + запрос пользователя).
-    Используется для кулдаунов, ставок, переводов, ошибок, рейт-лимитов.
+    reply + кнопка «ОК» + авто-удаление в группах.
+    Используется для кулдаунов, ошибок, рейт-лимитов.
     """
+    if "reply_markup" not in kwargs:
+        kwargs["reply_markup"] = get_ok_kb()
     sent = await message.reply(text, **kwargs)
     if message.chat.type != "private":
         asyncio.create_task(
@@ -985,7 +1015,9 @@ async def reply_ephemeral(message: Message, text: str, **kwargs):
 
 
 async def answer_ephemeral(message: Message, text: str, **kwargs):
-    """answer + авто-удаление в группах (сообщение бота + запрос пользователя)."""
+    """answer + кнопка «ОК» + авто-удаление в группах."""
+    if "reply_markup" not in kwargs:
+        kwargs["reply_markup"] = get_ok_kb()
     sent = await message.answer(text, **kwargs)
     if message.chat.type != "private":
         asyncio.create_task(
@@ -1015,53 +1047,138 @@ async def cmd_start(message: Message):
         logger.error(f"Ошибка в cmd_start: {e}")
 
 
+HELP_PAGES = [
+    {
+        "title": "📖 Помощь • Команды",
+        "body": (
+            "<b>Как получить карточку?</b>\n"
+            "<blockquote>Напишите «мряу», /meow или нажмите «🀄️ Получить карточку».\n"
+            f"Бесплатно — раз в 4 часа. Мгновенно — от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙 "
+            "(цена зависит от остатка таймера).</blockquote>\n\n"
+            "<b>Как открыть профиль?</b>\n"
+            "<blockquote>«мряу профиль», /profile или «👤 Профиль».\n"
+            "В группе реплаем на сообщение — можно посмотреть чужой профиль.</blockquote>\n\n"
+            "<b>Как посмотреть коллекцию?</b>\n"
+            "<blockquote>«мряу коллекция» / «мряу карточки» или /collection — только своя.</blockquote>\n\n"
+            "<b>Как открыть маркет?</b>\n"
+            "<blockquote>«🛒 Маркет», /market или «мряу маркет» — <b>только в личных сообщениях</b>.</blockquote>"
+        ),
+    },
+    {
+        "title": "📖 Помощь • Стрик и награды",
+        "body": (
+            "<b>Что такое стрик?</b>\n"
+            "<blockquote>Заходите ежедневно и получайте карточку — стрик растёт.\n"
+            "Если не получать карточку 24 часа — стрик сбрасывается.\n"
+            "За стрик начисляются бонусные монеты.</blockquote>\n\n"
+            "<b>Кристаллы за стрик?</b>\n"
+            "<blockquote>Один раз при достижении порога:\n"
+            "• 7 дней — +5 💎\n"
+            "• 30 дней — +20 💎</blockquote>\n\n"
+            "<b>Кристаллы за карточки?</b>\n"
+            "<blockquote>• Новая мифическая — +1 💎\n"
+            "• Новая легендарная — +2 💎\n"
+            "Дубликаты кристаллы не дают.</blockquote>"
+        ),
+    },
+    {
+        "title": "📖 Помощь • Маркет и кубик",
+        "body": (
+            "<b>Как купить карточку?</b>\n"
+            "<blockquote>В маркете (только ЛС) выберите редкость и купите недостающую "
+            "карточку за кристаллы.</blockquote>\n\n"
+            "<b>Цены в маркете:</b>\n"
+            "<blockquote>"
+            + "\n".join(
+                f"{v['icon']} {v['name']} — {MARKET_PRICES[k]} 💎"
+                for k, v in RARITIES.items()
+            )
+            + "</blockquote>\n\n"
+            "<b>Как купить кристаллы?</b>\n"
+            f"<blockquote>В маркете или в профиле → «Купить кристаллы».\n"
+            f"Курс: 1 💎 = {GEM_TO_COINS} 🪙.</blockquote>\n\n"
+            "<b>Как бросить кубик?</b>\n"
+            f"<blockquote>Напишите «мряу кубик». Раз в 10 минут, минимум {DICE_MIN_BALANCE} 🪙.\n"
+            "Выпадает от −10 до +10 монет (шанс выигрыша выше).</blockquote>"
+        ),
+    },
+    {
+        "title": "📖 Помощь • Профиль и топ",
+        "body": (
+            "<b>Как сменить ник?</b>\n"
+            f"<blockquote>/nickname НовыйНик — стоит {NICKNAME_COST} 🪙.\n"
+            "/nickname reset — сброс бесплатно.\n"
+            "2–32 символа, без ссылок и упоминаний.</blockquote>\n\n"
+            "<b>Как указать пол?</b>\n"
+            "<blockquote>/gender м|ж|др|нет или кнопка в профиле. Необязательно.</blockquote>\n\n"
+            "<b>Как посмотреть топ?</b>\n"
+            "<blockquote>«мряу топ», /top или «🏆 Топ игроков».\n"
+            "Можно переключать: монеты / карточки / стрик, и обновлять.</blockquote>\n\n"
+            "<b>Редкости карточек:</b>\n"
+            "<blockquote>"
+            + "\n".join(
+                f"{v['icon']} {v['name']} — {v['reward']} 🪙"
+                for v in RARITIES.values()
+            )
+            + "</blockquote>"
+        ),
+    },
+]
+
+
+def get_help_keyboard(page: int) -> InlineKeyboardMarkup:
+    total = len(HELP_PAGES)
+    page = max(0, min(page, total - 1))
+    b = InlineKeyboardBuilder()
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="◀️", callback_data=HelpCallback(page=page - 1).pack()
+        ))
+    nav.append(InlineKeyboardButton(
+        text=f"{page + 1}/{total}", callback_data="ignore"
+    ))
+    if page < total - 1:
+        nav.append(InlineKeyboardButton(
+            text="▶️", callback_data=HelpCallback(page=page + 1).pack()
+        ))
+    b.row(*nav)
+    return b.as_markup()
+
+
+def build_help_text(page: int) -> str:
+    total = len(HELP_PAGES)
+    page = max(0, min(page, total - 1))
+    p = HELP_PAGES[page]
+    return f"<b>{p['title']}</b>  ({page + 1}/{total})\n\n{p['body']}"
+
+
 @router.message(Command("help"))
 @router.message(F.text == "❓ Помощь")
 @router.message(F.text.regexp(HELP_CMD_RE))
 async def cmd_help(message: Message):
-    market_prices = "\n".join(
-        f"  {v['icon']} {v['name']} — {MARKET_PRICES[k]} 💎"
-        for k, v in RARITIES.items()
+    await message.reply(
+        build_help_text(0),
+        reply_markup=get_help_keyboard(0),
     )
-    text = (
-            "📖 <b>Помощь</b>\n\n"
-            "<b>Основные команды:</b>\n"
-            "/start — запуск бота\n"
-            "/meow или «мряу» — получить карточку\n"
-            "«мряу кубик» — бросить кубик (−10…+10 🪙, раз в 10 мин)\n"
-            "«мряу профиль» — свой профиль (в группе реплаем — профиль другого)\n"
-            "«мряу маркет» — маркет (в группе реплаем — маркет другого)\n"
-            "«мряу коллекция» / «мряу карточки» — коллекция (реплаем — чужая)\n"
-            "«мряу топ» — топ игроков\n"
-            "«мряу помощь» — эта справка\n"
-            "/profile — профиль\n"
-            "/collection — мои карточки\n"
-            "/market или «🛒 Маркет» — купить недостающие карточки\n"
-            "/top — топ игроков\n"
-            f"/nickname [ник] — сменить ник ({NICKNAME_COST} 🪙)\n"
-            "/nickname reset — сбросить ник (бесплатно)\n"
-            "/gender [м/ж/др/нет] — установить пол (необязательно)\n"
-            "/help — эта справка\n\n"
-            "<b>Редкости карточек:</b>\n"
-            + "\n".join(
-        f"{v['icon']} {v['name']} — {v['reward']} 🪙"
-        for v in RARITIES.values()
-    )
-            + "\n\n💡 Каждые 4 часа — бесплатная карточка. Можно получить мгновенно: "
-              f"цена зависит от остатка таймера (от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙).\n"
-              "🔥 Заходите ежедневно — за стрик начисляются бонусные монеты "
-              f"и кристаллы (один раз при достижении 7 дней — +5 💎, 30 дней — +20 💎).\n\n"
-              "💎 <b>Кристаллы:</b>\n"
-              "  • 1 мифическая карта (новая) → +1 💎\n"
-              "  • 1 легендарная карта (новая) → +2 💎\n"
-              f"  • Обмен: 1 💎 = {GEM_TO_COINS} 🪙 (купить кристаллы за монеты в маркете)\n\n"
-              "🛒 <b>Маркет:</b> покупайте карточки, которых у вас ещё нет, за кристаллы.\n"
-              f"Цены:\n{market_prices}\n\n"
-              "🎲 <b>Кубик:</b> напишите <code>мряу кубик</code>. "
-              f"Можно бросать раз в 10 минут. Нужно минимум {DICE_MIN_BALANCE} 🪙. "
-              "Выпадает от −10 до +10 монет (шанс выигрыша выше)."
-    )
-    await message.reply(text, reply_markup=get_main_km())
+
+
+@router.callback_query(HelpCallback.filter())
+async def help_page_callback(callback: CallbackQuery, callback_data: HelpCallback):
+    try:
+        text = build_help_text(callback_data.page)
+        kb = get_help_keyboard(callback_data.page)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                await callback.answer("Данные не изменились")
+            else:
+                await callback.message.answer(text, reply_markup=kb)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка справки: {e}")
+        await callback.answer("⚠️ Ошибка")
 
 
 @router.message(F.text == "🀄️ Получить карточку")
@@ -1355,14 +1472,14 @@ async def show_profile(message: Message):
 @router.callback_query(BackToProfileCallback.filter())
 async def process_back_to_profile(callback: CallbackQuery, callback_data: BackToProfileCallback):
     if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
     try:
         target_id = callback_data.user_id or callback.from_user.id
         photo, caption, kb = await render_profile(
             callback.message.bot, target_id, viewer_id=callback.from_user.id
         )
-        if kb is None:
+        if "не найден" in (caption or "").lower():
             await callback.answer("Пользователь не найден")
             return
         await show_or_edit_photo(callback.message, photo, caption, kb)
@@ -1465,7 +1582,7 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
 
     if callback_data.action == "reset":
         if pending_action and pending_action != "reset":
-            await callback.answer("⚠️ Сессия устарела, повторите команду", show_alert=True)
+            await callback.answer("⚠️ Сессия устарела, повторите команду")
             await state.clear()
             return
         default = default_nickname(
@@ -1519,12 +1636,10 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
 
 @router.callback_query(NicknameCallback.filter(F.action == "change"))
 async def change_nickname_hint(callback: CallbackQuery, callback_data: NicknameCallback):
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
-        return
+    # Справка без проверки user_id — просто подсказка
     await callback.answer(
-        f"Для изменения ника используйте команду /nickname НовыйНик ({NICKNAME_COST} 🪙) "
-        f"или /nickname reset для сброса",
+        f"Для изменения ника: /nickname НовыйНик ({NICKNAME_COST} 🪙) "
+        f"или /nickname reset",
         show_alert=True,
     )
 
@@ -1533,7 +1648,7 @@ async def change_nickname_hint(callback: CallbackQuery, callback_data: NicknameC
 @router.callback_query(GenderCallback.filter(F.value == "menu"))
 async def gender_menu(callback: CallbackQuery, callback_data: GenderCallback):
     if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
     user_id = callback_data.user_id or callback.from_user.id
     async with get_db() as db:
@@ -1550,7 +1665,7 @@ async def gender_menu(callback: CallbackQuery, callback_data: GenderCallback):
 @router.callback_query(GenderCallback.filter(F.value != "menu"))
 async def gender_set(callback: CallbackQuery, callback_data: GenderCallback):
     if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
     user_id = callback_data.user_id or callback.from_user.id
     value = callback_data.value
@@ -1716,13 +1831,42 @@ async def switch_top(callback: CallbackQuery, callback_data: TopCallback):
             await callback.message.edit_text(
                 text, reply_markup=get_top_keyboard(callback_data.kind)
             )
-        except TelegramBadRequest:
-            await callback.message.answer(
-                text, reply_markup=get_top_keyboard(callback_data.kind)
-            )
-        await callback.answer()
+            await callback.answer()
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                await callback.answer("Данные не изменились. Попробуйте позже")
+            else:
+                await callback.message.answer(
+                    text, reply_markup=get_top_keyboard(callback_data.kind)
+                )
+                await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка переключения топа: {e}")
+        await callback.answer("⚠️ Произошла ошибка")
+
+
+@router.callback_query(TopRefreshCallback.filter())
+async def refresh_top(callback: CallbackQuery, callback_data: TopRefreshCallback):
+    if rate_limited(f"top:{callback.from_user.id}", limit=5, window=5):
+        await callback.answer("Слишком часто")
+        return
+    try:
+        text = await build_top_text(callback_data.kind, callback.from_user.id)
+        try:
+            await callback.message.edit_text(
+                text, reply_markup=get_top_keyboard(callback_data.kind)
+            )
+            await callback.answer("Обновлено")
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                await callback.answer("Данные не изменились. Попробуйте позже")
+            else:
+                await callback.message.answer(
+                    text, reply_markup=get_top_keyboard(callback_data.kind)
+                )
+                await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка обновления топа: {e}")
         await callback.answer("⚠️ Произошла ошибка")
 
 
@@ -1772,21 +1916,8 @@ async def show_collection(event):
     message = event.message if callback else event
     viewer_id = event.from_user.id
 
-    # Определяем владельца коллекции
+    # Только своя коллекция
     target_id = viewer_id
-    if (
-        not callback
-        and message.chat.type != "private"
-        and message.reply_to_message
-        and message.reply_to_message.from_user
-        and not message.reply_to_message.from_user.is_bot
-    ):
-        target_id = message.reply_to_message.from_user.id
-        await get_or_create_user(
-            target_id,
-            message.reply_to_message.from_user.username,
-            message.reply_to_message.from_user.full_name,
-        )
 
     try:
         await get_or_create_user(
@@ -1816,7 +1947,9 @@ async def show_collection(event):
 
 @router.callback_query(RaritySelectCallback.filter())
 async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySelectCallback):
-    # Просмотр коллекции доступен всем (кнопки привязаны к владельцу коллекции)
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
+        return
     user_id = callback_data.user_id or callback.from_user.id
     rarity, page = callback_data.rarity, callback_data.page
     try:
@@ -1876,7 +2009,9 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
 
 @router.callback_query(MainMenuCallback.filter())
 async def process_back_to_main(callback: CallbackQuery, callback_data: MainMenuCallback):
-    # Навигация по чужой коллекции разрешена (только просмотр)
+    if not _owner_check(callback, callback_data.user_id):
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
+        return
     target_id = callback_data.user_id or callback.from_user.id
     photo, caption, keyboard, _ = await render_collection(
         callback.message.bot, target_id
@@ -1890,6 +2025,18 @@ async def ignore_callback(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.callback_query(OkDeleteCallback.filter())
+async def ok_delete_callback(callback: CallbackQuery):
+    """Удаляет сообщение бота и (если есть) исходный запрос пользователя."""
+    await callback.answer()
+    bot_msg = callback.message
+    user_msg = None
+    if bot_msg and bot_msg.reply_to_message:
+        user_msg = bot_msg.reply_to_message
+    await _try_delete(bot_msg)
+    await _try_delete(user_msg)
+
+
 # ---------- Действия с карточкой ----------
 @router.callback_query(CardActionCallback.filter())
 async def handle_card_action(callback: CallbackQuery, callback_data: CardActionCallback):
@@ -1898,7 +2045,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
     target = callback_data.user_id or user_id
 
     if user_id != target:
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
 
     if rate_limited(f"card-action:{user_id}", limit=8, window=10):
@@ -1921,7 +2068,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
 
             time_passed = now - last_claim
             if time_passed >= COOLDOWN_SECONDS:
-                await callback.answer("⏳ Кулдаун уже прошёл — получайте бесплатно!", show_alert=True)
+                await callback.answer("⏳ Кулдаун уже прошёл — получайте бесплатно!")
                 return
 
             remaining = int(COOLDOWN_SECONDS - time_passed)
@@ -2136,29 +2283,21 @@ async def build_market_rarity_page(
 @router.message(F.text.lower().strip() == "маркет")
 @router.message(F.text.regexp(MARKET_CMD_RE))
 async def show_market(message: Message):
-    try:
-        target_user = message.from_user
-        if (
-            message.chat.type != "private"
-            and message.reply_to_message
-            and message.reply_to_message.from_user
-            and not message.reply_to_message.from_user.is_bot
-        ):
-            target_user = message.reply_to_message.from_user
-
-        await get_or_create_user(
-            target_user.id, target_user.username, target_user.full_name
+    if message.chat.type != "private":
+        await reply_ephemeral(
+            message,
+            "⚠️ <b>Маркет доступен только в личных сообщениях с ботом.</b>",
         )
-        if target_user.id != message.from_user.id:
-            await get_or_create_user(
-                message.from_user.id,
-                message.from_user.username,
-                message.from_user.full_name,
-            )
-
+        return
+    try:
+        await get_or_create_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.full_name,
+        )
         if rate_limited(f"market:{message.from_user.id}", limit=5, window=8):
             return
-        text, kb = await build_market_main(target_user.id)
+        text, kb = await build_market_main(message.from_user.id)
         await message.reply(text, reply_markup=kb)
     except Exception as e:
         logger.error(f"Ошибка маркета: {e}")
@@ -2168,7 +2307,7 @@ async def show_market(message: Message):
 @router.callback_query(MarketMainCallback.filter())
 async def market_main_callback(callback: CallbackQuery, callback_data: MarketMainCallback):
     if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
     try:
         target_id = callback_data.user_id or callback.from_user.id
@@ -2190,7 +2329,7 @@ async def market_main_callback(callback: CallbackQuery, callback_data: MarketMai
 @router.callback_query(MarketRarityCallback.filter())
 async def market_rarity_view(callback: CallbackQuery, callback_data: MarketRarityCallback):
     if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
     try:
         target_id = callback_data.user_id or callback.from_user.id
@@ -2238,11 +2377,11 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
     target_id = callback_data.user_id or user_id
 
     if user_id != target_id:
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
 
     if rate_limited(f"mkt-buy:{user_id}", limit=5, window=10):
-        await callback.answer("Слишком часто", show_alert=True)
+        await callback.answer("Слишком часто")
         return
 
     try:
@@ -2253,13 +2392,13 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
             )
             card = await cur.fetchone()
             if not card:
-                await callback.answer("❌ Карточка не найдена", show_alert=True)
+                await callback.answer("❌ Карточка не найдена")
                 return
 
             rarity = card["rarity"]
             price = MARKET_PRICES.get(rarity, 0)
             if price <= 0:
-                await callback.answer("❌ Эту карточку нельзя купить", show_alert=True)
+                await callback.answer("❌ Эту карточку нельзя купить")
                 return
 
             # Уже есть?
@@ -2269,7 +2408,7 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
             )
             owned = await cur.fetchone()
             if owned:
-                await callback.answer("✅ У вас уже есть эта карточка", show_alert=True)
+                await callback.answer("✅ У вас уже есть эта карточка")
                 return
 
             cur = await db.execute(
@@ -2280,8 +2419,7 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
 
             if gems < price:
                 await callback.answer(
-                    f"⚠️ Недостаточно кристаллов. Нужно {price} 💎, у вас {gems} 💎",
-                    show_alert=True,
+                    f"⚠️ Недостаточно кристаллов. Нужно {price} 💎, у вас {gems} 💎"
                 )
                 return
 
@@ -2327,7 +2465,7 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
         await callback.answer("✅ Куплено!")
     except Exception as e:
         logger.error(f"Ошибка покупки в маркете: {e}")
-        await callback.answer("⚠️ Ошибка покупки", show_alert=True)
+        await callback.answer("⚠️ Ошибка покупки")
 
 
 @router.callback_query(MarketExchangeCallback.filter())
@@ -2338,7 +2476,7 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
     target_id = callback_data.user_id or user_id
 
     if user_id != target_id:
-        await callback.answer("⚠️ Кнопка предназначена не для вас", show_alert=True)
+        await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
 
     try:
@@ -2396,7 +2534,7 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 await callback.answer("❌ Некорректное количество")
                 return
             if amount > 10_000:
-                await callback.answer("❌ Слишком много за раз", show_alert=True)
+                await callback.answer("❌ Слишком много за раз")
                 return
 
             cost = amount * GEM_TO_COINS
@@ -2408,8 +2546,7 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 coins = (row["coins"] or 0) if row else 0
                 if coins < cost:
                     await callback.answer(
-                        f"⚠️ Недостаточно монет. Нужно {fmt_num(cost)} 🪙",
-                        show_alert=True,
+                        f"⚠️ Недостаточно монет. Нужно {fmt_num(cost)} 🪙"
                     )
                     return
                 await db.execute(
@@ -2448,7 +2585,7 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
         await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка обмена: {e}")
-        await callback.answer("⚠️ Ошибка обмена", show_alert=True)
+        await callback.answer("⚠️ Ошибка обмена")
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
@@ -2953,7 +3090,7 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
         await call.answer()
     elif action == "unadmin":
         if target_id == call.from_user.id:
-            await call.answer("❌ Нельзя разжаловать себя", show_alert=True)
+            await call.answer("❌ Нельзя разжаловать себя")
             return
         async with get_db() as db:
             await db.execute("UPDATE users SET role = 'user' WHERE user_id = ?", (target_id,))
