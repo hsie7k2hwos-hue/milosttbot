@@ -21,11 +21,13 @@ import json
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qsl
 
 import aiosqlite
 from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -132,6 +134,28 @@ def get_user_from_header(x_telegram_init_data: Optional[str]) -> dict:
 
 
 # ── БД ──
+
+def card_photo_url(card_id: int, request_base: str | None = None) -> str:
+    """Относительный URL фото — фронт склеит с API_BASE."""
+    return f"/api/card/{card_id}/photo"
+
+
+def resolve_card_photo_file(card_id: int, photo_path: str | None = None) -> Path | None:
+    """Ищет файл фото на диске."""
+    if photo_path:
+        pp = Path(photo_path)
+        if pp.is_file():
+            return pp
+    # стандартная папка рядом с БД
+    data_root = Path(DB_NAME).resolve().parent
+    photo_dir = Path(os.getenv("CARDS_PHOTO_DIR", str(data_root / "card_photos")))
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        candidate = photo_dir / f"{int(card_id)}{ext}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 async def get_db():
     db = await aiosqlite.connect(DB_NAME)
     db.row_factory = aiosqlite.Row
@@ -168,6 +192,41 @@ async def ensure_user(db: aiosqlite.Connection, tg_user: dict) -> aiosqlite.Row:
 
 
 # ── Эндпоинты ──
+
+
+@app.get("/api/card/{card_id}/photo")
+async def api_card_photo(card_id: int):
+    """Публичная раздача фото карточки (без initData — только картинка)."""
+    db = await get_db()
+    try:
+        # ensure column
+        try:
+            await db.execute("ALTER TABLE cards ADD COLUMN photo_path TEXT")
+            await db.commit()
+        except Exception:
+            pass
+        cur = await db.execute(
+            "SELECT photo_path FROM cards WHERE id = ?", (card_id,)
+        )
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Карточка не найдена")
+        photo_path = row["photo_path"] if row["photo_path"] else None
+        path = resolve_card_photo_file(card_id, photo_path)
+        if not path:
+            raise HTTPException(404, "Фото ещё не сохранено на диск. Запусти миграцию /migrate_photos в боте.")
+        media = "image/jpeg"
+        suf = path.suffix.lower()
+        if suf == ".png":
+            media = "image/png"
+        elif suf == ".webp":
+            media = "image/webp"
+        elif suf == ".gif":
+            media = "image/gif"
+        return FileResponse(path, media_type=media, filename=path.name)
+    finally:
+        await db.close()
+
 
 @app.get("/health")
 async def health():
@@ -263,8 +322,15 @@ async def api_collection(
         owned_unique = (await cur.fetchone())[0]
 
         # Список карточек
+        # photo_path may be missing on old DBs
+        try:
+            await db.execute("ALTER TABLE cards ADD COLUMN photo_path TEXT")
+            await db.commit()
+        except Exception:
+            pass
+
         sql = """
-            SELECT c.id, c.name, c.rarity, c.photo_id, i.amount, i.claim_time
+            SELECT c.id, c.name, c.rarity, c.photo_id, c.photo_path, i.amount, i.claim_time
             FROM inventory i
             JOIN cards c ON i.card_id = c.id
             WHERE i.user_id = ?
@@ -281,14 +347,17 @@ async def api_collection(
         cards = []
         for row in rows:
             r = RARITIES.get(row["rarity"], {})
+            cid = row["id"]
+            has_photo = resolve_card_photo_file(cid, row["photo_path"] if "photo_path" in row.keys() else None) is not None
             cards.append({
-                "id": row["id"],
+                "id": cid,
                 "name": row["name"],
                 "rarity": row["rarity"],
                 "rarity_icon": r.get("icon", ""),
                 "rarity_name": r.get("name", row["rarity"]),
                 "reward": r.get("reward", 0),
                 "photo_id": row["photo_id"],
+                "photo_url": card_photo_url(cid) if has_photo else None,
                 "amount": row["amount"],
                 "claim_time": row["claim_time"],
             })
@@ -557,7 +626,7 @@ async def api_market_buy(
         await ensure_user(db, tg_user)
 
         cur = await db.execute(
-            "SELECT id, name, rarity, photo_id FROM cards WHERE id = ?",
+            "SELECT id, name, rarity, photo_id, photo_path FROM cards WHERE id = ?",
             (card_id,),
         )
         card = await cur.fetchone()
@@ -681,7 +750,7 @@ async def api_card(
     db = await get_db()
     try:
         cur = await db.execute(
-            "SELECT id, name, rarity, photo_id FROM cards WHERE id = ?",
+            "SELECT id, name, rarity, photo_id, photo_path FROM cards WHERE id = ?",
             (card_id,),
         )
         card = await cur.fetchone()
@@ -695,6 +764,11 @@ async def api_card(
         inv = await cur.fetchone()
         r = RARITIES.get(card["rarity"], {})
 
+        try:
+            _pp = card["photo_path"]
+        except (KeyError, IndexError, TypeError):
+            _pp = None
+        has_photo = resolve_card_photo_file(card["id"], _pp) is not None
         return {
             "id": card["id"],
             "name": card["name"],
@@ -703,6 +777,7 @@ async def api_card(
             "rarity_name": r.get("name", card["rarity"]),
             "reward": r.get("reward", 0),
             "photo_id": card["photo_id"],
+            "photo_url": card_photo_url(card["id"]) if has_photo else None,
             "owned": inv is not None,
             "amount": inv["amount"] if inv else 0,
             "claim_time": inv["claim_time"] if inv else None,
