@@ -57,8 +57,14 @@ NICKNAME_COST = 100
 DUPLICATE_CHANCE = 0.25
 DUPLICATE_REFUND = 0.5
 
-GEM_TO_COINS = 100  # 1 💎 = 100 🪙 (покупка кристаллов)
-COINS_FROM_GEM = 80  # 1 💎 → 80 🪙 (обратный обмен, комиссия)
+GEM_TO_COINS = 100
+MARKET_PRICES = {
+    "common": 1,
+    "rare": 3,
+    "epic": 8,
+    "mythical": 20,
+    "legendary": 50,
+}
 GEM_REWARDS = {
     "mythical": 1,
     "legendary": 2,
@@ -67,14 +73,6 @@ STREAK_GEM_BONUSES = [(7, 5), (30, 20)]
 
 GROUP_AUTODELETE_SECONDS = 30
 STREAK_EXPIRE_SECONDS = 24 * 3600
-TRANSACTION_TTL_SECONDS = 7 * 24 * 3600  # история транзакций 1 неделя
-MARKET_MAX_LISTINGS_PER_USER = 30
-MARKET_MIN_PRICE = 1
-MARKET_MAX_PRICE = 10_000
-TRADE_EXPIRE_SECONDS = 24 * 3600
-REMINDER_COOLDOWN_SECONDS = 45 * 60  # не чаще раза в 45 мин на тип
-STREAK_WARN_BEFORE = 3 * 3600  # предупреждение за 3 часа до сгорания
-CD_WARN_BEFORE = 15 * 60  # напоминание за 15 мин до конца кулдауна
 
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 
@@ -185,20 +183,17 @@ def instant_cost(remaining_seconds: int) -> int:
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
 
 
-# Результат кубика Telegram 🎲: value 1..6 → дельта монет
-DICE_VALUE_TO_COINS = {
-    1: -10,
-    2: -5,
-    3: 0,
-    4: 3,
-    5: 7,
-    6: 10,
-}
-
-
-def dice_value_to_coins(value: int) -> int:
-    """Преобразует value кубика Telegram (1–6) в изменение монет."""
-    return DICE_VALUE_TO_COINS.get(int(value), 0)
+def roll_dice_coins() -> int:
+    values = list(range(-10, 11))
+    weights = []
+    for v in values:
+        if v > 0:
+            weights.append(4 + v)
+        elif v == 0:
+            weights.append(6)
+        else:
+            weights.append(2)
+    return random.choices(values, weights=weights, k=1)[0]
 
 
 def role_display(role: str) -> str:
@@ -273,6 +268,27 @@ class AdminUserViewCallback(CallbackData, prefix="admin_user_view"):
 class AdminUserActionCallback(CallbackData, prefix="admin_user_action"):
     action: str
     user_id: int
+
+
+class MarketRarityCallback(CallbackData, prefix="mkt_rarity"):
+    rarity: str
+    page: int = 0
+    user_id: int = 0
+
+
+class MarketBuyCallback(CallbackData, prefix="mkt_buy"):
+    card_id: int
+    user_id: int = 0
+
+
+class MarketExchangeCallback(CallbackData, prefix="mkt_ex"):
+    action: str
+    amount: int = 0
+    user_id: int = 0
+
+
+class MarketMainCallback(CallbackData, prefix="mkt_main"):
+    user_id: int = 0
 
 
 class OkDeleteCallback(CallbackData, prefix="ok_del"):
@@ -369,140 +385,6 @@ async def init_db():
         ):
             await db.execute(sql)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS market_listings (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                seller_id   INTEGER NOT NULL,
-                card_id     INTEGER NOT NULL,
-                amount      INTEGER NOT NULL DEFAULT 1,
-                price_gems  INTEGER NOT NULL,
-                created_at  INTEGER NOT NULL,
-                FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE,
-                FOREIGN KEY (seller_id) REFERENCES users (user_id) ON DELETE CASCADE
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id         INTEGER NOT NULL,
-                type            TEXT NOT NULL,
-                coins_delta     INTEGER DEFAULT 0,
-                gems_delta      INTEGER DEFAULT 0,
-                card_id         INTEGER,
-                card_amount     INTEGER DEFAULT 0,
-                related_user_id INTEGER,
-                description     TEXT,
-                created_at      INTEGER NOT NULL
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                from_user           INTEGER NOT NULL,
-                to_user             INTEGER NOT NULL,
-                status              TEXT NOT NULL DEFAULT 'pending',
-                offer_coins         INTEGER DEFAULT 0,
-                offer_gems          INTEGER DEFAULT 0,
-                offer_card_id       INTEGER,
-                offer_card_amount   INTEGER DEFAULT 0,
-                request_coins       INTEGER DEFAULT 0,
-                request_gems        INTEGER DEFAULT 0,
-                request_card_id     INTEGER,
-                request_card_amount INTEGER DEFAULT 0,
-                created_at          INTEGER NOT NULL,
-                expires_at          INTEGER NOT NULL
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS gifts (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                from_user       INTEGER NOT NULL,
-                to_user         INTEGER NOT NULL,
-                coins           INTEGER DEFAULT 0,
-                gems            INTEGER DEFAULT 0,
-                card_id         INTEGER,
-                card_amount     INTEGER DEFAULT 0,
-                message         TEXT,
-                created_at      INTEGER NOT NULL
-            )
-        """)
-
-        # Если таблицы trades/gifts созданы со старой/пустой схемой — пересоздаём
-        async def _table_columns(table_name: str):
-            cur = await db.execute(f"PRAGMA table_info({table_name})")
-            return {row[1] for row in await cur.fetchall()}
-
-        trades_cols = await _table_columns("trades")
-        if trades_cols and "to_user" not in trades_cols:
-            logger.warning("Таблица trades без to_user — пересоздаём")
-            await db.execute("DROP TABLE IF EXISTS trades")
-            await db.execute("""
-                CREATE TABLE trades (
-                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                    from_user           INTEGER NOT NULL,
-                    to_user             INTEGER NOT NULL,
-                    status              TEXT NOT NULL DEFAULT 'pending',
-                    offer_coins         INTEGER DEFAULT 0,
-                    offer_gems          INTEGER DEFAULT 0,
-                    offer_card_id       INTEGER,
-                    offer_card_amount   INTEGER DEFAULT 0,
-                    request_coins       INTEGER DEFAULT 0,
-                    request_gems        INTEGER DEFAULT 0,
-                    request_card_id     INTEGER,
-                    request_card_amount INTEGER DEFAULT 0,
-                    created_at          INTEGER NOT NULL,
-                    expires_at          INTEGER NOT NULL
-                )
-            """)
-
-        gifts_cols = await _table_columns("gifts")
-        if gifts_cols and "to_user" not in gifts_cols:
-            logger.warning("Таблица gifts без to_user — пересоздаём")
-            await db.execute("DROP TABLE IF EXISTS gifts")
-            await db.execute("""
-                CREATE TABLE gifts (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    from_user       INTEGER NOT NULL,
-                    to_user         INTEGER NOT NULL,
-                    coins           INTEGER DEFAULT 0,
-                    gems            INTEGER DEFAULT 0,
-                    card_id         INTEGER,
-                    card_amount     INTEGER DEFAULT 0,
-                    message         TEXT,
-                    created_at      INTEGER NOT NULL
-                )
-            """)
-
-        market_cols = await _table_columns("market_listings")
-        if market_cols and "price_gems" not in market_cols:
-            logger.warning("Таблица market_listings со старой схемой — пересоздаём")
-            await db.execute("DROP TABLE IF EXISTS market_listings")
-            await db.execute("""
-                CREATE TABLE market_listings (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    seller_id   INTEGER NOT NULL,
-                    card_id     INTEGER NOT NULL,
-                    amount      INTEGER NOT NULL DEFAULT 1,
-                    price_gems  INTEGER NOT NULL,
-                    created_at  INTEGER NOT NULL,
-                    FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE,
-                    FOREIGN KEY (seller_id) REFERENCES users (user_id) ON DELETE CASCADE
-                )
-            """)
-
-        for sql in (
-            "CREATE INDEX IF NOT EXISTS idx_market_seller ON market_listings(seller_id)",
-            "CREATE INDEX IF NOT EXISTS idx_market_card ON market_listings(card_id)",
-            "CREATE INDEX IF NOT EXISTS idx_tx_user_time ON transactions(user_id, created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_tx_created ON transactions(created_at)",
-            "CREATE INDEX IF NOT EXISTS idx_trades_to ON trades(to_user, status)",
-            "CREATE INDEX IF NOT EXISTS idx_trades_from ON trades(from_user, status)",
-        ):
-            try:
-                await db.execute(sql)
-            except aiosqlite.OperationalError as e:
-                logger.warning("index skip: %s (%s)", sql, e)
-
         for table, column, definition in [
             ("users", "registration", "INTEGER DEFAULT 0"),
             ("users", "streak", "INTEGER DEFAULT 0"),
@@ -511,9 +393,6 @@ async def init_db():
             ("users", "gender", "TEXT DEFAULT 'none'"),
             ("users", "gems", "INTEGER DEFAULT 0"),
             ("users", "last_dice", "INTEGER DEFAULT 0"),
-            ("users", "last_cd_remind", "INTEGER DEFAULT 0"),
-            ("users", "last_streak_remind", "INTEGER DEFAULT 0"),
-            ("users", "pm_ok", "INTEGER DEFAULT 0"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("inventory", "amount", "INTEGER DEFAULT 1"),
             ("cards", "photo_path", "TEXT"),
@@ -614,53 +493,6 @@ async def get_user_row(user_id: int):
         return await cur.fetchone()
 
 
-async def log_transaction(
-    user_id: int,
-    tx_type: str,
-    *,
-    coins_delta: int = 0,
-    gems_delta: int = 0,
-    card_id: int = None,
-    card_amount: int = 0,
-    related_user_id: int = None,
-    description: str = None,
-    db=None,
-):
-    """Пишет запись в историю. Можно передать открытый db или откроет свой."""
-    now = int(time.time())
-    payload = (
-        user_id, tx_type, coins_delta, gems_delta,
-        card_id, card_amount, related_user_id, description, now,
-    )
-    sql = """INSERT INTO transactions
-             (user_id, type, coins_delta, gems_delta, card_id, card_amount,
-              related_user_id, description, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-    if db is not None:
-        await db.execute(sql, payload)
-    else:
-        async with get_db() as _db:
-            await _db.execute(sql, payload)
-
-
-async def cleanup_old_transactions():
-    cutoff = int(time.time()) - TRANSACTION_TTL_SECONDS
-    async with get_db() as db:
-        cur = await db.execute(
-            "DELETE FROM transactions WHERE created_at < ?", (cutoff,)
-        )
-        return cur.rowcount
-
-
-async def mark_pm_ok(user_id: int):
-    """Отметить, что пользователь писал боту в ЛС (можно слать напоминания)."""
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE users SET pm_ok = 1 WHERE user_id = ? AND (pm_ok IS NULL OR pm_ok = 0)",
-            (user_id,),
-        )
-
-
 def _owner_check(callback: CallbackQuery, target_user_id: int) -> bool:
     if target_user_id and callback.from_user.id != target_user_id:
         return False
@@ -675,10 +507,6 @@ USER_COMMANDS = [
     BotCommand(command="collection", description="🃏 Моя коллекция"),
     BotCommand(command="market", description="🛒 Маркет"),
     BotCommand(command="top", description="🏆 Топ игроков"),
-    BotCommand(command="trade", description="🤝 Трейд"),
-    BotCommand(command="gift", description="🎁 Подарок"),
-    BotCommand(command="trades", description="📋 Мои трейды"),
-    BotCommand(command="history", description="📜 История операций"),
     BotCommand(command="help", description="❓ Помощь"),
     BotCommand(command="nickname", description="✏️ Сменить ник"),
     BotCommand(command="gender", description="⚧ Выбрать пол"),
@@ -1084,19 +912,6 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
             balance = row_bal["coins"]
             gems_balance = row_bal["gems"] or 0
 
-            desc = (
-                f"{'Дубликат' if is_duplicate else 'Новая'} · {card_name} ({selected_rarity})"
-            )
-            await log_transaction(
-                user_id, "claim",
-                coins_delta=coins_earned,
-                gems_delta=gems_earned,
-                card_id=card_id,
-                card_amount=1,
-                description=desc,
-                db=db,
-            )
-
             return {
                 "id": card_id, "name": card_name, "photo_id": photo_id,
                 "rarity": selected_rarity, "coins_earned": coins_earned,
@@ -1165,56 +980,12 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
                 "WHERE user_id = ?",
                 (new_streak, now_ts, new_bonus, new_bonus, gem_bonus, user_id),
             )
-            if new_bonus or gem_bonus:
-                await log_transaction(
-                    user_id, "streak",
-                    coins_delta=new_bonus,
-                    gems_delta=gem_bonus,
-                    description=f"Стрик {new_streak} дн.",
-                    db=db,
-                )
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
             new_balance = (await cur.fetchone())[0]
             return new_streak, new_bonus, new_balance, gem_bonus
     except Exception as e:
         logger.error(f"Ошибка обновления стрика: {e}")
         return 0, 0, 0, 0
-
-
-async def burn_expired_streaks() -> int:
-    """Сбрасывает стрики у тех, кто не получал карточку дольше STREAK_EXPIRE_SECONDS."""
-    now_ts = int(time.time())
-    cutoff = now_ts - STREAK_EXPIRE_SECONDS
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                """SELECT user_id, streak FROM users
-                   WHERE streak > 0
-                     AND last_claim > 0
-                     AND last_claim < ?
-                     AND (last_streak_date IS NULL OR last_streak_date < ?)""",
-                (cutoff, cutoff),
-            )
-            rows = await cur.fetchall()
-            if not rows:
-                return 0
-            await db.execute(
-                """UPDATE users SET streak = 0, last_streak_date = 0, streak_bonus = 0
-                   WHERE streak > 0
-                     AND last_claim > 0
-                     AND last_claim < ?""",
-                (cutoff,),
-            )
-            for row in rows:
-                await log_transaction(
-                    row["user_id"], "streak_burn",
-                    description=f"Стрик сгорел ({row['streak']} дн.)",
-                    db=db,
-                )
-            return len(rows)
-    except Exception as e:
-        logger.error(f"burn_expired_streaks: {e}")
-        return 0
 
 
 # ================= RATE LIMIT =================
@@ -1318,7 +1089,6 @@ async def cmd_start(message: Message):
         await get_or_create_user(
             message.from_user.id, message.from_user.username, message.from_user.full_name
         )
-        await mark_pm_ok(message.from_user.id)
         if not await check_not_banned(message):
             return
 
@@ -1387,9 +1157,7 @@ HELP_PAGES = [
             "<b>🛒  Маркет</b>\n"
             "<blockquote>"
             "«🛒 Маркет» · /market · «мряу маркет»\n"
-            "<b>Только в личных сообщениях</b>\n"
-            "P2P: выставляйте карточки (включая дубликаты) за кристаллы,\n"
-            "покупайте объявления других игроков"
+            "<b>Только в личных сообщениях</b>"
             "</blockquote>"
         ),
     },
@@ -1399,9 +1167,8 @@ HELP_PAGES = [
             "<b>🔥  Стрик</b>\n"
             "<blockquote>"
             "Заходите каждый день и получайте карточку — стрик растёт.\n"
-            "Пропуск 24 часов — стрик <b>сгорает автоматически</b>.\n"
-            "За стрик начисляются бонусные монеты.\n"
-            "Бот может напомнить в ЛС, если стрик вот-вот сгорит."
+            "Пропуск 24 часов — стрик сбрасывается.\n"
+            "За стрик начисляются бонусные монеты."
             "</blockquote>\n\n"
             "<b>💎  Кристаллы за стрик</b>\n"
             "<blockquote>"
@@ -1418,49 +1185,29 @@ HELP_PAGES = [
         ),
     },
     {
-        "title": "📖  Маркет, обмен, кубик",
+        "title": "📖  Маркет и кубик",
         "body": (
-            "<b>🛒  Маркет (P2P)</b>\n"
+            "<b>🛒  Покупка карточек</b>\n"
             "<blockquote>"
-            "Выставите карточку из коллекции за кристаллы.\n"
-            "Можно продать часть дубликатов (например 2 из 3).\n"
-            "Другие игроки покупают — карточка уходит им, 💎 вам.\n"
-            "Снять объявление — карточки возвращаются."
+            "В маркете (только ЛС) выберите редкость\n"
+            "и купите недостающую карточку за кристаллы."
             "</blockquote>\n\n"
-            "<b>💱  Обмен</b>\n"
+            "<b>💎  Цены</b>\n"
+            "<blockquote>"
+            + "\n".join(
+                f"{v['icon']}  {v['name']}  ·  {MARKET_PRICES[k]} 💎"
+                for k, v in RARITIES.items()
+            )
+            + "</blockquote>\n\n"
+            "<b>💱  Обмен на кристаллы</b>\n"
             f"<blockquote>"
-            f"🪙 → 💎:  1 💎 = {GEM_TO_COINS} 🪙\n"
-            f"💎 → 🪙:  1 💎 → {COINS_FROM_GEM} 🪙\n"
-            f"Маркет → «Обмен»"
+            f"Маркет или профиль → «Купить кристаллы»\n"
+            f"Курс:  1 💎  =  {GEM_TO_COINS} 🪙"
             "</blockquote>\n\n"
             "<b>🎲  Кубик</b>\n"
             f"<blockquote>"
             f"«мряу кубик» · раз в 10 мин · от {DICE_MIN_BALANCE} 🪙\n"
-            "Результат берётся с реального кубика Telegram (1–6):\n"
-            "1→−10 · 2→−5 · 3→0 · 4→+3 · 5→+7 · 6→+10 🪙"
-            "</blockquote>"
-        ),
-    },
-    {
-        "title": "📖  Трейды, гифты, история",
-        "body": (
-            "<b>🤝  Трейд</b>\n"
-            "<blockquote>"
-            "<code>/trade USERID</code> — предложить обмен\n"
-            "Монеты, кристаллы, карточки в обе стороны.\n"
-            "<code>/trades</code> — входящие/исходящие (принять/отклонить)\n"
-            "Срок предложения — 24 часа. Только ЛС."
-            "</blockquote>\n\n"
-            "<b>🎁  Подарок</b>\n"
-            "<blockquote>"
-            "<code>/gift USERID</code> — безвозмездно отправить\n"
-            "монеты, кристаллы или карточки. Только ЛС."
-            "</blockquote>\n\n"
-            "<b>📜  История</b>\n"
-            "<blockquote>"
-            "<code>/history</code> · <code>/transactions</code>\n"
-            "Все операции: выдача, стрик, маркет, обмен, трейд, гифт…\n"
-            "Хранится 7 дней, затем удаляется."
+            "Выпадает от −10 до +10 монет (шанс выигрыша выше)"
             "</blockquote>"
         ),
     },
@@ -1733,58 +1480,43 @@ async def dice_handler(message: Message):
             balance = (row["coins"] or 0) if row else 0
             last_dice = (row["last_dice"] or 0) if row else 0
 
-        if balance < DICE_MIN_BALANCE:
-            await reply_ephemeral(
-                message,
-                f"⚠️  <b>Недостаточно монет</b>\n\n"
-                f"Нужно минимум  <b>{fmt_num(DICE_MIN_BALANCE)} 🪙</b>\n"
-                f"У вас  ·  <b>{fmt_num(balance)} 🪙</b>",
-            )
-            return
+            if balance < DICE_MIN_BALANCE:
+                await reply_ephemeral(
+                    message,
+                    f"⚠️  <b>Недостаточно монет</b>\n\n"
+                    f"Нужно минимум  <b>{fmt_num(DICE_MIN_BALANCE)} 🪙</b>\n"
+                    f"У вас  ·  <b>{fmt_num(balance)} 🪙</b>",
+                )
+                return
 
-        time_passed = now - last_dice
-        if last_dice > 0 and time_passed < DICE_COOLDOWN_SECONDS:
-            remaining = DICE_COOLDOWN_SECONDS - time_passed
-            m, s = remaining // 60, remaining % 60
-            if m > 0:
-                time_str = f"{m} мин {s} сек" if s else f"{m} мин"
-            else:
-                time_str = f"{s} сек"
-            await reply_ephemeral(
-                message,
-                f"⏳  <b>{mention}</b>\n\n"
-                f"Кубик можно бросить через  <b>{time_str}</b>",
-            )
-            return
+            time_passed = now - last_dice
+            if last_dice > 0 and time_passed < DICE_COOLDOWN_SECONDS:
+                remaining = DICE_COOLDOWN_SECONDS - time_passed
+                m, s = remaining // 60, remaining % 60
+                if m > 0:
+                    time_str = f"{m} мин {s} сек" if s else f"{m} мин"
+                else:
+                    time_str = f"{s} сек"
+                await reply_ephemeral(
+                    message,
+                    f"⏳  <b>{mention}</b>\n\n"
+                    f"Кубик можно бросить через  <b>{time_str}</b>",
+                )
+                return
 
-        # Кубик Telegram: анимация → value 1..6, от него считаем монеты
-        spin_msg = await message.reply_dice(emoji="🎲")
-        await asyncio.sleep(DICE_SPIN_DELAY)
+            delta = roll_dice_coins()
+            new_balance = balance + delta
+            if new_balance < 0:
+                new_balance = 0
+                delta = new_balance - balance
 
-        dice_value = 1
-        try:
-            if spin_msg.dice and spin_msg.dice.value:
-                dice_value = int(spin_msg.dice.value)
-        except Exception as e:
-            logger.warning(f"dice value read: {e}")
-
-        delta = dice_value_to_coins(dice_value)
-        new_balance = balance + delta
-        if new_balance < 0:
-            new_balance = 0
-            delta = new_balance - balance
-
-        async with get_db() as db:
             await db.execute(
                 "UPDATE users SET coins = ?, last_dice = ? WHERE user_id = ?",
                 (new_balance, now, user_id),
             )
-            await log_transaction(
-                user_id, "dice",
-                coins_delta=delta,
-                description=f"Кубик · выпало {dice_value}",
-                db=db,
-            )
+
+        spin_msg = await message.reply_dice(emoji="🎲")
+        await asyncio.sleep(DICE_SPIN_DELAY)
 
         if delta > 0:
             delta_str = f"+{fmt_num(delta)}"
@@ -1798,7 +1530,6 @@ async def dice_handler(message: Message):
 
         result_caption = (
             f"🎲  <b>{title}</b>\n\n"
-            f"На кубике  ·  <b>{dice_value}</b>\n"
             f"Результат  ·  <b>{delta_str} 🪙</b>\n"
             f"Баланс     ·  <b>{fmt_num(new_balance)}</b>"
         )
@@ -2016,12 +1747,6 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
             await db.execute(
                 "UPDATE users SET nickname = ?, coins = coins - ? WHERE user_id = ?",
                 (new_nick, NICKNAME_COST, user_id),
-            )
-            await log_transaction(
-                user_id, "nickname",
-                coins_delta=-NICKNAME_COST,
-                description=f"Смена ника → {new_nick}",
-                db=db,
             )
         await state.clear()
         await callback.message.edit_text(
@@ -2518,12 +2243,6 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                     "UPDATE users SET coins = coins - ?, last_claim = ? WHERE user_id = ?",
                     (cost, now, user_id),
                 )
-                await log_transaction(
-                    user_id, "instant_claim",
-                    coins_delta=-cost,
-                    description=f"Мгновенная карточка · −{cost}🪙",
-                    db=db,
-                )
 
             card, status = await issue_card(user_id, check_cooldown=False)
 
@@ -2570,68 +2289,7 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
         await callback.answer("⚠️ Произошла ошибка")
 
 
-# ================= МАРКЕТ (P2P доска объявлений) =================
-# Пользователи выставляют свои карточки (в т.ч. дубликаты) за кристаллы.
-# Покупка переносит карточку покупателю, кристаллы — продавцу.
-
-class MarketListCallback(CallbackData, prefix="mkt_list"):
-    page: int = 0
-    rarity: str = "all"
-    user_id: int = 0
-
-
-class MarketMyCallback(CallbackData, prefix="mkt_my"):
-    page: int = 0
-    user_id: int = 0
-
-
-class MarketViewCallback(CallbackData, prefix="mkt_view"):
-    listing_id: int
-    user_id: int = 0
-
-
-class MarketBuyListingCallback(CallbackData, prefix="mkt_buyl"):
-    listing_id: int
-    user_id: int = 0
-
-
-class MarketCancelCallback(CallbackData, prefix="mkt_cancel"):
-    listing_id: int
-    user_id: int = 0
-
-
-class MarketSellMenuCallback(CallbackData, prefix="mkt_sell"):
-    user_id: int = 0
-    page: int = 0
-
-
-class MarketSellCardCallback(CallbackData, prefix="mkt_scard"):
-    card_id: int
-    user_id: int = 0
-
-
-class MarketSellAmtCallback(CallbackData, prefix="mkt_samt"):
-    card_id: int
-    amount: int
-    user_id: int = 0
-
-
-class MarketMainCallback(CallbackData, prefix="mkt_main"):
-    user_id: int = 0
-
-
-class MarketExchangeCallback(CallbackData, prefix="mkt_ex"):
-    action: str
-    amount: int = 0
-    user_id: int = 0
-
-
-class MarketSellPriceSG(StatesGroup):
-    card_id = State()
-    amount = State()
-    price = State()
-
-
+# ================= МАРКЕТ =================
 async def get_user_gems(user_id: int) -> int:
     async with get_db() as db:
         cur = await db.execute(
@@ -2641,264 +2299,136 @@ async def get_user_gems(user_id: int) -> int:
         return (row["gems"] or 0) if row else 0
 
 
-async def inventory_amount(user_id: int, card_id: int) -> int:
-    async with get_db() as db:
-        cur = await db.execute(
-            "SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?",
-            (user_id, card_id),
-        )
-        row = await cur.fetchone()
-        return (row["amount"] or 0) if row else 0
-
-
-async def reduce_inventory(db, user_id: int, card_id: int, amount: int) -> bool:
-    cur = await db.execute(
-        "SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?",
-        (user_id, card_id),
-    )
-    row = await cur.fetchone()
-    if not row or (row["amount"] or 0) < amount:
-        return False
-    left = row["amount"] - amount
-    if left <= 0:
-        await db.execute(
-            "DELETE FROM inventory WHERE user_id = ? AND card_id = ?",
-            (user_id, card_id),
-        )
-    else:
-        await db.execute(
-            "UPDATE inventory SET amount = ? WHERE user_id = ? AND card_id = ?",
-            (left, user_id, card_id),
-        )
-    return True
-
-
-async def add_inventory(db, user_id: int, card_id: int, amount: int = 1):
-    now = int(time.time())
-    await db.execute(
-        """INSERT INTO inventory (user_id, card_id, claim_time, amount)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(user_id, card_id) DO UPDATE SET
-             amount = amount + ?,
-             claim_time = ?""",
-        (user_id, card_id, now, amount, amount, now),
-    )
-
-
 async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
     gems = await get_user_gems(user_id)
     async with get_db() as db:
         cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         coins = (row["coins"] or 0) if row else 0
-        cur = await db.execute("SELECT COUNT(*) FROM market_listings")
-        total_listings = (await cur.fetchone())[0]
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM market_listings WHERE seller_id = ?", (user_id,)
-        )
-        my_listings = (await cur.fetchone())[0]
+
+        missing_by_rarity = {}
+        for r_key in RARITIES:
+            cur = await db.execute(
+                """SELECT COUNT(*) FROM cards c
+                   WHERE c.rarity = ?
+                     AND c.id NOT IN (
+                         SELECT card_id FROM inventory WHERE user_id = ?
+                     )""",
+                (r_key, user_id),
+            )
+            missing_by_rarity[r_key] = (await cur.fetchone())[0]
 
     nickname = await get_user_nickname(user_id)
     text = (
         f"🛒  <b>Маркет</b>\n"
         f"╭ {esc(nickname)}\n"
         f"╰ 💎 <b>{fmt_num(gems)}</b>  ·  🪙 <b>{fmt_num(coins)}</b>\n\n"
-        f"Объявлений  ·  <b>{fmt_num(total_listings)}</b>\n"
-        f"Ваших       ·  <b>{fmt_num(my_listings)}</b>\n\n"
-        f"<i>P2P: выставляйте карточки (в т.ч. дубликаты) за кристаллы.\n"
-        f"Курс: 1 💎 = {GEM_TO_COINS} 🪙 · обратно 1 💎 → {COINS_FROM_GEM} 🪙</i>"
+        f"<i>Курс:  1 💎  =  {GEM_TO_COINS} 🪙</i>\n\n"
+        f"Выберите редкость — купите недостающие карточки:"
     )
+
     b = InlineKeyboardBuilder()
+    for r_key, r_info in RARITIES.items():
+        missing = missing_by_rarity.get(r_key, 0)
+        price = MARKET_PRICES.get(r_key, 0)
+        if missing > 0:
+            label = (
+                f"{r_info['icon']}  {r_info['name']}  ·  "
+                f"{fmt_num(missing)} шт · {price} 💎"
+            )
+        else:
+            label = f"{r_info['icon']}  {r_info['name']}  ·  собрано ✓"
+        b.button(
+            text=label,
+            callback_data=MarketRarityCallback(rarity=r_key, page=0, user_id=user_id).pack(),
+        )
     b.button(
-        text="🔍  Смотреть объявления",
-        callback_data=MarketListCallback(page=0, rarity="all", user_id=user_id).pack(),
-    )
-    b.button(
-        text="📤  Выставить карточку",
-        callback_data=MarketSellMenuCallback(user_id=user_id, page=0).pack(),
-    )
-    b.button(
-        text="📋  Мои объявления",
-        callback_data=MarketMyCallback(page=0, user_id=user_id).pack(),
-    )
-    b.button(
-        text="💱  Обмен монет ↔ кристаллы",
+        text="💎  Купить кристаллы за монеты",
         callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack(),
     )
     b.adjust(1)
     return text, b.as_markup()
 
 
-async def build_market_listings_page(
-    user_id: int, page: int = 0, rarity: str = "all"
-) -> Tuple[str, InlineKeyboardMarkup]:
-    per_page = 5
+async def build_market_rarity_page(
+    user_id: int, rarity: str, page: int = 0
+) -> Tuple[str, InlineKeyboardMarkup, Optional[dict]]:
+    price = MARKET_PRICES.get(rarity, 0)
+    r_info = RARITIES.get(rarity, {})
+
     async with get_db() as db:
-        if rarity != "all" and rarity in RARITIES:
-            cur = await db.execute(
-                """SELECT COUNT(*) FROM market_listings m
-                   JOIN cards c ON m.card_id = c.id WHERE c.rarity = ?""",
-                (rarity,),
-            )
-        else:
-            cur = await db.execute("SELECT COUNT(*) FROM market_listings")
-        total = (await cur.fetchone())[0]
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(0, min(page, total_pages - 1))
-        offset = page * per_page
+        cur = await db.execute(
+            """SELECT c.id, c.name, c.photo_id, c.rarity
+               FROM cards c
+               WHERE c.rarity = ?
+                 AND c.id NOT IN (
+                     SELECT card_id FROM inventory WHERE user_id = ?
+                 )
+               ORDER BY c.id ASC""",
+            (rarity, user_id),
+        )
+        cards = await cur.fetchall()
+        gems = await get_user_gems(user_id)
 
-        if rarity != "all" and rarity in RARITIES:
-            cur = await db.execute(
-                """SELECT m.id, m.seller_id, m.card_id, m.amount, m.price_gems,
-                          m.created_at, c.name, c.rarity, c.photo_id, u.nickname
-                   FROM market_listings m
-                   JOIN cards c ON m.card_id = c.id
-                   JOIN users u ON m.seller_id = u.user_id
-                   WHERE c.rarity = ?
-                   ORDER BY m.created_at DESC
-                   LIMIT ? OFFSET ?""",
-                (rarity, per_page, offset),
-            )
-        else:
-            cur = await db.execute(
-                """SELECT m.id, m.seller_id, m.card_id, m.amount, m.price_gems,
-                          m.created_at, c.name, c.rarity, c.photo_id, u.nickname
-                   FROM market_listings m
-                   JOIN cards c ON m.card_id = c.id
-                   JOIN users u ON m.seller_id = u.user_id
-                   ORDER BY m.created_at DESC
-                   LIMIT ? OFFSET ?""",
-                (per_page, offset),
-            )
-        rows = await cur.fetchall()
+    if not cards:
+        text = (
+            f"{r_info.get('icon', '')}  <b>{r_info.get('name', rarity)}</b>\n\n"
+            f"Все карточки этой редкости уже у вас 🎉"
+        )
+        b = InlineKeyboardBuilder()
+        b.button(text="‹  Назад в маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
+        b.adjust(1)
+        return text, b.as_markup(), None
 
-    r_filter = RARITIES.get(rarity, {})
-    title_extra = f" · {r_filter.get('icon', '')} {r_filter.get('name', '')}" if rarity != "all" else ""
+    total = len(cards)
+    page = max(0, min(page, total - 1))
+    card = cards[page]
+
     text = (
-        f"🔍  <b>Объявления</b>{title_extra}\n"
-        f"<code>{'─' * 18}</code>\n"
-        f"Стр. <b>{page + 1}</b> / {total_pages}  ·  всего <b>{fmt_num(total)}</b>\n\n"
+        f"🛒  <b>Маркет</b>  ·  {r_info.get('icon', '')} {r_info.get('name', rarity)}\n\n"
+        f"╭ <b>{esc(card['name'])}</b>\n"
+        f"╰ 💎  <b>{fmt_num(price)}</b>  ·  баланс {fmt_num(gems)}\n\n"
+        f"<i>{page + 1} / {total}</i>"
     )
-    if not rows:
-        text += "Пока нет объявлений. Выставьте свою карточку!"
 
     b = InlineKeyboardBuilder()
-    for row in rows:
-        r = RARITIES.get(row["rarity"], {})
-        seller = row["nickname"] or f"User{row['seller_id']}"
-        label = (
-            f"{r.get('icon', '•')} {row['name'][:18]} ×{row['amount']} · "
-            f"{row['price_gems']}💎"
-        )
-        b.button(
-            text=label,
-            callback_data=MarketViewCallback(
-                listing_id=row["id"], user_id=user_id
-            ).pack(),
-        )
-        text += (
-            f"{r.get('icon', '•')}  <b>{esc(row['name'])}</b> ×{fmt_num(row['amount'])}\n"
-            f"    💎 <b>{fmt_num(row['price_gems'])}</b>  ·  {esc(seller)}\n"
-        )
-
-    # rarity filters
-    fr = []
-    fr.append(InlineKeyboardButton(
-        text=("●" if rarity == "all" else "○") + " Все",
-        callback_data=MarketListCallback(page=0, rarity="all", user_id=user_id).pack(),
-    ))
-    for rk, ri in RARITIES.items():
-        mark = "●" if rarity == rk else "○"
-        fr.append(InlineKeyboardButton(
-            text=f"{mark}{ri['icon']}",
-            callback_data=MarketListCallback(page=0, rarity=rk, user_id=user_id).pack(),
-        ))
-    b.adjust(1)
-    b.row(*fr[:3])
-    b.row(*fr[3:])
+    can_buy = gems >= price
+    buy_label = (
+        f"✓  Купить · {fmt_num(price)} 💎"
+        if can_buy
+        else f"✗  Нужно {fmt_num(price)} 💎"
+    )
+    b.button(
+        text=buy_label,
+        callback_data=MarketBuyCallback(card_id=card["id"], user_id=user_id).pack(),
+    )
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(
-            text="‹",
-            callback_data=MarketListCallback(page=page - 1, rarity=rarity, user_id=user_id).pack(),
-        ))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="ignore"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(
-            text="›",
-            callback_data=MarketListCallback(page=page + 1, rarity=rarity, user_id=user_id).pack(),
-        ))
-    if nav:
-        b.row(*nav)
-    b.row(InlineKeyboardButton(
-        text="‹  В маркет",
-        callback_data=MarketMainCallback(user_id=user_id).pack(),
-    ))
-    return text, b.as_markup()
-
-
-async def build_market_my_page(user_id: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
-    per_page = 5
-    async with get_db() as db:
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM market_listings WHERE seller_id = ?", (user_id,)
+        nav.append(
+            InlineKeyboardButton(
+                text="‹",
+                callback_data=MarketRarityCallback(rarity=rarity, page=page - 1, user_id=user_id).pack(),
+            )
         )
-        total = (await cur.fetchone())[0]
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(0, min(page, total_pages - 1))
-        offset = page * per_page
-        cur = await db.execute(
-            """SELECT m.id, m.card_id, m.amount, m.price_gems, m.created_at,
-                      c.name, c.rarity
-               FROM market_listings m
-               JOIN cards c ON m.card_id = c.id
-               WHERE m.seller_id = ?
-               ORDER BY m.created_at DESC
-               LIMIT ? OFFSET ?""",
-            (user_id, per_page, offset),
-        )
-        rows = await cur.fetchall()
-
-    text = (
-        f"📋  <b>Мои объявления</b>\n"
-        f"<code>{'─' * 18}</code>\n"
-        f"Стр. <b>{page + 1}</b> / {total_pages}  ·  <b>{fmt_num(total)}</b>\n\n"
+    nav.append(
+        InlineKeyboardButton(text=f"{page + 1} / {total}", callback_data="ignore")
     )
-    if not rows:
-        text += "У вас нет активных объявлений."
+    if page < total - 1:
+        nav.append(
+            InlineKeyboardButton(
+                text="›",
+                callback_data=MarketRarityCallback(rarity=rarity, page=page + 1, user_id=user_id).pack(),
+            )
+        )
 
-    b = InlineKeyboardBuilder()
-    for row in rows:
-        r = RARITIES.get(row["rarity"], {})
-        text += (
-            f"{r.get('icon', '•')}  <b>{esc(row['name'])}</b> ×{fmt_num(row['amount'])}\n"
-            f"    💎 <b>{fmt_num(row['price_gems'])}</b>\n"
+    b.row(*nav)
+    b.row(
+        InlineKeyboardButton(
+            text="‹  К редкостям", callback_data=MarketMainCallback(user_id=user_id).pack()
         )
-        b.button(
-            text=f"❌ Снять · {row['name'][:20]}",
-            callback_data=MarketCancelCallback(listing_id=row["id"], user_id=user_id).pack(),
-        )
-    b.adjust(1)
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(
-            text="‹",
-            callback_data=MarketMyCallback(page=page - 1, user_id=user_id).pack(),
-        ))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="ignore"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(
-            text="›",
-            callback_data=MarketMyCallback(page=page + 1, user_id=user_id).pack(),
-        ))
-    if nav:
-        b.row(*nav)
-    b.row(InlineKeyboardButton(
-        text="‹  В маркет",
-        callback_data=MarketMainCallback(user_id=user_id).pack(),
-    ))
-    return text, b.as_markup()
+    )
+    return text, b.as_markup(), dict(card)
 
 
 @router.message(F.text == "🛒 Маркет")
@@ -2920,7 +2450,6 @@ async def show_market(message: Message):
             message.from_user.username,
             message.from_user.full_name,
         )
-        await mark_pm_ok(message.from_user.id)
         if rate_limited(f"market:{message.from_user.id}", limit=5, window=8):
             return
         text, kb = await build_market_main(message.from_user.id)
@@ -2954,113 +2483,26 @@ async def market_main_callback(callback: CallbackQuery, callback_data: MarketMai
         await callback.answer("⚠️ Ошибка")
 
 
-@router.callback_query(MarketListCallback.filter())
-async def market_list_cb(callback: CallbackQuery, callback_data: MarketListCallback):
+@router.callback_query(MarketRarityCallback.filter())
+async def market_rarity_view(callback: CallbackQuery, callback_data: MarketRarityCallback):
     if not await check_not_banned_cb(callback):
         return
     if not _owner_check(callback, callback_data.user_id):
         await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
     try:
-        uid = callback_data.user_id or callback.from_user.id
-        text, kb = await build_market_listings_page(uid, callback_data.page, callback_data.rarity)
-        try:
-            if callback.message.photo:
-                await callback.message.delete()
-                await callback.message.answer(text, reply_markup=kb)
-            else:
-                await callback.message.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=kb)
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"market_list: {e}")
-        await callback.answer("⚠️ Ошибка")
-
-
-@router.callback_query(MarketMyCallback.filter())
-async def market_my_cb(callback: CallbackQuery, callback_data: MarketMyCallback):
-    if not await check_not_banned_cb(callback):
-        return
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас")
-        return
-    try:
-        uid = callback_data.user_id or callback.from_user.id
-        text, kb = await build_market_my_page(uid, callback_data.page)
-        try:
-            if callback.message.photo:
-                await callback.message.delete()
-                await callback.message.answer(text, reply_markup=kb)
-            else:
-                await callback.message.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=kb)
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"market_my: {e}")
-        await callback.answer("⚠️ Ошибка")
-
-
-@router.callback_query(MarketViewCallback.filter())
-async def market_view_listing(callback: CallbackQuery, callback_data: MarketViewCallback):
-    if not await check_not_banned_cb(callback):
-        return
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас")
-        return
-    uid = callback_data.user_id or callback.from_user.id
-    listing_id = callback_data.listing_id
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                """SELECT m.*, c.name, c.rarity, c.photo_id, u.nickname
-                   FROM market_listings m
-                   JOIN cards c ON m.card_id = c.id
-                   JOIN users u ON m.seller_id = u.user_id
-                   WHERE m.id = ?""",
-                (listing_id,),
-            )
-            row = await cur.fetchone()
-        if not row:
-            await callback.answer("Объявление снято", show_alert=True)
-            return
-        r = RARITIES.get(row["rarity"], {})
-        seller = row["nickname"] or f"User{row['seller_id']}"
-        total_price = row["price_gems"] * row["amount"]
-        text = (
-            f"🛒  <b>Объявление #{listing_id}</b>\n\n"
-            f"╭ <b>{esc(row['name'])}</b>\n"
-            f"╰ {r.get('icon', '')}  {r.get('name', row['rarity'])}\n\n"
-            f"📦  Количество  ·  <b>{fmt_num(row['amount'])}</b>\n"
-            f"💎  Цена за шт. ·  <b>{fmt_num(row['price_gems'])}</b>\n"
-            f"💎  Итого       ·  <b>{fmt_num(total_price)}</b>\n"
-            f"👤  Продавец    ·  {esc(seller)}"
+        target_id = callback_data.user_id or callback.from_user.id
+        text, kb, card = await build_market_rarity_page(
+            target_id, callback_data.rarity, callback_data.page
         )
-        b = InlineKeyboardBuilder()
-        if row["seller_id"] != uid:
-            b.button(
-                text=f"✓  Купить · {fmt_num(total_price)} 💎",
-                callback_data=MarketBuyListingCallback(
-                    listing_id=listing_id, user_id=uid
-                ).pack(),
-            )
-        else:
-            b.button(
-                text="❌  Снять с продажи",
-                callback_data=MarketCancelCallback(listing_id=listing_id, user_id=uid).pack(),
-            )
-        b.button(
-            text="‹  К объявлениям",
-            callback_data=MarketListCallback(page=0, rarity="all", user_id=uid).pack(),
-        )
-        b.adjust(1)
-        try:
-            if row["photo_id"]:
+        if card and card.get("photo_id"):
+            try:
                 if callback.message.photo:
                     await callback.message.edit_media(
-                        media=InputMediaPhoto(media=row["photo_id"], caption=text),
-                        reply_markup=b.as_markup(),
+                        media=InputMediaPhoto(
+                            media=card["photo_id"], caption=text
+                        ),
+                        reply_markup=kb,
                     )
                 else:
                     try:
@@ -3068,417 +2510,123 @@ async def market_view_listing(callback: CallbackQuery, callback_data: MarketView
                     except Exception:
                         pass
                     await callback.message.answer_photo(
-                        photo=row["photo_id"], caption=text, reply_markup=b.as_markup()
+                        photo=card["photo_id"], caption=text, reply_markup=kb
                     )
-            else:
-                await callback.message.edit_text(text, reply_markup=b.as_markup())
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=b.as_markup())
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=kb)
+        else:
+            try:
+                if callback.message.photo:
+                    await callback.message.delete()
+                    await callback.message.answer(text, reply_markup=kb)
+                else:
+                    await callback.message.edit_text(text, reply_markup=kb)
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=kb)
         await callback.answer()
     except Exception as e:
-        logger.error(f"market_view: {e}")
+        logger.error(f"Ошибка market_rarity: {e}")
         await callback.answer("⚠️ Ошибка")
 
 
-@router.callback_query(MarketBuyListingCallback.filter())
-async def market_buy_listing(callback: CallbackQuery, callback_data: MarketBuyListingCallback):
+@router.callback_query(MarketBuyCallback.filter())
+async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallback):
     if not await check_not_banned_cb(callback):
         return
-    buyer_id = callback.from_user.id
-    if callback_data.user_id and callback_data.user_id != buyer_id:
+    user_id = callback.from_user.id
+    card_id = callback_data.card_id
+    target_id = callback_data.user_id or user_id
+
+    if user_id != target_id:
         await callback.answer("⚠️ Кнопка предназначена не для вас")
         return
-    if rate_limited(f"mkt-buy:{buyer_id}", limit=5, window=10):
+
+    if rate_limited(f"mkt-buy:{user_id}", limit=5, window=10):
         await callback.answer("Слишком часто")
         return
-    listing_id = callback_data.listing_id
+
     try:
         async with get_db() as db:
             cur = await db.execute(
-                """SELECT m.*, c.name, c.rarity
-                   FROM market_listings m
-                   JOIN cards c ON m.card_id = c.id
-                   WHERE m.id = ?""",
-                (listing_id,),
+                "SELECT id, name, rarity, photo_id FROM cards WHERE id = ?",
+                (card_id,),
             )
-            listing = await cur.fetchone()
-            if not listing:
-                await callback.answer("Объявление уже снято", show_alert=True)
+            card = await cur.fetchone()
+            if not card:
+                await callback.answer("❌ Карточка не найдена")
                 return
-            if listing["seller_id"] == buyer_id:
-                await callback.answer("Нельзя купить своё объявление", show_alert=True)
+
+            rarity = card["rarity"]
+            price = MARKET_PRICES.get(rarity, 0)
+            if price <= 0:
+                await callback.answer("❌ Эту карточку нельзя купить")
                 return
-            total_price = listing["price_gems"] * listing["amount"]
+
             cur = await db.execute(
-                "SELECT gems FROM users WHERE user_id = ?", (buyer_id,)
+                "SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?",
+                (user_id, card_id),
+            )
+            owned = await cur.fetchone()
+            if owned:
+                await callback.answer("✅ У вас уже есть эта карточка")
+                return
+
+            cur = await db.execute(
+                "SELECT gems FROM users WHERE user_id = ?", (user_id,)
             )
             row = await cur.fetchone()
             gems = (row["gems"] or 0) if row else 0
-            if gems < total_price:
+
+            if gems < price:
                 await callback.answer(
-                    f"Нужно {total_price} 💎, у вас {gems} 💎", show_alert=True
+                    f"⚠️ Недостаточно кристаллов. Нужно {price} 💎, у вас {gems} 💎"
                 )
                 return
 
-            # transfer
+            now = int(time.time())
             await db.execute(
                 "UPDATE users SET gems = gems - ? WHERE user_id = ?",
-                (total_price, buyer_id),
+                (price, user_id),
             )
             await db.execute(
-                "UPDATE users SET gems = gems + ? WHERE user_id = ?",
-                (total_price, listing["seller_id"]),
-            )
-            await add_inventory(db, buyer_id, listing["card_id"], listing["amount"])
-            await db.execute("DELETE FROM market_listings WHERE id = ?", (listing_id,))
-
-            await log_transaction(
-                buyer_id, "market_buy",
-                gems_delta=-total_price,
-                card_id=listing["card_id"],
-                card_amount=listing["amount"],
-                related_user_id=listing["seller_id"],
-                description=f"Покупка «{listing['name']}» ×{listing['amount']}",
-                db=db,
-            )
-            await log_transaction(
-                listing["seller_id"], "market_sell",
-                gems_delta=total_price,
-                card_id=listing["card_id"],
-                card_amount=listing["amount"],
-                related_user_id=buyer_id,
-                description=f"Продажа «{listing['name']}» ×{listing['amount']}",
-                db=db,
+                """INSERT INTO inventory (user_id, card_id, claim_time, amount)
+                   VALUES (?, ?, ?, 1)
+                   ON CONFLICT(user_id, card_id) DO UPDATE SET amount = amount + 1,
+                                                               claim_time = ?""",
+                (user_id, card_id, now, now),
             )
             cur = await db.execute(
-                "SELECT gems FROM users WHERE user_id = ?", (buyer_id,)
+                "SELECT gems FROM users WHERE user_id = ?", (user_id,)
             )
             new_gems = (await cur.fetchone())[0] or 0
 
-        r = RARITIES.get(listing["rarity"], {})
+        r_info = RARITIES.get(rarity, {})
         caption = (
             f"✓  <b>Покупка успешна</b>\n\n"
-            f"╭ <b>{esc(listing['name'])}</b>\n"
-            f"╰ {r.get('icon', '')}  {r.get('name', listing['rarity'])}\n\n"
-            f"📦  ×{fmt_num(listing['amount'])}\n"
-            f"💎  −{fmt_num(total_price)}  →  <b>{fmt_num(new_gems)}</b>"
+            f"╭ <b>{esc(card['name'])}</b>\n"
+            f"╰ {r_info.get('icon', '')}  {r_info.get('name', rarity)}\n\n"
+            f"💎  −{fmt_num(price)}  →  <b>{fmt_num(new_gems)}</b>"
         )
         b = InlineKeyboardBuilder()
         b.button(
-            text="🔍  К объявлениям",
-            callback_data=MarketListCallback(page=0, rarity="all", user_id=buyer_id).pack(),
+            text="🛒  Продолжить",
+            callback_data=MarketRarityCallback(rarity=rarity, page=0, user_id=user_id).pack(),
         )
-        b.button(
-            text="‹  В маркет",
-            callback_data=MarketMainCallback(user_id=buyer_id).pack(),
-        )
+        b.button(text="‹  В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
         b.adjust(1)
+
         try:
-            await callback.message.answer(caption, reply_markup=b.as_markup())
+            await callback.message.answer_photo(
+                photo=card["photo_id"], caption=caption, reply_markup=b.as_markup()
+            )
         except TelegramBadRequest:
-            pass
+            await callback.message.answer(caption, reply_markup=b.as_markup())
         await callback.answer("✅ Куплено!")
     except Exception as e:
-        logger.error(f"market_buy: {e}")
+        logger.error(f"Ошибка покупки в маркете: {e}")
         await callback.answer("⚠️ Ошибка покупки")
 
 
-@router.callback_query(MarketCancelCallback.filter())
-async def market_cancel_listing(callback: CallbackQuery, callback_data: MarketCancelCallback):
-    if not await check_not_banned_cb(callback):
-        return
-    uid = callback.from_user.id
-    if callback_data.user_id and callback_data.user_id != uid:
-        await callback.answer("⚠️ Кнопка предназначена не для вас")
-        return
-    listing_id = callback_data.listing_id
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT * FROM market_listings WHERE id = ?", (listing_id,)
-            )
-            listing = await cur.fetchone()
-            if not listing:
-                await callback.answer("Уже снято", show_alert=True)
-                return
-            if listing["seller_id"] != uid and not await is_admin(uid):
-                await callback.answer("Это не ваше объявление", show_alert=True)
-                return
-            # return cards to inventory
-            await add_inventory(db, listing["seller_id"], listing["card_id"], listing["amount"])
-            await db.execute("DELETE FROM market_listings WHERE id = ?", (listing_id,))
-            await log_transaction(
-                listing["seller_id"], "market_cancel",
-                card_id=listing["card_id"],
-                card_amount=listing["amount"],
-                description=f"Снято объявление #{listing_id}",
-                db=db,
-            )
-        await callback.answer("Объявление снято, карточки возвращены")
-        text, kb = await build_market_my_page(uid, 0)
-        try:
-            await callback.message.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=kb)
-    except Exception as e:
-        logger.error(f"market_cancel: {e}")
-        await callback.answer("⚠️ Ошибка")
-
-
-@router.callback_query(MarketSellMenuCallback.filter())
-async def market_sell_menu(callback: CallbackQuery, callback_data: MarketSellMenuCallback):
-    if not await check_not_banned_cb(callback):
-        return
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас")
-        return
-    uid = callback_data.user_id or callback.from_user.id
-    page = callback_data.page
-    per_page = 8
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                """SELECT c.id, c.name, c.rarity, i.amount
-                   FROM inventory i
-                   JOIN cards c ON i.card_id = c.id
-                   WHERE i.user_id = ? AND i.amount >= 1
-                   ORDER BY c.rarity, c.name
-                   LIMIT ? OFFSET ?""",
-                (uid, per_page, page * per_page),
-            )
-            cards = await cur.fetchall()
-            cur = await db.execute(
-                "SELECT COUNT(*) FROM inventory WHERE user_id = ? AND amount >= 1",
-                (uid,),
-            )
-            total = (await cur.fetchone())[0]
-            cur = await db.execute(
-                "SELECT COUNT(*) FROM market_listings WHERE seller_id = ?", (uid,)
-            )
-            my_list = (await cur.fetchone())[0]
-
-        if my_list >= MARKET_MAX_LISTINGS_PER_USER:
-            await callback.answer(
-                f"Лимит объявлений: {MARKET_MAX_LISTINGS_PER_USER}", show_alert=True
-            )
-            return
-
-        total_pages = max(1, (total + per_page - 1) // per_page)
-        page = max(0, min(page, total_pages - 1))
-        text = (
-            f"📤  <b>Выставить на маркет</b>\n"
-            f"<code>{'─' * 18}</code>\n"
-            f"Выберите карточку (можно дубликаты).\n"
-            f"Стр. {page + 1}/{total_pages}\n"
-        )
-        b = InlineKeyboardBuilder()
-        if not cards:
-            text += "\nУ вас нет карточек для продажи."
-        for c in cards:
-            r = RARITIES.get(c["rarity"], {})
-            b.button(
-                text=f"{r.get('icon', '')} {c['name'][:22]} ×{c['amount']}",
-                callback_data=MarketSellCardCallback(card_id=c["id"], user_id=uid).pack(),
-            )
-        b.adjust(1)
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="‹",
-                callback_data=MarketSellMenuCallback(user_id=uid, page=page - 1).pack(),
-            ))
-        if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                text="›",
-                callback_data=MarketSellMenuCallback(user_id=uid, page=page + 1).pack(),
-            ))
-        if nav:
-            b.row(*nav)
-        b.row(InlineKeyboardButton(
-            text="‹  В маркет",
-            callback_data=MarketMainCallback(user_id=uid).pack(),
-        ))
-        try:
-            if callback.message.photo:
-                await callback.message.delete()
-                await callback.message.answer(text, reply_markup=b.as_markup())
-            else:
-                await callback.message.edit_text(text, reply_markup=b.as_markup())
-        except TelegramBadRequest:
-            await callback.message.answer(text, reply_markup=b.as_markup())
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"market_sell_menu: {e}")
-        await callback.answer("⚠️ Ошибка")
-
-
-@router.callback_query(MarketSellCardCallback.filter())
-async def market_sell_card_choose_amt(
-    callback: CallbackQuery, callback_data: MarketSellCardCallback
-):
-    if not await check_not_banned_cb(callback):
-        return
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас")
-        return
-    uid = callback_data.user_id or callback.from_user.id
-    card_id = callback_data.card_id
-    try:
-        amt = await inventory_amount(uid, card_id)
-        if amt < 1:
-            await callback.answer("Нет такой карточки", show_alert=True)
-            return
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT name, rarity FROM cards WHERE id = ?", (card_id,)
-            )
-            card = await cur.fetchone()
-        if not card:
-            await callback.answer("Карточка не найдена")
-            return
-        r = RARITIES.get(card["rarity"], {})
-        text = (
-            f"📤  <b>{esc(card['name'])}</b>\n"
-            f"{r.get('icon', '')}  {r.get('name', '')}\n\n"
-            f"У вас  ·  <b>{fmt_num(amt)}</b>\n"
-            f"Сколько выставить на продажу?"
-        )
-        b = InlineKeyboardBuilder()
-        options = sorted(set([1] + ([amt] if amt > 1 else []) + [a for a in (2, 3, 5, 10) if a < amt]))
-        for a in options:
-            if a <= amt:
-                b.button(
-                    text=f"×{a}",
-                    callback_data=MarketSellAmtCallback(
-                        card_id=card_id, amount=a, user_id=uid
-                    ).pack(),
-                )
-        if amt not in options and amt > 1:
-            b.button(
-                text=f"×{amt} (все)",
-                callback_data=MarketSellAmtCallback(
-                    card_id=card_id, amount=amt, user_id=uid
-                ).pack(),
-            )
-        b.button(
-            text="‹  Назад",
-            callback_data=MarketSellMenuCallback(user_id=uid, page=0).pack(),
-        )
-        b.adjust(3, 3, 1)
-        await callback.message.edit_text(text, reply_markup=b.as_markup())
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"market_sell_card: {e}")
-        await callback.answer("⚠️ Ошибка")
-
-
-@router.callback_query(MarketSellAmtCallback.filter())
-async def market_sell_ask_price(
-    callback: CallbackQuery, callback_data: MarketSellAmtCallback, state: FSMContext
-):
-    if not await check_not_banned_cb(callback):
-        return
-    if not _owner_check(callback, callback_data.user_id):
-        await callback.answer("⚠️ Кнопка предназначена не для вас")
-        return
-    uid = callback_data.user_id or callback.from_user.id
-    card_id = callback_data.card_id
-    amount = callback_data.amount
-    try:
-        have = await inventory_amount(uid, card_id)
-        if amount < 1 or amount > have:
-            await callback.answer("Некорректное количество", show_alert=True)
-            return
-        async with get_db() as db:
-            cur = await db.execute("SELECT name FROM cards WHERE id = ?", (card_id,))
-            card = await cur.fetchone()
-        await state.set_state(MarketSellPriceSG.price)
-        await state.update_data(sell_card_id=card_id, sell_amount=amount, sell_user_id=uid)
-        await callback.message.edit_text(
-            f"💎  <b>Цена за одну карточку</b> (в кристаллах)\n\n"
-            f"Карточка: <b>{esc(card['name'] if card else card_id)}</b> ×{amount}\n"
-            f"Введите число от {MARKET_MIN_PRICE} до {MARKET_MAX_PRICE}:\n\n"
-            f"<code>/cancel</code> — отмена"
-        )
-        await callback.answer()
-    except Exception as e:
-        logger.error(f"market_sell_amt: {e}")
-        await callback.answer("⚠️ Ошибка")
-
-
-@router.message(MarketSellPriceSG.price, F.text)
-async def market_sell_price_save(message: Message, state: FSMContext):
-    if message.chat.type != "private":
-        return
-    if not await check_not_banned(message):
-        await state.clear()
-        return
-    data = await state.get_data()
-    uid = data.get("sell_user_id") or message.from_user.id
-    if uid != message.from_user.id:
-        await state.clear()
-        return
-    card_id = data.get("sell_card_id")
-    amount = data.get("sell_amount")
-    try:
-        price = int(message.text.strip().replace(" ", ""))
-    except ValueError:
-        await message.reply(f"❌ Введите целое число ({MARKET_MIN_PRICE}–{MARKET_MAX_PRICE}).")
-        return
-    if not (MARKET_MIN_PRICE <= price <= MARKET_MAX_PRICE):
-        await message.reply(
-            f"❌ Цена должна быть от {MARKET_MIN_PRICE} до {MARKET_MAX_PRICE} 💎."
-        )
-        return
-    try:
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT COUNT(*) FROM market_listings WHERE seller_id = ?", (uid,)
-            )
-            if (await cur.fetchone())[0] >= MARKET_MAX_LISTINGS_PER_USER:
-                await message.reply(f"❌ Лимит объявлений: {MARKET_MAX_LISTINGS_PER_USER}")
-                await state.clear()
-                return
-            ok = await reduce_inventory(db, uid, card_id, amount)
-            if not ok:
-                await message.reply("❌ Недостаточно карточек (возможно уже выставлены).")
-                await state.clear()
-                return
-            now = int(time.time())
-            cur = await db.execute(
-                """INSERT INTO market_listings
-                   (seller_id, card_id, amount, price_gems, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (uid, card_id, amount, price, now),
-            )
-            listing_id = cur.lastrowid
-            cur = await db.execute("SELECT name, rarity FROM cards WHERE id = ?", (card_id,))
-            card = await cur.fetchone()
-            await log_transaction(
-                uid, "market_list",
-                card_id=card_id,
-                card_amount=amount,
-                description=f"Объявление #{listing_id} · {price}💎/шт",
-                db=db,
-            )
-        r = RARITIES.get(card["rarity"] if card else "", {})
-        await message.reply(
-            f"✅  <b>Объявление создано</b> #{listing_id}\n\n"
-            f"╭ <b>{esc(card['name'] if card else '?')}</b>\n"
-            f"╰ {r.get('icon', '')}  ×{fmt_num(amount)}  ·  {fmt_num(price)} 💎/шт\n"
-            f"Итого  ·  <b>{fmt_num(price * amount)} 💎</b>",
-            reply_markup=InlineKeyboardBuilder()
-            .button(text="🛒  В маркет", callback_data=MarketMainCallback(user_id=uid).pack())
-            .as_markup(),
-        )
-        await state.clear()
-    except Exception as e:
-        logger.error(f"market_sell_price: {e}")
-        await message.reply("❌ Ошибка создания объявления.")
-        await state.clear()
-
-
-# ---- Обмен монет ↔ кристаллы (в обе стороны) ----
 @router.callback_query(MarketExchangeCallback.filter())
 async def market_exchange(callback: CallbackQuery, callback_data: MarketExchangeCallback):
     if not await check_not_banned_cb(callback):
@@ -3502,47 +2650,15 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
             coins = (row["coins"] or 0) if row else 0
             gems = (row["gems"] or 0) if row else 0
             max_buy = coins // GEM_TO_COINS
-            max_sell = gems
 
             text = (
-                f"💱  <b>Обмен</b>\n\n"
-                f"🪙 → 💎  ·  <b>1 💎 = {GEM_TO_COINS} 🪙</b>\n"
-                f"💎 → 🪙  ·  <b>1 💎 → {COINS_FROM_GEM} 🪙</b>\n\n"
+                f"💱  <b>Обмен монет → кристаллы</b>\n\n"
+                f"Курс  ·  <b>1 💎 = {GEM_TO_COINS} 🪙</b>\n\n"
                 f"🪙  Монеты     ·  <b>{fmt_num(coins)}</b>\n"
                 f"💎  Кристаллы  ·  <b>{fmt_num(gems)}</b>\n"
-                f"Купить 💎      ·  до <b>{fmt_num(max_buy)}</b>\n"
-                f"Продать 💎     ·  до <b>{fmt_num(max_sell)}</b>"
+                f"Можно купить   ·  до <b>{fmt_num(max_buy)}</b> 💎\n\n"
+                f"Выберите количество:"
             )
-            b = InlineKeyboardBuilder()
-            b.button(
-                text="🪙 → 💎  Купить кристаллы",
-                callback_data=MarketExchangeCallback(action="buy_menu", user_id=user_id).pack(),
-            )
-            b.button(
-                text="💎 → 🪙  Продать кристаллы",
-                callback_data=MarketExchangeCallback(action="sell_menu", user_id=user_id).pack(),
-            )
-            b.button(text="‹  Назад", callback_data=MarketMainCallback(user_id=user_id).pack())
-            b.adjust(1)
-            try:
-                if callback.message.photo:
-                    await callback.message.delete()
-                    await callback.message.answer(text, reply_markup=b.as_markup())
-                else:
-                    await callback.message.edit_text(text, reply_markup=b.as_markup())
-            except TelegramBadRequest:
-                await callback.message.answer(text, reply_markup=b.as_markup())
-            await callback.answer()
-            return
-
-        if action == "buy_menu":
-            async with get_db() as db:
-                cur = await db.execute(
-                    "SELECT coins FROM users WHERE user_id = ?", (user_id,)
-                )
-                coins = ((await cur.fetchone())["coins"] or 0)
-            max_buy = coins // GEM_TO_COINS
-            text = f"💱  <b>Купить кристаллы</b>\n1 💎 = {GEM_TO_COINS} 🪙\nМожно до {fmt_num(max_buy)} 💎"
             b = InlineKeyboardBuilder()
             for n in (1, 5, 10, 25, 50):
                 cost = n * GEM_TO_COINS
@@ -3554,55 +2670,34 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                         ).pack(),
                     )
             if max_buy >= 1 and max_buy not in (1, 5, 10, 25, 50):
+                cost = max_buy * GEM_TO_COINS
                 b.button(
-                    text=f"+{fmt_num(max_buy)} 💎 · все",
+                    text=f"+{fmt_num(max_buy)} 💎 · все ({fmt_num(cost)} 🪙)",
                     callback_data=MarketExchangeCallback(
                         action="buy_gems", amount=max_buy, user_id=user_id
                     ).pack(),
                 )
-            b.button(text="‹  Назад", callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack())
+            b.button(text="‹  Назад", callback_data=MarketMainCallback(user_id=user_id).pack())
             b.adjust(2)
-            await callback.message.edit_text(text, reply_markup=b.as_markup())
-            await callback.answer()
-            return
-
-        if action == "sell_menu":
-            async with get_db() as db:
-                cur = await db.execute(
-                    "SELECT gems FROM users WHERE user_id = ?", (user_id,)
-                )
-                gems = ((await cur.fetchone())["gems"] or 0)
-            text = (
-                f"💱  <b>Продать кристаллы</b>\n"
-                f"1 💎 → {COINS_FROM_GEM} 🪙\n"
-                f"Можно до {fmt_num(gems)} 💎"
-            )
-            b = InlineKeyboardBuilder()
-            for n in (1, 5, 10, 25, 50):
-                if gems >= n:
-                    b.button(
-                        text=f"−{n} 💎 · +{fmt_num(n * COINS_FROM_GEM)} 🪙",
-                        callback_data=MarketExchangeCallback(
-                            action="sell_gems", amount=n, user_id=user_id
-                        ).pack(),
-                    )
-            if gems >= 1 and gems not in (1, 5, 10, 25, 50):
-                b.button(
-                    text=f"−{fmt_num(gems)} 💎 · все",
-                    callback_data=MarketExchangeCallback(
-                        action="sell_gems", amount=gems, user_id=user_id
-                    ).pack(),
-                )
-            b.button(text="‹  Назад", callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack())
-            b.adjust(2)
-            await callback.message.edit_text(text, reply_markup=b.as_markup())
+            try:
+                if callback.message.photo:
+                    await callback.message.delete()
+                    await callback.message.answer(text, reply_markup=b.as_markup())
+                else:
+                    await callback.message.edit_text(text, reply_markup=b.as_markup())
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=b.as_markup())
             await callback.answer()
             return
 
         if action == "buy_gems":
-            if amount <= 0 or amount > 10_000:
+            if amount <= 0:
                 await callback.answer("❌ Некорректное количество")
                 return
+            if amount > 10_000:
+                await callback.answer("❌ Слишком много за раз")
+                return
+
             cost = amount * GEM_TO_COINS
             async with get_db() as db:
                 cur = await db.execute(
@@ -3611,73 +2706,38 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 row = await cur.fetchone()
                 coins = (row["coins"] or 0) if row else 0
                 if coins < cost:
-                    await callback.answer(f"Нужно {fmt_num(cost)} 🪙", show_alert=True)
+                    await callback.answer(
+                        f"⚠️ Недостаточно монет. Нужно {fmt_num(cost)} 🪙"
+                    )
                     return
                 await db.execute(
-                    "UPDATE users SET coins = coins - ?, gems = gems + ? WHERE user_id = ?",
+                    "UPDATE users SET coins = coins - ?, gems = gems + ? "
+                    "WHERE user_id = ?",
                     (cost, amount, user_id),
                 )
-                await log_transaction(
-                    user_id, "exchange_buy_gems",
-                    coins_delta=-cost, gems_delta=amount,
-                    description=f"Обмен: −{cost}🪙 → +{amount}💎",
-                    db=db,
-                )
                 cur = await db.execute(
                     "SELECT coins, gems FROM users WHERE user_id = ?", (user_id,)
                 )
                 row = await cur.fetchone()
-            text = (
-                f"✓  <b>Обмен выполнен</b>\n\n"
-                f"💎  +<b>{fmt_num(amount)}</b>  →  {fmt_num(row['gems'] or 0)}\n"
-                f"🪙  −<b>{fmt_num(cost)}</b>  →  {fmt_num(row['coins'] or 0)}"
-            )
-            b = InlineKeyboardBuilder()
-            b.button(text="💱  Ещё", callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack())
-            b.button(text="‹  В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
-            b.adjust(1)
-            await callback.message.edit_text(text, reply_markup=b.as_markup())
-            await callback.answer("✅ Готово!")
-            return
+                new_coins = row["coins"] or 0
+                new_gems = row["gems"] or 0
 
-        if action == "sell_gems":
-            if amount <= 0 or amount > 10_000:
-                await callback.answer("❌ Некорректное количество")
-                return
-            gain = amount * COINS_FROM_GEM
-            async with get_db() as db:
-                cur = await db.execute(
-                    "SELECT coins, gems FROM users WHERE user_id = ?", (user_id,)
-                )
-                row = await cur.fetchone()
-                gems = (row["gems"] or 0) if row else 0
-                if gems < amount:
-                    await callback.answer(f"Нужно {fmt_num(amount)} 💎", show_alert=True)
-                    return
-                await db.execute(
-                    "UPDATE users SET gems = gems - ?, coins = coins + ? WHERE user_id = ?",
-                    (amount, gain, user_id),
-                )
-                await log_transaction(
-                    user_id, "exchange_sell_gems",
-                    coins_delta=gain, gems_delta=-amount,
-                    description=f"Обмен: −{amount}💎 → +{gain}🪙",
-                    db=db,
-                )
-                cur = await db.execute(
-                    "SELECT coins, gems FROM users WHERE user_id = ?", (user_id,)
-                )
-                row = await cur.fetchone()
             text = (
                 f"✓  <b>Обмен выполнен</b>\n\n"
-                f"🪙  +<b>{fmt_num(gain)}</b>  →  {fmt_num(row['coins'] or 0)}\n"
-                f"💎  −<b>{fmt_num(amount)}</b>  →  {fmt_num(row['gems'] or 0)}"
+                f"💎  +<b>{fmt_num(amount)}</b>  →  {fmt_num(new_gems)}\n"
+                f"🪙  −<b>{fmt_num(cost)}</b>  →  {fmt_num(new_coins)}"
             )
             b = InlineKeyboardBuilder()
-            b.button(text="💱  Ещё", callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack())
+            b.button(
+                text="💱  Ещё обмен",
+                callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack(),
+            )
             b.button(text="‹  В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
             b.adjust(1)
-            await callback.message.edit_text(text, reply_markup=b.as_markup())
+            try:
+                await callback.message.edit_text(text, reply_markup=b.as_markup())
+            except TelegramBadRequest:
+                await callback.message.answer(text, reply_markup=b.as_markup())
             await callback.answer("✅ Готово!")
             return
 
@@ -3685,731 +2745,6 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
     except Exception as e:
         logger.error(f"Ошибка обмена: {e}")
         await callback.answer("⚠️ Ошибка обмена")
-
-
-
-# ================= ТРЕЙДЫ И ГИФТЫ =================
-class TradeCallback(CallbackData, prefix="trade"):
-    action: str
-    trade_id: int = 0
-    user_id: int = 0
-
-
-class GiftCallback(CallbackData, prefix="gift"):
-    action: str
-    user_id: int = 0
-
-
-class TradeSG(StatesGroup):
-    target = State()
-    offer_type = State()
-    offer_value = State()
-    request_type = State()
-    request_value = State()
-
-
-class GiftSG(StatesGroup):
-    target = State()
-    kind = State()
-    value = State()
-
-
-@router.message(Command("trade"))
-async def trade_cmd(message: Message, command: Command, state: FSMContext):
-    if not await check_not_banned(message):
-        return
-    if message.chat.type != "private":
-        await reply_ephemeral(message, "⚠️ Трейды только в ЛС с ботом.")
-        return
-    await mark_pm_ok(message.from_user.id)
-    arg = (command.args or "").strip()
-    target_id = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    elif arg.isdigit():
-        target_id = int(arg)
-    if not target_id or target_id == message.from_user.id:
-        await message.reply(
-            "🤝  <b>Трейд</b>\n\n"
-            "Использование:\n"
-            "<code>/trade USERID</code>\n"
-            "или ответом на сообщение пользователя (в группе — затем продолжите в ЛС).\n\n"
-            "Вы предлагаете ресурсы и запрашиваете взамен."
-        )
-        return
-    if await is_banned(target_id):
-        await message.reply("❌ Пользователь заблокирован.")
-        return
-    row = await get_user_row(target_id)
-    if not row:
-        await message.reply("❌ Пользователь не найден в боте (пусть напишет /start).")
-        return
-    await state.set_state(TradeSG.offer_type)
-    await state.update_data(trade_to=target_id, offer_coins=0, offer_gems=0,
-                            offer_card_id=None, offer_card_amount=0,
-                            request_coins=0, request_gems=0,
-                            request_card_id=None, request_card_amount=0)
-    nick = row["nickname"] or str(target_id)
-    b = InlineKeyboardBuilder()
-    b.button(text="🪙 Монеты", callback_data="trade_offer:coins")
-    b.button(text="💎 Кристаллы", callback_data="trade_offer:gems")
-    b.button(text="🃏 Карточка", callback_data="trade_offer:card")
-    b.button(text="⏭ Без предложения (только запрос)", callback_data="trade_offer:skip")
-    b.button(text="❌ Отмена", callback_data="trade_offer:cancel")
-    b.adjust(2, 1, 1)
-    await message.reply(
-        f"🤝  Трейд с <b>{esc(nick)}</b> (<code>{target_id}</code>)\n\n"
-        f"Что вы <b>отдаёте</b>?",
-        reply_markup=b.as_markup(),
-    )
-
-
-@router.callback_query(F.data.startswith("trade_offer:"))
-async def trade_offer_type(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != TradeSG.offer_type.state:
-        await callback.answer("Сессия устарела")
-        return
-    kind = callback.data.split(":")[1]
-    if kind == "cancel":
-        await state.clear()
-        await callback.message.edit_text("✅ Трейд отменён")
-        await callback.answer()
-        return
-    if kind == "skip":
-        await state.set_state(TradeSG.request_type)
-        b = InlineKeyboardBuilder()
-        b.button(text="🪙 Монеты", callback_data="trade_req:coins")
-        b.button(text="💎 Кристаллы", callback_data="trade_req:gems")
-        b.button(text="🃏 Карточка", callback_data="trade_req:card")
-        b.button(text="❌ Отмена", callback_data="trade_req:cancel")
-        b.adjust(2, 1)
-        await callback.message.edit_text(
-            "Что вы <b>хотите получить</b>?",
-            reply_markup=b.as_markup(),
-        )
-        await callback.answer()
-        return
-    await state.update_data(offer_kind=kind)
-    await state.set_state(TradeSG.offer_value)
-    if kind == "card":
-        await callback.message.edit_text(
-            "🃏 Отправьте: <code>CARD_ID количество</code>\n"
-            "ID карточки смотрите в коллекции / админке.\n"
-            "Пример: <code>12 2</code>"
-        )
-    else:
-        unit = "монет" if kind == "coins" else "кристаллов"
-        await callback.message.edit_text(f"Введите количество {unit}:")
-    await callback.answer()
-
-
-@router.message(TradeSG.offer_value, F.text)
-async def trade_offer_value(message: Message, state: FSMContext):
-    data = await state.get_data()
-    kind = data.get("offer_kind")
-    uid = message.from_user.id
-    try:
-        if kind == "card":
-            parts = message.text.strip().split()
-            card_id = int(parts[0])
-            amount = int(parts[1]) if len(parts) > 1 else 1
-            if amount < 1:
-                raise ValueError("amount")
-            have = await inventory_amount(uid, card_id)
-            if have < amount:
-                await message.reply(f"❌ У вас только {have} шт.")
-                return
-            await state.update_data(offer_card_id=card_id, offer_card_amount=amount)
-        else:
-            val = int(message.text.strip())
-            if val < 1:
-                raise ValueError("val")
-            row = await get_user_row(uid)
-            if kind == "coins":
-                if (row["coins"] or 0) < val:
-                    await message.reply("❌ Недостаточно монет.")
-                    return
-                await state.update_data(offer_coins=val)
-            else:
-                if (row["gems"] or 0) < val:
-                    await message.reply("❌ Недостаточно кристаллов.")
-                    return
-                await state.update_data(offer_gems=val)
-    except (ValueError, IndexError):
-        await message.reply("❌ Неверный формат.")
-        return
-
-    await state.set_state(TradeSG.request_type)
-    b = InlineKeyboardBuilder()
-    b.button(text="🪙 Монеты", callback_data="trade_req:coins")
-    b.button(text="💎 Кристаллы", callback_data="trade_req:gems")
-    b.button(text="🃏 Карточка", callback_data="trade_req:card")
-    b.button(text="⏭ Без запроса (подарок)", callback_data="trade_req:skip")
-    b.button(text="❌ Отмена", callback_data="trade_req:cancel")
-    b.adjust(2, 1, 1)
-    await message.reply("Что вы <b>хотите получить</b>?", reply_markup=b.as_markup())
-
-
-@router.callback_query(F.data.startswith("trade_req:"))
-async def trade_req_type(callback: CallbackQuery, state: FSMContext):
-    st = await state.get_state()
-    if st != TradeSG.request_type.state:
-        await callback.answer("Сессия устарела")
-        return
-    kind = callback.data.split(":")[1]
-    if kind == "cancel":
-        await state.clear()
-        await callback.message.edit_text("✅ Трейд отменён")
-        await callback.answer()
-        return
-    if kind == "skip":
-        await state.update_data(request_coins=0, request_gems=0,
-                                request_card_id=None, request_card_amount=0)
-        await _finalize_trade_offer(callback.message, state, callback.from_user.id)
-        await callback.answer()
-        return
-    await state.update_data(request_kind=kind)
-    await state.set_state(TradeSG.request_value)
-    if kind == "card":
-        await callback.message.edit_text(
-            "🃏 Запрос: <code>CARD_ID количество</code>\nПример: <code>5 1</code>"
-        )
-    else:
-        unit = "монет" if kind == "coins" else "кристаллов"
-        await callback.message.edit_text(f"Сколько {unit} запросить?")
-    await callback.answer()
-
-
-@router.message(TradeSG.request_value, F.text)
-async def trade_req_value(message: Message, state: FSMContext):
-    data = await state.get_data()
-    kind = data.get("request_kind")
-    try:
-        if kind == "card":
-            parts = message.text.strip().split()
-            card_id = int(parts[0])
-            amount = int(parts[1]) if len(parts) > 1 else 1
-            if amount < 1:
-                raise ValueError
-            await state.update_data(request_card_id=card_id, request_card_amount=amount)
-        else:
-            val = int(message.text.strip())
-            if val < 1:
-                raise ValueError
-            if kind == "coins":
-                await state.update_data(request_coins=val)
-            else:
-                await state.update_data(request_gems=val)
-    except (ValueError, IndexError):
-        await message.reply("❌ Неверный формат.")
-        return
-    await _finalize_trade_offer(message, state, message.from_user.id)
-
-
-async def _finalize_trade_offer(message: Message, state: FSMContext, from_user: int):
-    data = await state.get_data()
-    to_user = data.get("trade_to")
-    now = int(time.time())
-    async with get_db() as db:
-        cur = await db.execute(
-            """INSERT INTO trades
-               (from_user, to_user, status, offer_coins, offer_gems,
-                offer_card_id, offer_card_amount, request_coins, request_gems,
-                request_card_id, request_card_amount, created_at, expires_at)
-               VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                from_user, to_user,
-                data.get("offer_coins") or 0,
-                data.get("offer_gems") or 0,
-                data.get("offer_card_id"),
-                data.get("offer_card_amount") or 0,
-                data.get("request_coins") or 0,
-                data.get("request_gems") or 0,
-                data.get("request_card_id"),
-                data.get("request_card_amount") or 0,
-                now, now + TRADE_EXPIRE_SECONDS,
-            ),
-        )
-        trade_id = cur.lastrowid
-
-    await state.clear()
-    offer_txt = _format_trade_side(
-        data.get("offer_coins") or 0,
-        data.get("offer_gems") or 0,
-        data.get("offer_card_id"),
-        data.get("offer_card_amount") or 0,
-    )
-    req_txt = _format_trade_side(
-        data.get("request_coins") or 0,
-        data.get("request_gems") or 0,
-        data.get("request_card_id"),
-        data.get("request_card_amount") or 0,
-    )
-    text = (
-        f"🤝  <b>Трейд #{trade_id} создан</b>\n\n"
-        f"Вы отдаёте:\n{offer_txt}\n\n"
-        f"Вы хотите:\n{req_txt}\n\n"
-        f"Ожидает ответа пользователя <code>{to_user}</code> (24 ч).\n"
-        f"Ему: <code>/trades</code>"
-    )
-    await message.answer(text)
-    # уведомить получателя если pm_ok
-    try:
-        async with get_db() as db:
-            cur = await db.execute("SELECT pm_ok, nickname FROM users WHERE user_id = ?", (to_user,))
-            row = await cur.fetchone()
-        if row and row["pm_ok"]:
-            b = InlineKeyboardBuilder()
-            b.button(text="✅ Принять", callback_data=TradeCallback(action="accept", trade_id=trade_id, user_id=to_user).pack())
-            b.button(text="❌ Отклонить", callback_data=TradeCallback(action="decline", trade_id=trade_id, user_id=to_user).pack())
-            b.adjust(2)
-            from_nick = await get_user_nickname(from_user)
-            await message.bot.send_message(
-                to_user,
-                f"🤝  <b>Вам предложили трейд #{trade_id}</b>\n"
-                f"От: {esc(from_nick)}\n\n"
-                f"Отдаёт:\n{offer_txt}\n\nХочет:\n{req_txt}",
-                reply_markup=b.as_markup(),
-            )
-    except Exception as e:
-        logger.debug(f"trade notify: {e}")
-
-
-def _format_trade_side(coins, gems, card_id, card_amount) -> str:
-    parts = []
-    if coins:
-        parts.append(f"🪙 {fmt_num(coins)}")
-    if gems:
-        parts.append(f"💎 {fmt_num(gems)}")
-    if card_id and card_amount:
-        parts.append(f"🃏 card#{card_id} ×{card_amount}")
-    return " · ".join(parts) if parts else "— ничего —"
-
-
-@router.message(Command("trades"))
-async def trades_list(message: Message):
-    if not await check_not_banned(message):
-        return
-    if message.chat.type != "private":
-        await reply_ephemeral(message, "⚠️ Только в ЛС.")
-        return
-    uid = message.from_user.id
-    now = int(time.time())
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE trades SET status = 'expired' WHERE status = 'pending' AND expires_at < ?",
-            (now,),
-        )
-        cur = await db.execute(
-            """SELECT * FROM trades
-               WHERE (to_user = ? OR from_user = ?) AND status = 'pending'
-               ORDER BY created_at DESC LIMIT 15""",
-            (uid, uid),
-        )
-        rows = await cur.fetchall()
-    if not rows:
-        await message.reply("Нет активных трейдов.\nСоздать: <code>/trade USERID</code>")
-        return
-    lines = ["🤝  <b>Активные трейды</b>\n"]
-    b = InlineKeyboardBuilder()
-    for t in rows:
-        direction = "← вам" if t["to_user"] == uid else "→ от вас"
-        lines.append(
-            f"#{t['id']} {direction}\n"
-            f"  отдаёт: {_format_trade_side(t['offer_coins'], t['offer_gems'], t['offer_card_id'], t['offer_card_amount'])}\n"
-            f"  хочет: {_format_trade_side(t['request_coins'], t['request_gems'], t['request_card_id'], t['request_card_amount'])}"
-        )
-        if t["to_user"] == uid:
-            b.button(
-                text=f"✅ #{t['id']}",
-                callback_data=TradeCallback(action="accept", trade_id=t["id"], user_id=uid).pack(),
-            )
-            b.button(
-                text=f"❌ #{t['id']}",
-                callback_data=TradeCallback(action="decline", trade_id=t["id"], user_id=uid).pack(),
-            )
-        else:
-            b.button(
-                text=f"🚫 Отменить #{t['id']}",
-                callback_data=TradeCallback(action="cancel", trade_id=t["id"], user_id=uid).pack(),
-            )
-    b.adjust(2)
-    await message.reply("\n".join(lines), reply_markup=b.as_markup())
-
-
-@router.callback_query(TradeCallback.filter())
-async def trade_action_cb(callback: CallbackQuery, callback_data: TradeCallback):
-    if not await check_not_banned_cb(callback):
-        return
-    uid = callback.from_user.id
-    if callback_data.user_id and callback_data.user_id != uid:
-        await callback.answer("Не для вас")
-        return
-    trade_id = callback_data.trade_id
-    action = callback_data.action
-    try:
-        async with get_db() as db:
-            cur = await db.execute("SELECT * FROM trades WHERE id = ?", (trade_id,))
-            t = await cur.fetchone()
-            if not t or t["status"] != "pending":
-                await callback.answer("Трейд недоступен", show_alert=True)
-                return
-            if int(time.time()) > t["expires_at"]:
-                await db.execute(
-                    "UPDATE trades SET status = 'expired' WHERE id = ?", (trade_id,)
-                )
-                await callback.answer("Истёк срок", show_alert=True)
-                return
-
-            if action == "cancel":
-                if t["from_user"] != uid:
-                    await callback.answer("Только автор может отменить")
-                    return
-                await db.execute(
-                    "UPDATE trades SET status = 'cancelled' WHERE id = ?", (trade_id,)
-                )
-                await callback.message.edit_text(f"🚫 Трейд #{trade_id} отменён")
-                await callback.answer()
-                return
-
-            if action == "decline":
-                if t["to_user"] != uid:
-                    await callback.answer("Не для вас")
-                    return
-                await db.execute(
-                    "UPDATE trades SET status = 'declined' WHERE id = ?", (trade_id,)
-                )
-                await callback.message.edit_text(f"❌ Трейд #{trade_id} отклонён")
-                await callback.answer()
-                return
-
-            if action == "accept":
-                if t["to_user"] != uid:
-                    await callback.answer("Не для вас")
-                    return
-                # Validate balances
-                from_id, to_id = t["from_user"], t["to_user"]
-                cur = await db.execute(
-                    "SELECT coins, gems FROM users WHERE user_id = ?", (from_id,)
-                )
-                fu = await cur.fetchone()
-                cur = await db.execute(
-                    "SELECT coins, gems FROM users WHERE user_id = ?", (to_id,)
-                )
-                tu = await cur.fetchone()
-                if not fu or not tu:
-                    await callback.answer("Пользователь не найден", show_alert=True)
-                    return
-                if (fu["coins"] or 0) < (t["offer_coins"] or 0) or (fu["gems"] or 0) < (t["offer_gems"] or 0):
-                    await callback.answer("У отправителя не хватает ресурсов", show_alert=True)
-                    return
-                if (tu["coins"] or 0) < (t["request_coins"] or 0) or (tu["gems"] or 0) < (t["request_gems"] or 0):
-                    await callback.answer("У вас не хватает ресурсов для обмена", show_alert=True)
-                    return
-                if t["offer_card_id"] and t["offer_card_amount"]:
-                    cur = await db.execute(
-                        "SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?",
-                        (from_id, t["offer_card_id"]),
-                    )
-                    row = await cur.fetchone()
-                    if not row or (row["amount"] or 0) < t["offer_card_amount"]:
-                        await callback.answer("У отправителя нет карточки", show_alert=True)
-                        return
-                if t["request_card_id"] and t["request_card_amount"]:
-                    cur = await db.execute(
-                        "SELECT amount FROM inventory WHERE user_id = ? AND card_id = ?",
-                        (to_id, t["request_card_id"]),
-                    )
-                    row = await cur.fetchone()
-                    if not row or (row["amount"] or 0) < t["request_card_amount"]:
-                        await callback.answer("У вас нет нужной карточки", show_alert=True)
-                        return
-
-                # Execute transfer: from → to (offer), to → from (request)
-                if t["offer_coins"]:
-                    await db.execute(
-                        "UPDATE users SET coins = coins - ? WHERE user_id = ?",
-                        (t["offer_coins"], from_id),
-                    )
-                    await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                        (t["offer_coins"], to_id),
-                    )
-                if t["offer_gems"]:
-                    await db.execute(
-                        "UPDATE users SET gems = gems - ? WHERE user_id = ?",
-                        (t["offer_gems"], from_id),
-                    )
-                    await db.execute(
-                        "UPDATE users SET gems = gems + ? WHERE user_id = ?",
-                        (t["offer_gems"], to_id),
-                    )
-                if t["request_coins"]:
-                    await db.execute(
-                        "UPDATE users SET coins = coins - ? WHERE user_id = ?",
-                        (t["request_coins"], to_id),
-                    )
-                    await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                        (t["request_coins"], from_id),
-                    )
-                if t["request_gems"]:
-                    await db.execute(
-                        "UPDATE users SET gems = gems - ? WHERE user_id = ?",
-                        (t["request_gems"], to_id),
-                    )
-                    await db.execute(
-                        "UPDATE users SET gems = gems + ? WHERE user_id = ?",
-                        (t["request_gems"], from_id),
-                    )
-                if t["offer_card_id"] and t["offer_card_amount"]:
-                    await reduce_inventory(db, from_id, t["offer_card_id"], t["offer_card_amount"])
-                    await add_inventory(db, to_id, t["offer_card_id"], t["offer_card_amount"])
-                if t["request_card_id"] and t["request_card_amount"]:
-                    await reduce_inventory(db, to_id, t["request_card_id"], t["request_card_amount"])
-                    await add_inventory(db, from_id, t["request_card_id"], t["request_card_amount"])
-
-                await db.execute(
-                    "UPDATE trades SET status = 'accepted' WHERE id = ?", (trade_id,)
-                )
-                await log_transaction(
-                    from_id, "trade",
-                    coins_delta=(t["request_coins"] or 0) - (t["offer_coins"] or 0),
-                    gems_delta=(t["request_gems"] or 0) - (t["offer_gems"] or 0),
-                    related_user_id=to_id,
-                    description=f"Трейд #{trade_id} принят",
-                    db=db,
-                )
-                await log_transaction(
-                    to_id, "trade",
-                    coins_delta=(t["offer_coins"] or 0) - (t["request_coins"] or 0),
-                    gems_delta=(t["offer_gems"] or 0) - (t["request_gems"] or 0),
-                    related_user_id=from_id,
-                    description=f"Трейд #{trade_id} принят",
-                    db=db,
-                )
-
-        await callback.message.edit_text(f"✅ Трейд #{trade_id} выполнен!")
-        await callback.answer("Готово!")
-        try:
-            await callback.bot.send_message(
-                t["from_user"], f"✅ Ваш трейд #{trade_id} принят!"
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"trade_action: {e}")
-        await callback.answer("⚠️ Ошибка трейда")
-
-
-# ---- Гифты ----
-@router.message(Command("gift"))
-async def gift_cmd(message: Message, command: Command, state: FSMContext):
-    if not await check_not_banned(message):
-        return
-    if message.chat.type != "private":
-        await reply_ephemeral(message, "⚠️ Гифты только в ЛС.")
-        return
-    await mark_pm_ok(message.from_user.id)
-    arg = (command.args or "").strip()
-    target_id = None
-    if arg.isdigit():
-        target_id = int(arg)
-    if not target_id or target_id == message.from_user.id:
-        await message.reply(
-            "🎁  <b>Подарок</b>\n\n"
-            "Использование: <code>/gift USERID</code>\n"
-            "Можно подарить монеты, кристаллы или карточки."
-        )
-        return
-    if not await get_user_row(target_id):
-        await message.reply("❌ Пользователь не найден.")
-        return
-    await state.set_state(GiftSG.kind)
-    await state.update_data(gift_to=target_id)
-    b = InlineKeyboardBuilder()
-    b.button(text="🪙 Монеты", callback_data="gift_kind:coins")
-    b.button(text="💎 Кристаллы", callback_data="gift_kind:gems")
-    b.button(text="🃏 Карточка", callback_data="gift_kind:card")
-    b.button(text="❌ Отмена", callback_data="gift_kind:cancel")
-    b.adjust(2, 1)
-    nick = await get_user_nickname(target_id)
-    await message.reply(
-        f"🎁 Подарок для <b>{esc(nick)}</b>\nЧто дарите?",
-        reply_markup=b.as_markup(),
-    )
-
-
-@router.callback_query(F.data.startswith("gift_kind:"))
-async def gift_kind_cb(callback: CallbackQuery, state: FSMContext):
-    if await state.get_state() != GiftSG.kind.state:
-        await callback.answer("Сессия устарела")
-        return
-    kind = callback.data.split(":")[1]
-    if kind == "cancel":
-        await state.clear()
-        await callback.message.edit_text("✅ Отменено")
-        await callback.answer()
-        return
-    await state.update_data(gift_kind=kind)
-    await state.set_state(GiftSG.value)
-    if kind == "card":
-        await callback.message.edit_text(
-            "🃏 <code>CARD_ID количество</code>\nПример: <code>3 1</code>"
-        )
-    else:
-        await callback.message.edit_text("Введите количество:")
-    await callback.answer()
-
-
-@router.message(GiftSG.value, F.text)
-async def gift_value(message: Message, state: FSMContext):
-    data = await state.get_data()
-    kind = data.get("gift_kind")
-    to_user = data.get("gift_to")
-    from_user = message.from_user.id
-    coins = gems = 0
-    card_id = None
-    card_amount = 0
-    try:
-        if kind == "card":
-            parts = message.text.strip().split()
-            card_id = int(parts[0])
-            card_amount = int(parts[1]) if len(parts) > 1 else 1
-            if card_amount < 1:
-                raise ValueError
-            have = await inventory_amount(from_user, card_id)
-            if have < card_amount:
-                await message.reply(f"❌ У вас {have} шт.")
-                return
-        else:
-            val = int(message.text.strip())
-            if val < 1:
-                raise ValueError
-            row = await get_user_row(from_user)
-            if kind == "coins":
-                if (row["coins"] or 0) < val:
-                    await message.reply("❌ Недостаточно монет.")
-                    return
-                coins = val
-            else:
-                if (row["gems"] or 0) < val:
-                    await message.reply("❌ Недостаточно кристаллов.")
-                    return
-                gems = val
-    except (ValueError, IndexError):
-        await message.reply("❌ Неверный формат.")
-        return
-
-    async with get_db() as db:
-        if coins:
-            await db.execute(
-                "UPDATE users SET coins = coins - ? WHERE user_id = ?", (coins, from_user)
-            )
-            await db.execute(
-                "UPDATE users SET coins = coins + ? WHERE user_id = ?", (coins, to_user)
-            )
-        if gems:
-            await db.execute(
-                "UPDATE users SET gems = gems - ? WHERE user_id = ?", (gems, from_user)
-            )
-            await db.execute(
-                "UPDATE users SET gems = gems + ? WHERE user_id = ?", (gems, to_user)
-            )
-        if card_id and card_amount:
-            ok = await reduce_inventory(db, from_user, card_id, card_amount)
-            if not ok:
-                await message.reply("❌ Не удалось списать карточку.")
-                await state.clear()
-                return
-            await add_inventory(db, to_user, card_id, card_amount)
-        now = int(time.time())
-        await db.execute(
-            """INSERT INTO gifts (from_user, to_user, coins, gems, card_id, card_amount, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (from_user, to_user, coins, gems, card_id, card_amount, now),
-        )
-        desc = _format_trade_side(coins, gems, card_id, card_amount)
-        await log_transaction(
-            from_user, "gift_sent",
-            coins_delta=-coins, gems_delta=-gems,
-            card_id=card_id, card_amount=card_amount,
-            related_user_id=to_user,
-            description=f"Подарок → {to_user}: {desc}",
-            db=db,
-        )
-        await log_transaction(
-            to_user, "gift_recv",
-            coins_delta=coins, gems_delta=gems,
-            card_id=card_id, card_amount=card_amount,
-            related_user_id=from_user,
-            description=f"Подарок от {from_user}: {desc}",
-            db=db,
-        )
-
-    await state.clear()
-    to_nick = await get_user_nickname(to_user)
-    await message.reply(
-        f"🎁  <b>Подарок отправлен</b> → {esc(to_nick)}\n{desc}"
-    )
-    try:
-        async with get_db() as db:
-            cur = await db.execute("SELECT pm_ok FROM users WHERE user_id = ?", (to_user,))
-            row = await cur.fetchone()
-        if row and row["pm_ok"]:
-            from_nick = await get_user_nickname(from_user)
-            await message.bot.send_message(
-                to_user,
-                f"🎁  <b>Вам подарок от {esc(from_nick)}!</b>\n{desc}",
-            )
-    except Exception as e:
-        logger.debug(f"gift notify: {e}")
-
-
-# ================= ИСТОРИЯ ТРАНЗАКЦИЙ =================
-@router.message(Command("history"))
-@router.message(Command("transactions"))
-async def cmd_history(message: Message):
-    if not await check_not_banned(message):
-        return
-    if message.chat.type != "private":
-        await reply_ephemeral(message, "⚠️ История только в ЛС.")
-        return
-    uid = message.from_user.id
-    async with get_db() as db:
-        cur = await db.execute(
-            """SELECT type, coins_delta, gems_delta, card_id, card_amount,
-                      related_user_id, description, created_at
-               FROM transactions
-               WHERE user_id = ?
-               ORDER BY created_at DESC
-               LIMIT 25""",
-            (uid,),
-        )
-        rows = await cur.fetchall()
-    if not rows:
-        await message.reply("📜 История пуста (хранится 7 дней).")
-        return
-    lines = ["📜  <b>История операций</b> (последние 25, TTL 7 дн.)\n"]
-    for r in rows:
-        ts = datetime.fromtimestamp(r["created_at"]).strftime("%d.%m %H:%M")
-        parts = []
-        if r["coins_delta"]:
-            sign = "+" if r["coins_delta"] > 0 else ""
-            parts.append(f"{sign}{r['coins_delta']}🪙")
-        if r["gems_delta"]:
-            sign = "+" if r["gems_delta"] > 0 else ""
-            parts.append(f"{sign}{r['gems_delta']}💎")
-        if r["card_id"] and r["card_amount"]:
-            parts.append(f"card#{r['card_id']}×{r['card_amount']}")
-        delta = " ".join(parts) if parts else "—"
-        desc = r["description"] or r["type"]
-        lines.append(f"<code>{ts}</code> · {esc(desc)}\n    {delta}")
-    # chunk if needed
-    text = "\n".join(lines)
-    if len(text) > 4000:
-        text = "\n".join(lines[:20])
-    await message.reply(text)
 
 
 # ================= АДМИН-ПАНЕЛЬ =================
@@ -6195,103 +4530,6 @@ async def _run_api_server():
     await server.serve()
 
 
-
-async def _background_maintenance(bot: Bot):
-    """Периодически: сжигание стриков, очистка транзакций, напоминания."""
-    await asyncio.sleep(20)
-    while True:
-        try:
-            burned = await burn_expired_streaks()
-            if burned:
-                logger.info("Сгорело стриков: %s", burned)
-            deleted = await cleanup_old_transactions()
-            if deleted:
-                logger.info("Удалено старых транзакций: %s", deleted)
-            await _send_reminders(bot)
-        except Exception as e:
-            logger.error("maintenance: %s", e)
-        await asyncio.sleep(5 * 60)
-
-
-async def _send_reminders(bot: Bot):
-    """Напоминания о кулдауне и стрике — только пользователям с pm_ok."""
-    now = int(time.time())
-    async with get_db() as db:
-        # Кулдаун скоро закончится
-        cur = await db.execute(
-            """SELECT user_id, last_claim, last_cd_remind, nickname
-               FROM users
-               WHERE pm_ok = 1
-                 AND role != 'banned'
-                 AND last_claim > 0
-                 AND (? - last_claim) < ?
-                 AND (? - last_claim) >= (? - ?)
-                 AND (last_cd_remind IS NULL OR last_cd_remind = 0
-                      OR (? - last_cd_remind) >= ?)""",
-            (
-                now, COOLDOWN_SECONDS,
-                now, COOLDOWN_SECONDS, CD_WARN_BEFORE,
-                now, REMINDER_COOLDOWN_SECONDS,
-            ),
-        )
-        cd_users = await cur.fetchall()
-        for u in cd_users:
-            remaining = COOLDOWN_SECONDS - (now - u["last_claim"])
-            if remaining <= 0 or remaining > CD_WARN_BEFORE:
-                continue
-            m = remaining // 60
-            try:
-                await bot.send_message(
-                    u["user_id"],
-                    f"⏳  Скоро можно снова получить карточку!\n"
-                    f"Осталось около <b>{m} мин</b>.\n"
-                    f"Напишите «мряу» или /meow",
-                )
-                await db.execute(
-                    "UPDATE users SET last_cd_remind = ? WHERE user_id = ?",
-                    (now, u["user_id"]),
-                )
-            except Exception as e:
-                logger.debug(f"cd remind {u['user_id']}: {e}")
-
-        # Стрик скоро сгорит
-        cur = await db.execute(
-            """SELECT user_id, last_claim, streak, last_streak_remind, nickname
-               FROM users
-               WHERE pm_ok = 1
-                 AND role != 'banned'
-                 AND streak > 0
-                 AND last_claim > 0
-                 AND (? - last_claim) >= (? - ?)
-                 AND (? - last_claim) < ?
-                 AND (last_streak_remind IS NULL OR last_streak_remind = 0
-                      OR (? - last_streak_remind) >= ?)""",
-            (
-                now, STREAK_EXPIRE_SECONDS, STREAK_WARN_BEFORE,
-                now, STREAK_EXPIRE_SECONDS,
-                now, REMINDER_COOLDOWN_SECONDS,
-            ),
-        )
-        st_users = await cur.fetchall()
-        for u in st_users:
-            left = STREAK_EXPIRE_SECONDS - (now - u["last_claim"])
-            if left <= 0:
-                continue
-            h = left // 3600
-            try:
-                await bot.send_message(
-                    u["user_id"],
-                    f"🔥  Стрик <b>{fmt_days(u['streak'])}</b> сгорит через ~{h} ч!\n"
-                    f"Получите карточку («мряу»), чтобы сохранить серию.",
-                )
-                await db.execute(
-                    "UPDATE users SET last_streak_remind = ? WHERE user_id = ?",
-                    (now, u["user_id"]),
-                )
-            except Exception as e:
-                logger.debug(f"streak remind {u['user_id']}: {e}")
-
-
 async def main():
     try:
         os.makedirs(os.path.dirname(DB_NAME) or ".", exist_ok=True)
@@ -6324,7 +4562,6 @@ async def main():
         )
 
         logger.info("🤖 Бот запущен")
-        asyncio.create_task(_background_maintenance(bot))
         if start_api:
             await asyncio.gather(
                 dp.start_polling(bot),
