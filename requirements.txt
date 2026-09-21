@@ -2,3 +2,5 @@ aiogram
 aiosqlite
 python-dotenv
 Pillow
+fastapi
+uvicorn
