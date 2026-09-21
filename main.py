@@ -20,7 +20,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton,
+    BotCommand, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
     ReplyKeyboardMarkup, LinkPreviewOptions,
 )
@@ -3990,6 +3990,20 @@ async def main():
                                                                 link_preview=LinkPreviewOptions(is_disabled=True), ))
         dp = Dispatcher(storage=MemoryStorage())
         dp.include_router(router)
+
+        # Меню команд (кнопка «☰» / ввод «/»)
+        await bot.set_my_commands([
+            BotCommand(command="start", description="👋 Запуск бота"),
+            BotCommand(command="meow", description="🃏 Получить карточку"),
+            BotCommand(command="profile", description="👤 Профиль"),
+            BotCommand(command="collection", description="🃏 Моя коллекция"),
+            BotCommand(command="market", description="🛒 Маркет"),
+            BotCommand(command="top", description="🏆 Топ игроков"),
+            BotCommand(command="help", description="❓ Помощь"),
+            BotCommand(command="nickname", description="✏️ Сменить ник"),
+            BotCommand(command="gender", description="⚧ Выбрать пол"),
+        ])
+        logger.info("Меню команд установлено")
 
         logger.info("🤖 Бот запущен")
         await dp.start_polling(bot)
