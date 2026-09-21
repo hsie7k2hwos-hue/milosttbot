@@ -67,20 +67,19 @@ STREAK_EXPIRE_SECONDS = 24 * 3600  # стрик сбрасывается, есл
 # п.12 — заглушка вместо генерации аватарки. Замените на свой file_id.
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 
-# ================= СЛОТ-МАШИНА =================
-# Команда: «мряу ставка [монеты]»
-# Пример: мряу ставка 50
-# Логика:
-#   1. Проверяем баланс >= ставка.
-#   2. Списываем ставку сразу.
-#   3. Случайно выбираем эмодзи (🎲 🎯 🏀 ⚽ 🎰 🎳).
-#   4. Отправляем анимированный dice.
-#   5. Берём реальный value из сообщения.
-#   6. По value определяем множитель и начисляем выигрыш.
-SLOT_SPIN_DELAY = 4  # секунд до показа результата (анимация)
+# ================= КУБИК =================
+# Команда: «мряу кубик»
+# Кубик можно кинуть раз в 10 минут.
+# Выпадает случайно от −10 до +10 монет (вероятность выигрыша выше).
+# Минимальный баланс для броска: 10 монет.
+# Успешные броски НЕ удаляются; ошибки — автоудаляются в группах.
+DICE_COOLDOWN_SECONDS = 10 * 60  # 10 минут
+DICE_MIN_BALANCE = 10
+DICE_SPIN_DELAY = 3  # секунд анимации 🎲
 
-# Доступные эмодзи для слота
-SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"]
+# --- ОТКЛЮЧЕНО: старая слот-машина «мряу ставка» ---
+# SLOT_SPIN_DELAY = 4
+# SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"]
 
 RARITIES = {
     "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "reward": 10},
@@ -104,15 +103,28 @@ STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
 
-# Регулярка для команды слота: «мряу ставка 123»
-SLOT_CMD_RE = re.compile(
-    r"^мряу\s+ставка\s+(\d+)\s*$",
+# Регулярка для кубика: «мряу кубик»
+DICE_CMD_RE = re.compile(
+    r"^мряу\s+кубик\s*$",
     re.IGNORECASE | re.UNICODE,
 )
 
-# Регулярка для перевода: «мряу перевод 123»
-TRANSFER_CMD_RE = re.compile(
-    r"^мряу\s+перевод\s+(\d+)\s*$",
+# --- ОТКЛЮЧЕНО: старые команды ставки и перевода ---
+# SLOT_CMD_RE = re.compile(
+#     r"^мряу\s+ставка\s+(\d+)\s*$",
+#     re.IGNORECASE | re.UNICODE,
+# )
+# TRANSFER_CMD_RE = re.compile(
+#     r"^мряу\s+перевод\s+(\d+)\s*$",
+#     re.IGNORECASE | re.UNICODE,
+# )
+# Для перехвата отключённых команд (чтобы показать сообщение об отключении)
+DISABLED_SLOT_RE = re.compile(
+    r"^мряу\s+ставка\b",
+    re.IGNORECASE | re.UNICODE,
+)
+DISABLED_TRANSFER_RE = re.compile(
+    r"^мряу\s+перевод\b",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -221,80 +233,27 @@ def instant_cost(remaining_seconds: int) -> int:
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
     
 
-def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
+def roll_dice_coins() -> int:
     """
-    Определяет множитель и текст результата по реальному значению Telegram Dice.
-    Возвращает (множитель, текст_результата).
-    Множитель 0 = полный проигрыш ставки.
+    Случайный результат кубика: от −10 до +10 монет.
+    Вероятность выигрыша (положительный результат) выше, чем проигрыша.
     """
-    # 🎲 Кубик (1–6)
-    if emoji == "🎲":
-        if value == 6:
-            return 3.0, "🎲 Шестёрка! x3"
-        if value == 5:
-            return 1.8, "🎲 Пятёрка — x1.8"
-        if value == 4:
-            return 1.2, "🎲 Четвёрка — x1.2"
-        if value == 3:
-            return 1.0, "🎲 Тройка — возврат ставки"
-        return 0.0, f"🎲 Выпало {value}… ставка сгорела"
+    values = list(range(-10, 11))
+    # Веса: отрицательные — низкие, 0 — средний, положительные — высокие
+    weights = []
+    for v in values:
+        if v > 0:
+            weights.append(4 + v)   # 5 … 14
+        elif v == 0:
+            weights.append(6)
+        else:
+            weights.append(2)       # отрицательные реже
+    return random.choices(values, weights=weights, k=1)[0]
 
-    # 🎯 Дартс (1–6, 6 = яблочко)
-    if emoji == "🎯":
-        if value == 6:
-            return 4.0, "🎯 В яблочко!!! x4"
-        if value == 5:
-            return 2.0, "🎯 Почти центр! x2"
-        if value == 4:
-            return 1.3, "🎯 Хороший бросок — x1.3"
-        if value == 3:
-            return 1.0, "🎯 Тройка — возврат ставки"
-        return 0.0, f"🎯 Промах ({value})… ставка сгорела"
 
-    # 🎳 Боулинг (1–6, 6 = страйк)
-    if emoji == "🎳":
-        if value == 6:
-            return 3.5, "🎳 СТРАЙК!!! x3.5"
-        if value == 5:
-            return 1.8, "🎳 Почти страйк! x1.8"
-        if value == 4:
-            return 1.2, "🎳 Четыре кегли — x1.2"
-        if value == 3:
-            return 1.0, "🎳 Три кегли — возврат ставки"
-        return 0.0, f"🎳 Всего {value}… ставка сгорела"
-
-    # 🏀 Баскетбол (1–5)
-    if emoji == "🏀":
-        if value == 5:
-            return 2.5, "🏀 Красивый данк! x2.5"
-        if value == 4:
-            return 1.6, "🏀 Мяч в кольце! x1.6"
-        if value == 3:
-            return 1.0, "🏀 Почти… возврат ставки"
-        return 0.0, f"🏀 Мимо ({value})… ставка сгорела"
-
-    # ⚽️ / ⚽ Футбол (1–5)
-    if emoji in ("⚽️", "⚽"):
-        if value == 5:
-            return 2.5, "⚽️ Гол!!! x2.5"
-        if value == 4:
-            return 1.6, "⚽️ Гол! x1.6"
-        if value == 3:
-            return 1.0, "⚽️ Штанга… возврат ставки"
-        return 0.0, f"⚽️ Мимо ({value})… ставка сгорела"
-
-    # 🎰 Слот-машина (1–64)
-    if emoji == "🎰":
-        if value == 64:
-            return 5.0, "🎰 ДЖЕКПОТ!!! x5"
-        if value >= 40:
-            return 2.0, "🎰 Хороший выигрыш — x2"
-        if value >= 20:
-            return 1.0, "🎰 Ничья — возврат ставки"
-        return 0.0, f"🎰 Проигрыш ({value})… ставка сгорела"
-
-    # fallback
-    return 1.0, "⚠️ Что-то пошло не так… возврат ставки"
+# --- ОТКЛЮЧЕНО: старая evaluate_dice для слот-машины ---
+# def evaluate_dice(emoji: str, value: int) -> Tuple[float, str]:
+#     ... (старая логика множителей по dice) ...
 
 
 # ================= CALLBACK DATA =================
@@ -461,6 +420,7 @@ async def init_db():
             ("users", "streak_bonus", "INTEGER DEFAULT 0"),
             ("users", "gender", "TEXT DEFAULT 'none'"),
             ("users", "gems", "INTEGER DEFAULT 0"),
+            ("users", "last_dice", "INTEGER DEFAULT 0"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("inventory", "amount", "INTEGER DEFAULT 1"),
         ]:
@@ -1068,8 +1028,7 @@ async def cmd_help(message: Message):
             "<b>Основные команды:</b>\n"
             "/start — запуск бота\n"
             "/meow или «мряу» — получить карточку\n"
-            "«мряу ставка N» — слот-машина (ставка N монет)\n"
-            "«мряу перевод N» — перевод монет (в группе, реплаем на сообщение получателя)\n"
+            "«мряу кубик» — бросить кубик (−10…+10 🪙, раз в 10 мин)\n"
             "«мряу профиль» — свой профиль (в группе реплаем — профиль другого)\n"
             "«мряу маркет» — маркет (в группе реплаем — маркет другого)\n"
             "«мряу коллекция» / «мряу карточки» — коллекция (реплаем — чужая)\n"
@@ -1098,11 +1057,9 @@ async def cmd_help(message: Message):
               f"  • Обмен: 1 💎 = {GEM_TO_COINS} 🪙 (купить кристаллы за монеты в маркете)\n\n"
               "🛒 <b>Маркет:</b> покупайте карточки, которых у вас ещё нет, за кристаллы.\n"
               f"Цены:\n{market_prices}\n\n"
-              "🎰 <b>Слот-машина:</b> напишите <code>мряу ставка 50</code>. "
-              "Бот случайно выбирает игру (🎲 🎯 🏀 ⚽ 🎰 🎳) и крутит анимированный эмодзи. "
-              "Выигрыш зависит от того, что реально выпало!\n\n"
-              "💸 <b>Перевод монет:</b> в группе ответьте на сообщение пользователя "
-              "командой <code>мряу перевод 100</code>. В личных сообщениях не работает."
+              "🎲 <b>Кубик:</b> напишите <code>мряу кубик</code>. "
+              f"Можно бросать раз в 10 минут. Нужно минимум {DICE_MIN_BALANCE} 🪙. "
+              "Выпадает от −10 до +10 монет (шанс выигрыша выше)."
     )
     await message.reply(text, reply_markup=get_main_km())
 
@@ -1227,52 +1184,44 @@ def _card_caption(mention: str, card: dict) -> str:
     return text
 
 
-# ================= СЛОТ-МАШИНА =================
-@router.message(F.text.regexp(SLOT_CMD_RE))
-async def slot_machine_handler(message: Message):
+# ================= ОТКЛЮЧЁННЫЕ КОМАНДЫ (ставка / перевод) =================
+@router.message(F.text.regexp(DISABLED_SLOT_RE))
+async def disabled_slot_handler(message: Message):
+    """Команда «мряу ставка» отключена."""
+    await reply_ephemeral(
+        message,
+        "❌ <b>Команда была отключена.</b> Обратитесь к системному администратору",
+    )
+
+
+@router.message(F.text.regexp(DISABLED_TRANSFER_RE))
+async def disabled_transfer_handler(message: Message):
+    """Команда «мряу перевод» отключена."""
+    await reply_ephemeral(
+        message,
+        "❌ <b>Команда была отключена.</b> Обратитесь к системному администратору",
+    )
+
+
+# ================= КУБИК =================
+@router.message(F.text.regexp(DICE_CMD_RE))
+async def dice_handler(message: Message):
     """
-    Обработчик команды «мряу ставка N».
-    1. Парсим сумму ставки.
-    2. Проверяем баланс.
-    3. Списываем ставку.
-    4. Случайно выбираем эмодзи и отправляем dice.
-    5. Берём реальный value из сообщения.
-    6. Определяем множитель по evaluate_dice.
-    7. Начисляем выигрыш.
+    Команда «мряу кубик».
+    - Раз в 10 минут.
+    - Минимум 10 монет на балансе.
+    - Выпадает случайно от −10 до +10 монет (шанс выигрыша выше).
+    - Успешные броски НЕ удаляются; ошибки — автоудаляются в группах.
     """
     user_id = message.from_user.id
 
-    if rate_limited(f"slot:{user_id}", limit=6, window=15):
+    if rate_limited(f"dice:{user_id}", limit=6, window=15):
         await reply_ephemeral(message, "⏳ Слишком часто. Подождите немного.")
         return
 
     if message.chat.type != "private":
-        if rate_limited(f"slot-chat:{message.chat.id}", limit=15, window=15):
+        if rate_limited(f"dice-chat:{message.chat.id}", limit=15, window=15):
             return
-
-    text = (message.text or "").strip()
-    m = SLOT_CMD_RE.match(text)
-    if not m:
-        return
-
-    try:
-        bet = int(m.group(1))
-    except (ValueError, IndexError):
-        await reply_ephemeral(
-            message,
-            "❌ <b>Ставка должна быть целым числом.</b>\nПример: <code>мряу ставка 50</code>",
-        )
-        return
-
-    if bet <= 0:
-        await reply_ephemeral(message, "❌ <b>Ставка должна быть больше нуля.</b>")
-        return
-
-    if bet > 100_000_000_000:
-        await reply_ephemeral(
-            message, "❌ <b>Слишком большая ставка.</b> Максимум — 100 000 000 000 🪙"
-        )
-        return
 
     try:
         await get_or_create_user(
@@ -1280,250 +1229,83 @@ async def slot_machine_handler(message: Message):
         )
         nickname = await get_user_nickname(user_id)
         mention = user_mention(user_id, nickname, message.from_user.username)
+        now = int(time.time())
 
-        # --- Проверка и списание ставки ---
         async with get_db() as db:
             cur = await db.execute(
-                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+                "SELECT coins, last_dice FROM users WHERE user_id = ?", (user_id,)
             )
             row = await cur.fetchone()
-            balance = row["coins"] if row else 0
+            balance = (row["coins"] or 0) if row else 0
+            last_dice = (row["last_dice"] or 0) if row else 0
 
-            if balance < bet:
+            if balance < DICE_MIN_BALANCE:
                 await reply_ephemeral(
                     message,
                     f"⚠️ <b>Недостаточно монет.</b>\n"
-                    f"Ставка: <b>{fmt_num(bet)} 🪙</b>\n"
+                    f"Для броска нужно минимум <b>{fmt_num(DICE_MIN_BALANCE)} 🪙</b>.\n"
                     f"У вас: <b>{fmt_num(balance)} 🪙</b>",
                 )
                 return
 
-            cur = await db.execute(
-                "UPDATE users SET coins = coins - ? "
-                "WHERE user_id = ? AND coins >= ?",
-                (bet, user_id, bet),
-            )
-            if cur.rowcount != 1:
+            time_passed = now - last_dice
+            if last_dice > 0 and time_passed < DICE_COOLDOWN_SECONDS:
+                remaining = DICE_COOLDOWN_SECONDS - time_passed
+                m, s = remaining // 60, remaining % 60
+                if m > 0:
+                    time_str = f"{m} мин {s} сек" if s else f"{m} мин"
+                else:
+                    time_str = f"{s} сек"
                 await reply_ephemeral(
                     message,
-                    "⚠️ <b>Недостаточно монет</b> (баланс изменился). Попробуйте ещё раз.",
+                    f"🕘 <b>{mention}</b>, кубик можно бросить через <b>{time_str}</b>",
                 )
                 return
 
-        # --- Выбираем эмодзи и крутим ---
-        emoji = random.choice(SLOT_EMOJIS)
-        spin_msg = await message.reply_dice(emoji=emoji)
+            # --- Бросок ---
+            delta = roll_dice_coins()
+            new_balance = balance + delta
+            if new_balance < 0:
+                new_balance = 0
+                delta = new_balance - balance  # корректируем, если ушли в минус
 
-        # Реальный результат уже есть в spin_msg.dice
-        dice_value = spin_msg.dice.value if spin_msg.dice else 1
-
-        # Ждём окончания анимации
-        await asyncio.sleep(SLOT_SPIN_DELAY)
-
-        # --- Результат по реальному value ---
-        mult, result_text = evaluate_dice(emoji, dice_value)
-        win_amount = int(bet * mult)
-
-        async with get_db() as db:
-            if win_amount > 0:
-                await db.execute(
-                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                    (win_amount, user_id),
-                )
-            cur = await db.execute(
-                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+            await db.execute(
+                "UPDATE users SET coins = ?, last_dice = ? WHERE user_id = ?",
+                (new_balance, now, user_id),
             )
-            final_balance = (await cur.fetchone())[0]
 
-        # Формируем итоговое сообщение
-        if mult == 0:
-            delta_str = f"−{fmt_num(bet)}"
+        # Анимация кубика (успешный бросок — НЕ удаляем)
+        spin_msg = await message.reply_dice(emoji="🎲")
+        await asyncio.sleep(DICE_SPIN_DELAY)
+
+        if delta > 0:
+            delta_str = f"+{fmt_num(delta)}"
+            color_emoji = "📈"
+            title = "🎉 Выигрыш!"
+        elif delta < 0:
+            delta_str = f"−{fmt_num(abs(delta))}"
             color_emoji = "📉"
+            title = "😔 Проигрыш"
         else:
-            profit = win_amount - bet
-            if profit > 0:
-                delta_str = f"+{fmt_num(profit)}"
-                color_emoji = "📈"
-            elif profit == 0:
-                delta_str = "±0"
-                color_emoji = "➡️"
-            else:
-                delta_str = f"{fmt_num(profit)}"
-                color_emoji = "📉"
+            delta_str = "±0"
+            color_emoji = "➡️"
+            title = "😐 Ничья"
 
         result_caption = (
-            f"{emoji} <b>Результат</b>\n\n"
-            f"{result_text}\n\n"
-            f"💰 Ставка • <b>{fmt_num(bet)} 🪙</b>\n"
-            f"🎁 Выигрыш • <b>{fmt_num(win_amount)} 🪙</b>\n"
-            f"{color_emoji} Итог • <b>{delta_str} 🪙</b>\n"
-            f"🪙 Баланс • <b>{fmt_num(final_balance)}</b>"
+            f"🎲 <b>{title}</b>\n\n"
+            f"{color_emoji} Результат • <b>{delta_str} 🪙</b>\n"
+            f"🪙 Баланс • <b>{fmt_num(new_balance)}</b>"
         )
 
         try:
-            result_msg = await spin_msg.reply(result_caption)
-            if message.chat.type != "private":
-                # Удаляем результат + исходный запрос пользователя.
-                # Dice (spin_msg) тоже почистим для аккуратности.
-                async def _cleanup_slot():
-                    await asyncio.sleep(GROUP_AUTODELETE_SECONDS)
-                    await _try_delete(result_msg)
-                    await _try_delete(spin_msg)
-                    await _try_delete(message)
-                asyncio.create_task(_cleanup_slot())
+            await spin_msg.reply(result_caption)
+            # Успешные броски не удаляются (ни dice, ни результат, ни запрос)
         except TelegramBadRequest:
-            await reply_ephemeral(message, result_caption)
+            await message.reply(result_caption)
 
     except Exception as e:
-        logger.error(f"Ошибка в slot_machine_handler: {e}")
-        # Пытаемся вернуть ставку при ошибке
-        try:
-            async with get_db() as db:
-                await db.execute(
-                    "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                    (bet, user_id),
-                )
-        except Exception:
-            pass
-        await reply_ephemeral(message, "❌ <b>Произошла ошибка в слоте. Попробуйте позже.</b>")
-
-
-# ================= ПЕРЕВОД МОНЕТ =================
-@router.message(F.text.regexp(TRANSFER_CMD_RE))
-async def transfer_coins_handler(message: Message):
-    """
-    Команда «мряу перевод N».
-    Работает только в группах и только реплаем на сообщение получателя.
-    В ЛС игнорируется (тихо).
-    """
-    # Только группы / супергруппы
-    if message.chat.type == "private":
-        return
-
-    user_id = message.from_user.id
-
-    if rate_limited(f"transfer:{user_id}", limit=8, window=20):
-        await reply_ephemeral(message, "⏳ Слишком часто. Подождите немного.")
-        return
-
-    if rate_limited(f"transfer-chat:{message.chat.id}", limit=20, window=20):
-        return
-
-    # Должен быть реплай на сообщение пользователя
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await reply_ephemeral(
-            message,
-            "⚠️ <b>Ответьте на сообщение пользователя</b>, которому хотите перевести монеты.\n"
-            "Пример: реплай + <code>мряу перевод 50</code>",
-        )
-        return
-
-    target = message.reply_to_message.from_user
-
-    if target.is_bot:
-        await reply_ephemeral(message, "❌ Нельзя переводить монеты боту.")
-        return
-
-    if target.id == user_id:
-        await reply_ephemeral(message, "❌ Нельзя перевести монеты самому себе.")
-        return
-
-    text = (message.text or "").strip()
-    m = TRANSFER_CMD_RE.match(text)
-    if not m:
-        return
-
-    try:
-        amount = int(m.group(1))
-    except (ValueError, IndexError):
-        await reply_ephemeral(
-            message,
-            "❌ <b>Сумма должна быть целым числом.</b>\nПример: <code>мряу перевод 50</code>",
-        )
-        return
-
-    if amount <= 0:
-        await reply_ephemeral(message, "❌ <b>Сумма перевода должна быть больше нуля.</b>")
-        return
-
-    if amount > 100_000_000_000:
-        await reply_ephemeral(
-            message, "❌ <b>Слишком большая сумма.</b> Максимум — 100 000 000 000 🪙"
-        )
-        return
-
-    try:
-        # Создаём / обновляем обоих пользователей
-        await get_or_create_user(
-            user_id, message.from_user.username, message.from_user.full_name
-        )
-        await get_or_create_user(
-            target.id, target.username, target.full_name
-        )
-
-        sender_nick = await get_user_nickname(user_id)
-        receiver_nick = await get_user_nickname(target.id)
-        sender_mention = user_mention(user_id, sender_nick, message.from_user.username)
-        receiver_mention = user_mention(target.id, receiver_nick, target.username)
-
-        async with get_db() as db:
-            cur = await db.execute(
-                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
-            )
-            row = await cur.fetchone()
-            balance = row["coins"] if row else 0
-
-            if balance < amount:
-                await reply_ephemeral(
-                    message,
-                    f"⚠️ <b>Недостаточно монет.</b>\n"
-                    f"Нужно: <b>{fmt_num(amount)} 🪙</b>\n"
-                    f"У вас: <b>{fmt_num(balance)} 🪙</b>",
-                )
-                return
-
-            # Атомарный перевод: списываем только при достаточном балансе
-            cur = await db.execute(
-                "UPDATE users SET coins = coins - ? "
-                "WHERE user_id = ? AND coins >= ?",
-                (amount, user_id, amount),
-            )
-            if cur.rowcount != 1:
-                await reply_ephemeral(
-                    message,
-                    "⚠️ <b>Недостаточно монет</b> (баланс изменился). Попробуйте ещё раз.",
-                )
-                return
-            await db.execute(
-                "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                (amount, target.id),
-            )
-
-            cur = await db.execute(
-                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
-            )
-            new_sender_balance = (await cur.fetchone())[0]
-
-            cur = await db.execute(
-                "SELECT coins FROM users WHERE user_id = ?", (target.id,)
-            )
-            new_receiver_balance = (await cur.fetchone())[0]
-
-        await reply_ephemeral(
-            message,
-            f"💸 <b>Перевод выполнен</b>\n\n"
-            f"От: {sender_mention}\n"
-            f"Кому: {receiver_mention}\n"
-            f"Сумма: <b>{fmt_num(amount)} 🪙</b>\n\n"
-            f"🪙 Баланс отправителя: <b>{fmt_num(new_sender_balance)}</b>\n"
-            f"🪙 Баланс получателя: <b>{fmt_num(new_receiver_balance)}</b>",
-        )
-
-    except Exception as e:
-        logger.error(f"Ошибка в transfer_coins_handler: {e}")
-        await reply_ephemeral(
-            message, "❌ <b>Произошла ошибка при переводе. Попробуйте позже.</b>"
-        )
+        logger.error(f"Ошибка в dice_handler: {e}")
+        await reply_ephemeral(message, "❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
 # ---------- Профиль ----------
