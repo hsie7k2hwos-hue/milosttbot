@@ -427,6 +427,69 @@ async def init_db():
             )
         """)
 
+        # Если таблицы trades/gifts созданы со старой/пустой схемой — пересоздаём
+        async def _table_columns(table_name: str):
+            cur = await db.execute(f"PRAGMA table_info({table_name})")
+            return {row[1] for row in await cur.fetchall()}
+
+        trades_cols = await _table_columns("trades")
+        if trades_cols and "to_user" not in trades_cols:
+            logger.warning("Таблица trades без to_user — пересоздаём")
+            await db.execute("DROP TABLE IF EXISTS trades")
+            await db.execute("""
+                CREATE TABLE trades (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_user           INTEGER NOT NULL,
+                    to_user             INTEGER NOT NULL,
+                    status              TEXT NOT NULL DEFAULT 'pending',
+                    offer_coins         INTEGER DEFAULT 0,
+                    offer_gems          INTEGER DEFAULT 0,
+                    offer_card_id       INTEGER,
+                    offer_card_amount   INTEGER DEFAULT 0,
+                    request_coins       INTEGER DEFAULT 0,
+                    request_gems        INTEGER DEFAULT 0,
+                    request_card_id     INTEGER,
+                    request_card_amount INTEGER DEFAULT 0,
+                    created_at          INTEGER NOT NULL,
+                    expires_at          INTEGER NOT NULL
+                )
+            """)
+
+        gifts_cols = await _table_columns("gifts")
+        if gifts_cols and "to_user" not in gifts_cols:
+            logger.warning("Таблица gifts без to_user — пересоздаём")
+            await db.execute("DROP TABLE IF EXISTS gifts")
+            await db.execute("""
+                CREATE TABLE gifts (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_user       INTEGER NOT NULL,
+                    to_user         INTEGER NOT NULL,
+                    coins           INTEGER DEFAULT 0,
+                    gems            INTEGER DEFAULT 0,
+                    card_id         INTEGER,
+                    card_amount     INTEGER DEFAULT 0,
+                    message         TEXT,
+                    created_at      INTEGER NOT NULL
+                )
+            """)
+
+        market_cols = await _table_columns("market_listings")
+        if market_cols and "price_gems" not in market_cols:
+            logger.warning("Таблица market_listings со старой схемой — пересоздаём")
+            await db.execute("DROP TABLE IF EXISTS market_listings")
+            await db.execute("""
+                CREATE TABLE market_listings (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seller_id   INTEGER NOT NULL,
+                    card_id     INTEGER NOT NULL,
+                    amount      INTEGER NOT NULL DEFAULT 1,
+                    price_gems  INTEGER NOT NULL,
+                    created_at  INTEGER NOT NULL,
+                    FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE,
+                    FOREIGN KEY (seller_id) REFERENCES users (user_id) ON DELETE CASCADE
+                )
+            """)
+
         for sql in (
             "CREATE INDEX IF NOT EXISTS idx_market_seller ON market_listings(seller_id)",
             "CREATE INDEX IF NOT EXISTS idx_market_card ON market_listings(card_id)",
@@ -435,7 +498,10 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_trades_to ON trades(to_user, status)",
             "CREATE INDEX IF NOT EXISTS idx_trades_from ON trades(from_user, status)",
         ):
-            await db.execute(sql)
+            try:
+                await db.execute(sql)
+            except aiosqlite.OperationalError as e:
+                logger.warning("index skip: %s (%s)", sql, e)
 
         for table, column, definition in [
             ("users", "registration", "INTEGER DEFAULT 0"),
