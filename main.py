@@ -4506,6 +4506,30 @@ async def cmd_migrate_photos(message: Message):
 
 
 # ================= ЗАПУСК =================
+async def _run_api_server():
+    """FastAPI для мини-аппки (тот же процесс, что и бот). Нужны fastapi + uvicorn."""
+    try:
+        import uvicorn
+        from api import app as fastapi_app
+    except ImportError as e:
+        logger.warning(
+            "API мини-аппки не запущен (нет fastapi/uvicorn или api.py): %s", e
+        )
+        return
+
+    port = int(os.getenv("PORT", os.getenv("API_PORT", "8080")))
+    logger.info("🌐 API мини-аппки на 0.0.0.0:%s", port)
+    config = uvicorn.Config(
+        fastapi_app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+        lifespan="on",
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
 async def main():
     try:
         os.makedirs(os.path.dirname(DB_NAME) or ".", exist_ok=True)
@@ -4532,8 +4556,19 @@ async def main():
         await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
         logger.info("Меню команд (default) установлено")
 
+        # START_API=1 или ENABLE_WEBAPP_API=1 — поднять FastAPI рядом с ботом (Bothost + домен)
+        start_api = os.getenv("START_API", os.getenv("ENABLE_WEBAPP_API", "1")).strip() in (
+            "1", "true", "yes", "on",
+        )
+
         logger.info("🤖 Бот запущен")
-        await dp.start_polling(bot)
+        if start_api:
+            await asyncio.gather(
+                dp.start_polling(bot),
+                _run_api_server(),
+            )
+        else:
+            await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
         raise
