@@ -82,7 +82,7 @@ DICE_SPIN_DELAY = 3  # секунд анимации 🎲
 # SLOT_EMOJIS = ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"]
 
 RARITIES = {
-    "common": {"icon": "⚪️", "name": "Обычная", "weight": 50, "reward": 10},
+    "common": {"icon": "⚪", "name": "Обычная", "weight": 50, "reward": 10},
     "rare": {"icon": "🔵", "name": "Редкая", "weight": 20, "reward": 25},
     "epic": {"icon": "🟣", "name": "Эпическая", "weight": 15, "reward": 50},
     "mythical": {"icon": "🔴", "name": "Мифическая", "weight": 10, "reward": 75},
@@ -90,10 +90,10 @@ RARITIES = {
 }
 
 GENDERS = {
-    "male": {"icon": "♂️", "name": "Мужской"},
-    "female": {"icon": "♀️", "name": "Женский"},
-    "other": {"icon": "⚧️", "name": "Другой"},
-    "none": {"icon": "➖", "name": "Не задан"},
+    "male": {"icon": "♂", "name": "Мужской"},
+    "female": {"icon": "♀", "name": "Женский"},
+    "other": {"icon": "⚧", "name": "Другой"},
+    "none": {"icon": "—", "name": "Не задан"},
 }
 
 # п.2 — стрик начисляется со 2-го дня
@@ -541,21 +541,21 @@ def get_rarity_keyboard(callback_prefix: str = "set_rarity"):
 
 def get_admin_main_kb():
     b = InlineKeyboardBuilder()
-    b.button(text="➕ Добавить карточку", callback_data="admin_add_card")
-    b.button(text="📜 Список карточек", callback_data=AdminCardPageCallback(page=0).pack())
-    b.button(text="👥 Список пользователей", callback_data=AdminUserPageCallback(page=0).pack())
+    b.button(text="➕  Добавить карточку", callback_data="admin_add_card")
+    b.button(text="📜  Список карточек", callback_data=AdminCardPageCallback(page=0).pack())
+    b.button(text="👥  Список пользователей", callback_data=AdminUserPageCallback(page=0).pack())
     b.adjust(1)
     return b.as_markup()
 
 
 def get_profile_kb(owner_id: int):
     b = InlineKeyboardBuilder()
-    b.button(text="🀄️ Мои карточки", callback_data=MainMenuCallback(user_id=owner_id).pack())
-    b.button(text="⚧ Выбрать пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
-    b.button(text=f"✏️ Сменить ник ({NICKNAME_COST} 🪙)",
+    b.button(text="🃏  Моя коллекция", callback_data=MainMenuCallback(user_id=owner_id).pack())
+    b.button(text="⚧  Выбрать пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
+    b.button(text=f"✏️  Сменить ник · {NICKNAME_COST} 🪙",
              callback_data=NicknameCallback(action="change", user_id=owner_id).pack())
     b.button(
-        text="💱 Купить кристаллы",
+        text="💎  Купить кристаллы",
         callback_data=MarketExchangeCallback(action="menu", user_id=owner_id).pack(),
     )
     b.adjust(1)
@@ -565,12 +565,12 @@ def get_profile_kb(owner_id: int):
 def get_gender_kb(current: str = "none", owner_id: int = 0) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for key, info in GENDERS.items():
-        mark = "✅ " if key == current else ""
+        mark = "● " if key == current else "○ "
         b.button(
-            text=f"{mark}{info['icon']} {info['name']}",
+            text=f"{mark}{info['icon']}  {info['name']}",
             callback_data=GenderCallback(value=key, user_id=owner_id).pack(),
         )
-    b.button(text="🔙 Назад в профиль", callback_data=BackToProfileCallback(user_id=owner_id).pack())
+    b.button(text="‹  Назад в профиль", callback_data=BackToProfileCallback(user_id=owner_id).pack())
     b.adjust(1)
     return b.as_markup()
 
@@ -578,26 +578,27 @@ def get_gender_kb(current: str = "none", owner_id: int = 0) -> InlineKeyboardMar
 def get_main_km():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🀄️ Получить карточку"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🛒 Маркет"), KeyboardButton(text="🏆 Топ игроков")],
+            [KeyboardButton(text="🃏 Получить карточку"), KeyboardButton(text="👤 Профиль")],
+            [KeyboardButton(text="🛒 Маркет"), KeyboardButton(text="🏆 Топ")],
             [KeyboardButton(text="❓ Помощь")],
         ],
         resize_keyboard=True,
+        is_persistent=True,
     )
 
 
 def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str,
                     action: str, cost: int = INSTANT_COST):
     b.button(
-        text=f"{label} ({fmt_num(cost)} 🪙)",
+        text=f"{label} · {fmt_num(cost)} 🪙",
         callback_data=CardActionCallback(action=action, user_id=user_id).pack(),
     )
 
 
 def get_ok_kb() -> InlineKeyboardMarkup:
-    """Кнопка «ОК» для сообщений об ошибках / кулдауне."""
+    """Кнопка «Понятно» для сообщений об ошибках / кулдауне."""
     b = InlineKeyboardBuilder()
-    b.button(text="ОК", callback_data=OkDeleteCallback().pack())
+    b.button(text="Понятно ✓", callback_data=OkDeleteCallback().pack())
     return b.as_markup()
 
 
@@ -606,8 +607,8 @@ def get_card_action_keyboard(user_id: int, balance: int = 0,
     cost = instant_cost(remaining)
     b = InlineKeyboardBuilder()
     if balance >= cost:
-        _instant_button(b, user_id, "✨ Получить сейчас", "instant", cost)
-    b.button(text="ОК", callback_data=OkDeleteCallback().pack())
+        _instant_button(b, user_id, "⚡ Получить сейчас", "instant", cost)
+    b.button(text="Понятно ✓", callback_data=OkDeleteCallback().pack())
     b.adjust(1)
     return b.as_markup()
 
@@ -616,9 +617,9 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
     cost = instant_cost(COOLDOWN_SECONDS)
     b = InlineKeyboardBuilder()
     if balance >= cost:
-        _instant_button(b, user_id, "✨ Получить ещё одну", "another", cost)
+        _instant_button(b, user_id, "⚡ Ещё одну", "another", cost)
     b.button(
-        text="🀄️ Мои карточки",
+        text="🃏  Моя коллекция",
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
     )
     b.adjust(1)
@@ -626,15 +627,15 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
 
 
 def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
-    """п.6 — быстрое переключение топов + обновить."""
+    """Быстрое переключение топов + обновить."""
     b = InlineKeyboardBuilder()
-    b.button(text=("✅ " if kind == "coins" else "") + "🪙 Монеты",
+    b.button(text=("● " if kind == "coins" else "○ ") + "🪙 Монеты",
              callback_data=TopCallback(kind="coins").pack())
-    b.button(text=("✅ " if kind == "cards" else "") + "🀄️ Карточки",
+    b.button(text=("● " if kind == "cards" else "○ ") + "🃏 Карты",
              callback_data=TopCallback(kind="cards").pack())
-    b.button(text=("✅ " if kind == "streak" else "") + "🔥 Стрик",
+    b.button(text=("● " if kind == "streak" else "○ ") + "🔥 Стрик",
              callback_data=TopCallback(kind="streak").pack())
-    b.button(text="🔄 Обновить", callback_data=TopRefreshCallback(kind=kind).pack())
+    b.button(text="↻  Обновить", callback_data=TopRefreshCallback(kind=kind).pack())
     b.adjust(3, 1)
     return b.as_markup()
 
@@ -680,7 +681,7 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
     reg_date = datetime.fromtimestamp(row["registration"] or time.time()).strftime("%d.%m.%Y")
 
     role = row["role"] or "user"
-    role_display = "👑 Администратор" if role == "admin" else "👤 Пользователь"
+    role_display = "👑  Администратор" if role == "admin" else "👤  Пользователь"
 
     gender = row["gender"] or "none"
     g = GENDERS.get(gender, GENDERS["none"])
@@ -689,15 +690,16 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
     gems = row["gems"] if row["gems"] is not None else 0
 
     caption = (
-        f"👤 <b>Профиль</b> • {esc(nickname)}\n\n"
-        f"🆔 ID • <code>{user_id}</code>\n"
-        f"🎭 Роль • <b>{role_display}</b>\n"
-        f"⚧ Пол • <b>{gender_display}</b>\n"
-        f"📅 Регистрация • <b>{reg_date}</b>\n\n"
-        f"🀄️ Карточек • <b>{fmt_num(row['cards_count'])} из {fmt_num(total_cards)}</b>\n"
-        f"🪙 Монеты • <b>{fmt_num(row['coins'])}</b>\n"
-        f"💎 Кристаллы • <b>{fmt_num(gems)}</b>\n"
-        f"🔥 Стрик • <b>{fmt_days(row['streak'])}</b>"
+        f"╭ <b>{esc(nickname)}</b>\n"
+        f"╰ <code>{user_id}</code>\n\n"
+        f"🎭  {role_display}\n"
+        f"⚧  {gender_display}\n"
+        f"📅  с <b>{reg_date}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🃏  Карточки  ·  <b>{fmt_num(row['cards_count'])}</b> / {fmt_num(total_cards)}\n"
+        f"🪙  Монеты     ·  <b>{fmt_num(row['coins'])}</b>\n"
+        f"💎  Кристаллы  ·  <b>{fmt_num(gems)}</b>\n"
+        f"🔥  Стрик      ·  <b>{fmt_days(row['streak'])}</b>"
     )
     # Кнопки всегда отображаются (с привязкой к owner user_id);
     # действия защищены _owner_check.
@@ -710,8 +712,9 @@ async def render_collection(bot: Bot, user_id: int):
     nickname = await get_user_nickname(user_id)
     photo = await get_user_photo(bot, user_id, nickname)
     caption = (
-        f"🀄️ <b>Карточки</b> • {esc(nickname)}\n"
-        f"Всего: {fmt_num(total)} из {fmt_num(total_in_game)}"
+        f"🃏  <b>Коллекция</b>\n"
+        f"╭ {esc(nickname)}\n"
+        f"╰ <b>{fmt_num(total)}</b> из {fmt_num(total_in_game)} карточек"
     )
     return photo, caption, keyboard, total
 
@@ -1040,7 +1043,10 @@ async def cmd_start(message: Message):
         except Exception as e:
             logger.warning(f"sticker error: {e}")
         await message.reply(
-            "👋 Привет! Отправьте команду «мряу», чтобы получить милую карточку",
+            "👋  <b>Привет!</b>\n\n"
+            "Напишите <b>«мряу»</b> или нажмите кнопку ниже —\n"
+            "и получите милую карточку.\n\n"
+            "<i>Бесплатно раз в 4 часа · мгновенно за монеты</i>",
             reply_markup=get_main_km(),
         )
     except Exception as e:
@@ -1049,75 +1055,105 @@ async def cmd_start(message: Message):
 
 HELP_PAGES = [
     {
-        "title": "📖 Помощь • Команды",
+        "title": "📖  Команды",
         "body": (
-            "<b>Как получить карточку?</b>\n"
-            "<blockquote>Напишите «мряу», /meow или нажмите «🀄️ Получить карточку».\n"
-            f"Бесплатно — раз в 4 часа. Мгновенно — от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙 "
-            "(цена зависит от остатка таймера).</blockquote>\n\n"
-            "<b>Как открыть профиль?</b>\n"
-            "<blockquote>«мряу профиль», /profile или «👤 Профиль».\n"
-            "В группе реплаем на сообщение — можно посмотреть чужой профиль.</blockquote>\n\n"
-            "<b>Как посмотреть коллекцию?</b>\n"
-            "<blockquote>«мряу коллекция» / «мряу карточки» или /collection — только своя.</blockquote>\n\n"
-            "<b>Как открыть маркет?</b>\n"
-            "<blockquote>«🛒 Маркет», /market или «мряу маркет» — <b>только в личных сообщениях</b>.</blockquote>"
+            "<b>🃏  Получить карточку</b>\n"
+            "<blockquote>"
+            "«мряу» · /meow · кнопка «🃏 Получить карточку»\n"
+            f"Бесплатно — раз в 4 часа\n"
+            f"Мгновенно — от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙 "
+            "(цена падает по мере истечения таймера)"
+            "</blockquote>\n\n"
+            "<b>👤  Профиль</b>\n"
+            "<blockquote>"
+            "«мряу профиль» · /profile · «👤 Профиль»\n"
+            "В группе — ответом на сообщение можно открыть чужой профиль"
+            "</blockquote>\n\n"
+            "<b>🃏  Коллекция</b>\n"
+            "<blockquote>"
+            "«мряу коллекция» · «мряу карточки» · /collection\n"
+            "Только своя коллекция"
+            "</blockquote>\n\n"
+            "<b>🛒  Маркет</b>\n"
+            "<blockquote>"
+            "«🛒 Маркет» · /market · «мряу маркет»\n"
+            "<b>Только в личных сообщениях</b>"
+            "</blockquote>"
         ),
     },
     {
-        "title": "📖 Помощь • Стрик и награды",
+        "title": "📖  Стрик и награды",
         "body": (
-            "<b>Что такое стрик?</b>\n"
-            "<blockquote>Заходите ежедневно и получайте карточку — стрик растёт.\n"
-            "Если не получать карточку 24 часа — стрик сбрасывается.\n"
-            "За стрик начисляются бонусные монеты.</blockquote>\n\n"
-            "<b>Кристаллы за стрик?</b>\n"
-            "<blockquote>Один раз при достижении порога:\n"
-            "• 7 дней — +5 💎\n"
-            "• 30 дней — +20 💎</blockquote>\n\n"
-            "<b>Кристаллы за карточки?</b>\n"
-            "<blockquote>• Новая мифическая — +1 💎\n"
-            "• Новая легендарная — +2 💎\n"
-            "Дубликаты кристаллы не дают.</blockquote>"
+            "<b>🔥  Стрик</b>\n"
+            "<blockquote>"
+            "Заходите каждый день и получайте карточку — стрик растёт.\n"
+            "Пропуск 24 часов — стрик сбрасывается.\n"
+            "За стрик начисляются бонусные монеты."
+            "</blockquote>\n\n"
+            "<b>💎  Кристаллы за стрик</b>\n"
+            "<blockquote>"
+            "Один раз при достижении порога:\n"
+            "·  7 дней  →  +5 💎\n"
+            "·  30 дней →  +20 💎"
+            "</blockquote>\n\n"
+            "<b>💎  Кристаллы за карточки</b>\n"
+            "<blockquote>"
+            "·  Новая мифическая  →  +1 💎\n"
+            "·  Новая легендарная →  +2 💎\n"
+            "Дубликаты кристаллы не дают."
+            "</blockquote>"
         ),
     },
     {
-        "title": "📖 Помощь • Маркет и кубик",
+        "title": "📖  Маркет и кубик",
         "body": (
-            "<b>Как купить карточку?</b>\n"
-            "<blockquote>В маркете (только ЛС) выберите редкость и купите недостающую "
-            "карточку за кристаллы.</blockquote>\n\n"
-            "<b>Цены в маркете:</b>\n"
+            "<b>🛒  Покупка карточек</b>\n"
+            "<blockquote>"
+            "В маркете (только ЛС) выберите редкость\n"
+            "и купите недостающую карточку за кристаллы."
+            "</blockquote>\n\n"
+            "<b>💎  Цены</b>\n"
             "<blockquote>"
             + "\n".join(
-                f"{v['icon']} {v['name']} — {MARKET_PRICES[k]} 💎"
+                f"{v['icon']}  {v['name']}  ·  {MARKET_PRICES[k]} 💎"
                 for k, v in RARITIES.items()
             )
             + "</blockquote>\n\n"
-            "<b>Как купить кристаллы?</b>\n"
-            f"<blockquote>В маркете или в профиле → «Купить кристаллы».\n"
-            f"Курс: 1 💎 = {GEM_TO_COINS} 🪙.</blockquote>\n\n"
-            "<b>Как бросить кубик?</b>\n"
-            f"<blockquote>Напишите «мряу кубик». Раз в 10 минут, минимум {DICE_MIN_BALANCE} 🪙.\n"
-            "Выпадает от −10 до +10 монет (шанс выигрыша выше).</blockquote>"
+            "<b>💱  Обмен на кристаллы</b>\n"
+            f"<blockquote>"
+            f"Маркет или профиль → «Купить кристаллы»\n"
+            f"Курс:  1 💎  =  {GEM_TO_COINS} 🪙"
+            "</blockquote>\n\n"
+            "<b>🎲  Кубик</b>\n"
+            f"<blockquote>"
+            f"«мряу кубик» · раз в 10 мин · от {DICE_MIN_BALANCE} 🪙\n"
+            "Выпадает от −10 до +10 монет (шанс выигрыша выше)"
+            "</blockquote>"
         ),
     },
     {
-        "title": "📖 Помощь • Профиль и топ",
+        "title": "📖  Профиль и топ",
         "body": (
-            "<b>Как сменить ник?</b>\n"
-            f"<blockquote>/nickname НовыйНик — стоит {NICKNAME_COST} 🪙.\n"
-            "/nickname reset — сброс бесплатно.\n"
-            "2–32 символа, без ссылок и упоминаний.</blockquote>\n\n"
-            "<b>Как указать пол?</b>\n"
-            "<blockquote>/gender м|ж|др|нет или кнопка в профиле. Необязательно.</blockquote>\n\n"
-            "<b>Как посмотреть топ?</b>\n"
-            "<blockquote>«мряу топ», /top или «🏆 Топ игроков».\n"
-            "Можно переключать: монеты / карточки / стрик, и обновлять.</blockquote>\n\n"
-            "<b>Редкости карточек:</b>\n"
+            "<b>✏️  Смена ника</b>\n"
+            f"<blockquote>"
+            f"/nickname НовыйНик  ·  {NICKNAME_COST} 🪙\n"
+            "/nickname reset  ·  бесплатно\n"
+            "2–32 символа, без ссылок и @упоминаний"
+            "</blockquote>\n\n"
+            "<b>⚧  Пол</b>\n"
+            "<blockquote>"
+            "/gender м|ж|др|нет  или кнопка в профиле\n"
+            "Необязательное поле"
+            "</blockquote>\n\n"
+            "<b>🏆  Топ</b>\n"
+            "<blockquote>"
+            "«мряу топ» · /top · «🏆 Топ»\n"
+            "Переключение: монеты / карточки / стрик"
+            "</blockquote>\n\n"
+            "<b>🃏  Редкости</b>\n"
             "<blockquote>"
             + "\n".join(
-                f"{v['icon']} {v['name']} — {v['reward']} 🪙"
+                f"{v['icon']}  {v['name']}  ·  {v['reward']} 🪙"
                 for v in RARITIES.values()
             )
             + "</blockquote>"
@@ -1133,14 +1169,14 @@ def get_help_keyboard(page: int) -> InlineKeyboardMarkup:
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(
-            text="◀️", callback_data=HelpCallback(page=page - 1).pack()
+            text="‹  Назад", callback_data=HelpCallback(page=page - 1).pack()
         ))
     nav.append(InlineKeyboardButton(
-        text=f"{page + 1}/{total}", callback_data="ignore"
+        text=f"{page + 1} / {total}", callback_data="ignore"
     ))
     if page < total - 1:
         nav.append(InlineKeyboardButton(
-            text="▶️", callback_data=HelpCallback(page=page + 1).pack()
+            text="Далее  ›", callback_data=HelpCallback(page=page + 1).pack()
         ))
     b.row(*nav)
     return b.as_markup()
@@ -1150,7 +1186,7 @@ def build_help_text(page: int) -> str:
     total = len(HELP_PAGES)
     page = max(0, min(page, total - 1))
     p = HELP_PAGES[page]
-    return f"<b>{p['title']}</b>  ({page + 1}/{total})\n\n{p['body']}"
+    return f"<b>{p['title']}</b>\n<code>{'─' * 18}</code>\n\n{p['body']}"
 
 
 @router.message(Command("help"))
@@ -1181,7 +1217,8 @@ async def help_page_callback(callback: CallbackQuery, callback_data: HelpCallbac
         await callback.answer("⚠️ Ошибка")
 
 
-@router.message(F.text == "🀄️ Получить карточку")
+@router.message(F.text == "🃏 Получить карточку")
+@router.message(F.text == "🀄️ Получить карточку")  # совместимость со старой кнопкой
 @router.message(F.text.lower().strip() == "мряу")
 @router.message(F.text.lower().strip() == "милость")
 @router.message(Command("meow"))
@@ -1226,8 +1263,8 @@ async def get_card_handler(message: Message):
                 time_str = f"{s} сек"
 
             text = (
-                f"🕘 <b>{mention}</b>, придётся немного подождать!\n"
-                f"Следующую карточку можно будет получить через <b>{time_str}</b>"
+                f"⏳  <b>{mention}</b>, подождите немного\n\n"
+                f"Следующая карточка через  <b>{time_str}</b>"
             )
             text += _streak_text(streak, bonus, new_balance, gem_bonus)
 
@@ -1266,18 +1303,22 @@ def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) 
     """Формирует текст про стрик для сообщения."""
     if bonus > 0 and streak == 1:
         return (
-            "\n\n<blockquote>🔥 <b>Вы начали стрик!</b>\n"
-            "💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
+            "\n\n<blockquote expandable>"
+            "🔥 <b>Стрик начат!</b>\n"
+            "Заходите каждый день — стрик растёт, а вместе с ним и награды."
+            "</blockquote>"
         )
     if bonus > 0 and streak >= 2:
         text = (
-            f"\n\n<blockquote>🔥 Стрик • <b>{fmt_days(streak)}</b>\n"
-            f"🪙 Бонус • +{fmt_num(bonus)} [{fmt_num(new_balance)}]"
+            f"\n\n<blockquote expandable>"
+            f"🔥 Стрик  ·  <b>{fmt_days(streak)}</b>\n"
+            f"🪙 Бонус  ·  <b>+{fmt_num(bonus)}</b>  →  {fmt_num(new_balance)}"
         )
         if gem_bonus > 0:
-            text += f"\n💎 Кристаллы • +{fmt_num(gem_bonus)}"
+            text += f"\n💎 Бонус  ·  <b>+{fmt_num(gem_bonus)}</b>"
         text += (
-            "\n💡 Заходите ежедневно, чтобы продлевать стрик и получать монеты</blockquote>"
+            "\n\n💡 Заходите ежедневно, чтобы не потерять стрик."
+            "</blockquote>"
         )
         return text
     return ""
@@ -1285,18 +1326,21 @@ def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) 
 
 def _card_caption(mention: str, card: dict) -> str:
     r = RARITIES[card["rarity"]]
-    title = "✨ Новая карточка" if not card.get("is_duplicate") else "🔁 Дубликат"
+    if card.get("is_duplicate"):
+        title = "🔁  <b>Дубликат</b>"
+    else:
+        title = "✨  <b>Новая карточка</b>"
     text = (
-        f"{title} • <b>{esc(card['name'])}</b>\n\n"
-        f"{r['icon']} Редкость • <b>{r['name']}</b>\n"
-        f"🪙 Монеты • <b>+{fmt_num(card['coins_earned'])}</b> [{fmt_num(card['balance'])}]"
+        f"{title}\n"
+        f"╭ <b>{esc(card['name'])}</b>\n"
+        f"╰ {r['icon']}  {r['name']}\n\n"
+        f"🪙  +<b>{fmt_num(card['coins_earned'])}</b>  →  {fmt_num(card['balance'])}"
     )
     gems_earned = card.get("gems_earned") or 0
     if gems_earned > 0:
         gems_bal = card.get("gems") or 0
         text += (
-            f"\n💎 Кристаллы • <b>+{fmt_num(gems_earned)}</b> "
-            f"[{fmt_num(gems_bal)}]"
+            f"\n💎  +<b>{fmt_num(gems_earned)}</b>  →  {fmt_num(gems_bal)}"
         )
     return text
 
@@ -1359,9 +1403,9 @@ async def dice_handler(message: Message):
             if balance < DICE_MIN_BALANCE:
                 await reply_ephemeral(
                     message,
-                    f"⚠️ <b>Недостаточно монет.</b>\n"
-                    f"Для броска нужно минимум <b>{fmt_num(DICE_MIN_BALANCE)} 🪙</b>.\n"
-                    f"У вас: <b>{fmt_num(balance)} 🪙</b>",
+                    f"⚠️  <b>Недостаточно монет</b>\n\n"
+                    f"Нужно минимум  <b>{fmt_num(DICE_MIN_BALANCE)} 🪙</b>\n"
+                    f"У вас  ·  <b>{fmt_num(balance)} 🪙</b>",
                 )
                 return
 
@@ -1375,7 +1419,8 @@ async def dice_handler(message: Message):
                     time_str = f"{s} сек"
                 await reply_ephemeral(
                     message,
-                    f"🕘 <b>{mention}</b>, кубик можно бросить через <b>{time_str}</b>",
+                    f"⏳  <b>{mention}</b>\n\n"
+                    f"Кубик можно бросить через  <b>{time_str}</b>",
                 )
                 return
 
@@ -1397,21 +1442,18 @@ async def dice_handler(message: Message):
 
         if delta > 0:
             delta_str = f"+{fmt_num(delta)}"
-            color_emoji = "📈"
-            title = "🎉 Выигрыш!"
+            title = "🎉  Выигрыш"
         elif delta < 0:
             delta_str = f"−{fmt_num(abs(delta))}"
-            color_emoji = "📉"
-            title = "😔 Проигрыш"
+            title = "😔  Проигрыш"
         else:
             delta_str = "±0"
-            color_emoji = "➡️"
-            title = "😐 Ничья"
+            title = "·  Ничья"
 
         result_caption = (
-            f"🎲 <b>{title}</b>\n\n"
-            f"{color_emoji} Результат • <b>{delta_str} 🪙</b>\n"
-            f"🪙 Баланс • <b>{fmt_num(new_balance)}</b>"
+            f"🎲  <b>{title}</b>\n\n"
+            f"Результат  ·  <b>{delta_str} 🪙</b>\n"
+            f"Баланс     ·  <b>{fmt_num(new_balance)}</b>"
         )
 
         try:
@@ -1656,7 +1698,8 @@ async def gender_menu(callback: CallbackQuery, callback_data: GenderCallback):
         row = await cur.fetchone()
     current = (row["gender"] if row and row["gender"] else "none")
     await callback.message.edit_caption(
-        caption="⚧ <b>Выберите пол</b>\n\n<i>Это необязательное поле — можно оставить «Не задан».</i>",
+        caption="⚧  <b>Выберите пол</b>\n\n"
+                "<i>Необязательное поле — можно оставить «Не задан».</i>",
         reply_markup=get_gender_kb(current, owner_id=user_id),
     )
     await callback.answer()
@@ -1678,11 +1721,11 @@ async def gender_set(callback: CallbackQuery, callback_data: GenderCallback):
 
     g = GENDERS[value]
     await callback.message.edit_caption(
-        caption=f"✅ <b>Пол сохранён:</b> {g['icon']} {g['name']}\n\n"
-                f"<i>Вернуться в профиль:</i>",
+        caption=f"✓  <b>Пол сохранён</b>\n"
+                f"{g['icon']}  {g['name']}",
         reply_markup=get_gender_kb(value, owner_id=user_id),
     )
-    await callback.answer("✅ Сохранено")
+    await callback.answer("Сохранено ✓")
 
 
 @router.message(Command("gender"))
@@ -1757,8 +1800,8 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
-            unit = "🀄️"
-            title = "🀄️ Топ по карточкам"
+            unit = "🃏"
+            title = "🃏  Топ по карточкам"
         elif kind == "streak":
             cur = await db.execute(
                 "SELECT user_id, nickname, streak AS value FROM users "
@@ -1774,7 +1817,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             )
             my_rank = (await cur.fetchone())[0]
             unit = "🔥"
-            title = "🔥 Топ по стрику"
+            title = "🔥  Топ по стрику"
         else:  # coins
             cur = await db.execute(
                 "SELECT user_id, nickname, coins AS value FROM users "
@@ -1788,25 +1831,30 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             cur = await db.execute("SELECT COUNT(*) + 1 FROM users WHERE coins > ?", (my_value,))
             my_rank = (await cur.fetchone())[0]
             unit = "🪙"
-            title = "🪙 Топ по монетам"
+            title = "🪙  Топ по монетам"
 
         cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (current_user_id,))
         my_row2 = await cur.fetchone()
         my_nick = my_row2["nickname"] if my_row2 and my_row2["nickname"] else f"User{current_user_id}"
 
     medals = ["🥇", "🥈", "🥉"]
-    text = f"<b>{title}</b>\n\n"
+    text = f"<b>{title}</b>\n<code>{'─' * 18}</code>\n\n"
     for i, row in enumerate(top, 1):
-        medal = medals[i - 1] if i <= 3 else f"{i}."
+        medal = medals[i - 1] if i <= 3 else f"<code>{i:>2}.</code>"
         nick = row["nickname"] or f"User{row['user_id']}"
         mention = user_mention(row["user_id"], nick, None)
-        text += f"{medal} {mention} • <b>{fmt_num(row['value'])}</b> {unit}\n"
+        text += f"{medal}  {mention}  ·  <b>{fmt_num(row['value'])}</b> {unit}\n"
 
-    text += f"\n📌 Ваше место: <b>#{fmt_num(my_rank)}</b> — {esc(my_nick)} • <b>{fmt_num(my_value)}</b> {unit}"
+    text += (
+        f"\n<code>{'─' * 18}</code>\n"
+        f"📌  Ваше место  ·  <b>#{fmt_num(my_rank)}</b>\n"
+        f"    {esc(my_nick)}  ·  <b>{fmt_num(my_value)}</b> {unit}"
+    )
     return text
 
 
-@router.message(F.text == "🏆 Топ игроков")
+@router.message(F.text == "🏆 Топ")
+@router.message(F.text == "🏆 Топ игроков")  # совместимость
 @router.message(Command("top"))
 @router.message(F.text.regexp(TOP_CMD_RE))
 async def show_top_players(message: Message):
@@ -1895,13 +1943,13 @@ async def get_collection_main_keyboard(user_id: int):
             total_of_rarity = (await cur.fetchone())[0]
             rows.append([
                 InlineKeyboardButton(
-                    text=f"{r_info['icon']} {r_info['name']} ({fmt_num(user_amount)}/{fmt_num(total_of_rarity)})",
+                    text=f"{r_info['icon']}  {r_info['name']}  ·  {fmt_num(user_amount)}/{fmt_num(total_of_rarity)}",
                     callback_data=RaritySelectCallback(rarity=r_key, page=0, user_id=user_id).pack(),
                 )
             ])
         rows.append([
             InlineKeyboardButton(
-                text="👤 Перейти в профиль",
+                text="‹  В профиль",
                 callback_data=BackToProfileCallback(user_id=user_id).pack(),
             )
         ])
@@ -1974,29 +2022,29 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         card = cards[page]
         info = RARITIES.get(rarity, {})
         caption = (
-            f"🀄️ <b>{esc(card['name'])}</b>\n\n"
-            f"{info.get('icon', '')} Редкость • <b>{info.get('name', rarity)}</b>\n"
-            f"🪙 Монеты • <b>+{fmt_num(info.get('reward', 0))}</b>\n"
-            f"🔢 Количество • <b>{fmt_num(card['amount'])}</b>"
+            f"╭ <b>{esc(card['name'])}</b>\n"
+            f"╰ {info.get('icon', '')}  {info.get('name', rarity)}\n\n"
+            f"🪙  Награда  ·  +{fmt_num(info.get('reward', 0))}\n"
+            f"📦  У вас    ·  <b>{fmt_num(card['amount'])}</b>"
         )
 
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton(
-                text="◀️",
+                text="‹",
                 callback_data=RaritySelectCallback(rarity=rarity, page=page - 1, user_id=user_id).pack(),
             ))
-        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="ignore"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="ignore"))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton(
-                text="▶️",
+                text="›",
                 callback_data=RaritySelectCallback(rarity=rarity, page=page + 1, user_id=user_id).pack(),
             ))
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             nav,
             [InlineKeyboardButton(
-                text="🔙 К категориям",
+                text="‹  К категориям",
                 callback_data=MainMenuCallback(user_id=user_id).pack(),
             )],
         ])
@@ -2164,11 +2212,11 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
 
     nickname = await get_user_nickname(user_id)
     text = (
-        f"🛒 <b>Маркет</b> • {esc(nickname)}\n\n"
-        f"💎 Кристаллы: <b>{fmt_num(gems)}</b>\n"
-        f"🪙 Монеты: <b>{fmt_num(coins)}</b>\n"
-        f"💱 Курс: 1 💎 = {GEM_TO_COINS} 🪙\n\n"
-        f"Выберите редкость, чтобы купить недостающие карточки:"
+        f"🛒  <b>Маркет</b>\n"
+        f"╭ {esc(nickname)}\n"
+        f"╰ 💎 <b>{fmt_num(gems)}</b>  ·  🪙 <b>{fmt_num(coins)}</b>\n\n"
+        f"<i>Курс:  1 💎  =  {GEM_TO_COINS} 🪙</i>\n\n"
+        f"Выберите редкость — купите недостающие карточки:"
     )
 
     b = InlineKeyboardBuilder()
@@ -2177,17 +2225,17 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
         price = MARKET_PRICES.get(r_key, 0)
         if missing > 0:
             label = (
-                f"{r_info['icon']} {r_info['name']} "
-                f"({fmt_num(missing)}) — {price} 💎"
+                f"{r_info['icon']}  {r_info['name']}  ·  "
+                f"{fmt_num(missing)} шт · {price} 💎"
             )
         else:
-            label = f"{r_info['icon']} {r_info['name']} — собрано ✅"
+            label = f"{r_info['icon']}  {r_info['name']}  ·  собрано ✓"
         b.button(
             text=label,
             callback_data=MarketRarityCallback(rarity=r_key, page=0, user_id=user_id).pack(),
         )
     b.button(
-        text="💱 Купить кристаллы за монеты",
+        text="💎  Купить кристаллы за монеты",
         callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack(),
     )
     b.adjust(1)
@@ -2218,11 +2266,11 @@ async def build_market_rarity_page(
 
     if not cards:
         text = (
-            f"{r_info.get('icon', '')} <b>{r_info.get('name', rarity)}</b>\n\n"
-            f"У вас уже есть все карточки этой редкости! 🎉"
+            f"{r_info.get('icon', '')}  <b>{r_info.get('name', rarity)}</b>\n\n"
+            f"Все карточки этой редкости уже у вас 🎉"
         )
         b = InlineKeyboardBuilder()
-        b.button(text="🔙 Назад в маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
+        b.button(text="‹  Назад в маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
         b.adjust(1)
         return text, b.as_markup(), None
 
@@ -2231,19 +2279,18 @@ async def build_market_rarity_page(
     card = cards[page]
 
     text = (
-        f"🛒 <b>Маркет</b> • {r_info.get('icon', '')} {r_info.get('name', rarity)}\n\n"
-        f"🀄️ <b>{esc(card['name'])}</b>\n"
-        f"💎 Цена • <b>{fmt_num(price)}</b>\n"
-        f"💎 Ваш баланс • <b>{fmt_num(gems)}</b>\n"
-        f"📄 {page + 1}/{total}"
+        f"🛒  <b>Маркет</b>  ·  {r_info.get('icon', '')} {r_info.get('name', rarity)}\n\n"
+        f"╭ <b>{esc(card['name'])}</b>\n"
+        f"╰ 💎  <b>{fmt_num(price)}</b>  ·  баланс {fmt_num(gems)}\n\n"
+        f"<i>{page + 1} / {total}</i>"
     )
 
     b = InlineKeyboardBuilder()
     can_buy = gems >= price
     buy_label = (
-        f"✅ Купить ({fmt_num(price)} 💎)"
+        f"✓  Купить · {fmt_num(price)} 💎"
         if can_buy
-        else f"❌ Нужно {fmt_num(price)} 💎"
+        else f"✗  Нужно {fmt_num(price)} 💎"
     )
     b.button(
         text=buy_label,
@@ -2254,17 +2301,17 @@ async def build_market_rarity_page(
     if page > 0:
         nav.append(
             InlineKeyboardButton(
-                text="◀️",
+                text="‹",
                 callback_data=MarketRarityCallback(rarity=rarity, page=page - 1, user_id=user_id).pack(),
             )
         )
     nav.append(
-        InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data="ignore")
+        InlineKeyboardButton(text=f"{page + 1} / {total}", callback_data="ignore")
     )
     if page < total - 1:
         nav.append(
             InlineKeyboardButton(
-                text="▶️",
+                text="›",
                 callback_data=MarketRarityCallback(rarity=rarity, page=page + 1, user_id=user_id).pack(),
             )
         )
@@ -2272,7 +2319,7 @@ async def build_market_rarity_page(
     b.row(*nav)
     b.row(
         InlineKeyboardButton(
-            text="🔙 К редкостям", callback_data=MarketMainCallback(user_id=user_id).pack()
+            text="‹  К редкостям", callback_data=MarketMainCallback(user_id=user_id).pack()
         )
     )
     return text, b.as_markup(), dict(card)
@@ -2442,18 +2489,17 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
 
         r_info = RARITIES.get(rarity, {})
         caption = (
-            f"✅ <b>Покупка успешна!</b>\n\n"
-            f"🀄️ <b>{esc(card['name'])}</b>\n"
-            f"{r_info.get('icon', '')} {r_info.get('name', rarity)}\n"
-            f"💎 Списано • <b>{fmt_num(price)}</b>\n"
-            f"💎 Баланс • <b>{fmt_num(new_gems)}</b>"
+            f"✓  <b>Покупка успешна</b>\n\n"
+            f"╭ <b>{esc(card['name'])}</b>\n"
+            f"╰ {r_info.get('icon', '')}  {r_info.get('name', rarity)}\n\n"
+            f"💎  −{fmt_num(price)}  →  <b>{fmt_num(new_gems)}</b>"
         )
         b = InlineKeyboardBuilder()
         b.button(
-            text="🛒 Продолжить покупки",
+            text="🛒  Продолжить",
             callback_data=MarketRarityCallback(rarity=rarity, page=0, user_id=user_id).pack(),
         )
-        b.button(text="🏠 В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
+        b.button(text="‹  В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
         b.adjust(1)
 
         try:
@@ -2491,11 +2537,11 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
             max_buy = coins // GEM_TO_COINS
 
             text = (
-                f"💱 <b>Обмен монет на кристаллы</b>\n\n"
-                f"Курс: <b>1 💎 = {GEM_TO_COINS} 🪙</b>\n"
-                f"🪙 Монеты: <b>{fmt_num(coins)}</b>\n"
-                f"💎 Кристаллы: <b>{fmt_num(gems)}</b>\n"
-                f"Можно купить до: <b>{fmt_num(max_buy)}</b> 💎\n\n"
+                f"💱  <b>Обмен монет → кристаллы</b>\n\n"
+                f"Курс  ·  <b>1 💎 = {GEM_TO_COINS} 🪙</b>\n\n"
+                f"🪙  Монеты     ·  <b>{fmt_num(coins)}</b>\n"
+                f"💎  Кристаллы  ·  <b>{fmt_num(gems)}</b>\n"
+                f"Можно купить   ·  до <b>{fmt_num(max_buy)}</b> 💎\n\n"
                 f"Выберите количество:"
             )
             b = InlineKeyboardBuilder()
@@ -2503,7 +2549,7 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 cost = n * GEM_TO_COINS
                 if coins >= cost:
                     b.button(
-                        text=f"+{n} 💎 ({fmt_num(cost)} 🪙)",
+                        text=f"+{n} 💎 · {fmt_num(cost)} 🪙",
                         callback_data=MarketExchangeCallback(
                             action="buy_gems", amount=n, user_id=user_id
                         ).pack(),
@@ -2511,12 +2557,12 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
             if max_buy >= 1 and max_buy not in (1, 5, 10, 25, 50):
                 cost = max_buy * GEM_TO_COINS
                 b.button(
-                    text=f"+{fmt_num(max_buy)} 💎 (все, {fmt_num(cost)} 🪙)",
+                    text=f"+{fmt_num(max_buy)} 💎 · все ({fmt_num(cost)} 🪙)",
                     callback_data=MarketExchangeCallback(
                         action="buy_gems", amount=max_buy, user_id=user_id
                     ).pack(),
                 )
-            b.button(text="🔙 Назад", callback_data=MarketMainCallback(user_id=user_id).pack())
+            b.button(text="‹  Назад", callback_data=MarketMainCallback(user_id=user_id).pack())
             b.adjust(2)
             try:
                 if callback.message.photo:
@@ -2562,18 +2608,16 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 new_gems = row["gems"] or 0
 
             text = (
-                f"✅ <b>Обмен выполнен</b>\n\n"
-                f"💎 Получено: <b>+{fmt_num(amount)}</b>\n"
-                f"🪙 Списано: <b>−{fmt_num(cost)}</b>\n\n"
-                f"💎 Баланс: <b>{fmt_num(new_gems)}</b>\n"
-                f"🪙 Монеты: <b>{fmt_num(new_coins)}</b>"
+                f"✓  <b>Обмен выполнен</b>\n\n"
+                f"💎  +<b>{fmt_num(amount)}</b>  →  {fmt_num(new_gems)}\n"
+                f"🪙  −<b>{fmt_num(cost)}</b>  →  {fmt_num(new_coins)}"
             )
             b = InlineKeyboardBuilder()
             b.button(
-                text="💱 Ещё обмен",
+                text="💱  Ещё обмен",
                 callback_data=MarketExchangeCallback(action="menu", user_id=user_id).pack(),
             )
-            b.button(text="🛒 В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
+            b.button(text="‹  В маркет", callback_data=MarketMainCallback(user_id=user_id).pack())
             b.adjust(1)
             try:
                 await callback.message.edit_text(text, reply_markup=b.as_markup())
