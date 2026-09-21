@@ -24,8 +24,22 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Та же папка, что и БД — на Bothost обычно персистентна /app/data
-_DATA_ROOT = Path(os.getenv("DB_NAME", "/app/data/cards_game.db")).resolve().parent
-CARDS_PHOTO_DIR = Path(os.getenv("CARDS_PHOTO_DIR", str(_DATA_ROOT / "card_photos")))
+def _default_photo_dir() -> Path:
+    env = os.getenv("CARDS_PHOTO_DIR")
+    if env:
+        return Path(env)
+    db = os.getenv("DB_NAME", "/app/data/cards_game.db")
+    try:
+        parent = Path(db).expanduser().resolve().parent
+    except Exception:
+        parent = Path("/app/data")
+    # предпочитаем /app/data/card_photos если /app/data есть
+    for candidate in (parent / "card_photos", Path("/app/data/card_photos"), Path("/app/card_photos"), Path("card_photos")):
+        if candidate.parent.exists() or candidate.exists():
+            return candidate
+    return parent / "card_photos"
+
+CARDS_PHOTO_DIR = _default_photo_dir()
 
 
 def ensure_photo_dir() -> Path:

@@ -137,22 +137,72 @@ def get_user_from_header(x_telegram_init_data: Optional[str]) -> dict:
 
 def card_photo_url(card_id: int, request_base: str | None = None) -> str:
     """Относительный URL фото — фронт склеит с API_BASE."""
-    return f"/api/card/{card_id}/photo"
+    return f"/api/card/{int(card_id)}/photo"
+
+
+def _photo_search_dirs() -> list[Path]:
+    """Все возможные места, где могут лежать card_photos на Bothost."""
+    dirs: list[Path] = []
+    env_dir = os.getenv("CARDS_PHOTO_DIR")
+    if env_dir:
+        dirs.append(Path(env_dir))
+    try:
+        db_parent = Path(DB_NAME).expanduser().resolve().parent
+        dirs.append(db_parent / "card_photos")
+    except Exception:
+        pass
+    dirs.extend(
+        [
+            Path("/app/data/card_photos"),
+            Path("/app/card_photos"),
+            Path("card_photos"),
+            Path("./card_photos"),
+            Path("/app/data") / "card_photos",
+        ]
+    )
+    # unique preserve order
+    seen = set()
+    out = []
+    for d in dirs:
+        try:
+            key = str(d.resolve()) if d.exists() else str(d)
+        except Exception:
+            key = str(d)
+        if key not in seen:
+            seen.add(key)
+            out.append(d)
+    return out
 
 
 def resolve_card_photo_file(card_id: int, photo_path: str | None = None) -> Path | None:
-    """Ищет файл фото на диске."""
+    """Ищет файл фото на диске (несколько типичных путей Bothost)."""
     if photo_path:
-        pp = Path(photo_path)
-        if pp.is_file():
+        pp = Path(str(photo_path))
+        if pp.is_file() and pp.stat().st_size > 0:
             return pp
-    # стандартная папка рядом с БД
-    data_root = Path(DB_NAME).resolve().parent
-    photo_dir = Path(os.getenv("CARDS_PHOTO_DIR", str(data_root / "card_photos")))
-    for ext in (".jpg", ".jpeg", ".png", ".webp"):
-        candidate = photo_dir / f"{int(card_id)}{ext}"
-        if candidate.is_file():
-            return candidate
+        # иногда в БД путь с другой машины — берём только имя файла
+        name = pp.name
+        if name:
+            for d in _photo_search_dirs():
+                cand = d / name
+                if cand.is_file() and cand.stat().st_size > 0:
+                    return cand
+
+    cid = int(card_id)
+    for d in _photo_search_dirs():
+        if not d.exists():
+            continue
+        for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+            candidate = d / f"{cid}{ext}"
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        # файлы вида 12_xxx.jpg
+        try:
+            for f in d.glob(f"{cid}.*"):
+                if f.is_file() and f.stat().st_size > 0:
+                    return f
+        except Exception:
+            pass
     return None
 
 
@@ -214,7 +264,17 @@ async def api_card_photo(card_id: int):
         photo_path = row["photo_path"] if row["photo_path"] else None
         path = resolve_card_photo_file(card_id, photo_path)
         if not path:
-            raise HTTPException(404, "Фото ещё не сохранено на диск. Запусти миграцию /migrate_photos в боте.")
+            searched = [str(d) for d in _photo_search_dirs()]
+            raise HTTPException(
+                404,
+                detail={
+                    "error": "photo_not_found",
+                    "card_id": card_id,
+                    "photo_path_db": photo_path,
+                    "searched_dirs": searched,
+                    "hint": "Проверь CARDS_PHOTO_DIR или что файлы называются {id}.jpg",
+                },
+            )
         media = "image/jpeg"
         suf = path.suffix.lower()
         if suf == ".png":
@@ -223,9 +283,31 @@ async def api_card_photo(card_id: int):
             media = "image/webp"
         elif suf == ".gif":
             media = "image/gif"
-        return FileResponse(path, media_type=media, filename=path.name)
+        return FileResponse(
+            path,
+            media_type=media,
+            filename=path.name,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
     finally:
         await db.close()
+
+
+
+@app.get("/api/debug/photos")
+async def api_debug_photos():
+    """Список найденных фото и путей поиска (для отладки)."""
+    dirs_info = []
+    for d in _photo_search_dirs():
+        files = []
+        exists = d.exists()
+        if exists:
+            try:
+                files = sorted([f.name for f in d.iterdir() if f.is_file()])[:50]
+            except Exception as e:
+                files = [f"error: {e}"]
+        dirs_info.append({"dir": str(d), "exists": exists, "files": files})
+    return {"db_name": DB_NAME, "dirs": dirs_info}
 
 
 @app.get("/health")
@@ -357,7 +439,8 @@ async def api_collection(
                 "rarity_name": r.get("name", row["rarity"]),
                 "reward": r.get("reward", 0),
                 "photo_id": row["photo_id"],
-                "photo_url": card_photo_url(cid) if has_photo else None,
+                "photo_url": card_photo_url(cid),
+                "has_photo": has_photo,
                 "amount": row["amount"],
                 "claim_time": row["claim_time"],
             })
@@ -777,7 +860,8 @@ async def api_card(
             "rarity_name": r.get("name", card["rarity"]),
             "reward": r.get("reward", 0),
             "photo_id": card["photo_id"],
-            "photo_url": card_photo_url(card["id"]) if has_photo else None,
+            "photo_url": card_photo_url(card["id"]),
+            "has_photo": has_photo,
             "owned": inv is not None,
             "amount": inv["amount"] if inv else 0,
             "claim_time": inv["claim_time"] if inv else None,
