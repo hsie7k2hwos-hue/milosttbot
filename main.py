@@ -23,16 +23,30 @@ from aiogram.types import (
     BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
     CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
-    ReplyKeyboardMarkup, LinkPreviewOptions,
+    ReplyKeyboardMarkup, LinkPreviewOptions, WebAppInfo,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
+
+# Фото карточек на диск (мини-аппка + надёжное хранение)
+try:
+    from card_photos import sync_card_photo, migrate_all_card_photos, ensure_photo_dir
+except ImportError:
+    sync_card_photo = None
+    migrate_all_card_photos = None
+    def ensure_photo_dir():
+        pass
+
 
 # ================= КОНФИГУРАЦИЯ =================
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан. Укажите его в .env или окружении.")
+
+# URL мини-аппки (Vercel / GitHub Pages). Пусто = кнопка Web App не показывается.
+WEBAPP_URL = (os.getenv("WEBAPP_URL") or "").strip()
+
 
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
@@ -381,6 +395,7 @@ async def init_db():
             ("users", "last_dice", "INTEGER DEFAULT 0"),
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("inventory", "amount", "INTEGER DEFAULT 1"),
+            ("cards", "photo_path", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -1100,6 +1115,20 @@ async def cmd_start(message: Message):
             welcome += f"\n\n{role_display(role)} — доступна кнопка «⚙️ Админ-панель»."
 
         await message.reply(welcome, reply_markup=get_main_km(is_staff=is_staff))
+        if WEBAPP_URL:
+            try:
+                wa_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🃏 Открыть мини-аппку",
+                        web_app=WebAppInfo(url=WEBAPP_URL),
+                    )
+                ]])
+                await message.answer(
+                    "Удобный просмотр коллекции и топа — в мини-аппке:",
+                    reply_markup=wa_kb,
+                )
+            except Exception as e:
+                logger.warning(f"webapp button: {e}")
     except Exception as e:
         logger.error(f"Ошибка в cmd_start: {e}")
 
@@ -2796,10 +2825,20 @@ async def quick_add_card(message: Message, command: Command):
         name = name[:64]
     photo_id = message.photo[-1].file_id
     async with get_db() as db:
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO cards (name, rarity, photo_id) VALUES (?, ?, ?)",
             (name, rarity, photo_id),
         )
+        card_id = cur.lastrowid
+        if sync_card_photo:
+            try:
+                path = await sync_card_photo(message.bot, card_id, photo_id)
+                await db.execute(
+                    "UPDATE cards SET photo_path = ? WHERE id = ?",
+                    (path, card_id),
+                )
+            except Exception as e:
+                logger.error(f"sync_card_photo: {e}")
     await message.reply(
         f"✅  <b>Карточка добавлена</b>\n\n"
         f"╭ <b>{esc(name)}</b>\n"
@@ -2855,10 +2894,20 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
     rarity = call.data.split(":")[1]
     data = await state.get_data()
     async with get_db() as db:
-        await db.execute(
+        cur = await db.execute(
             "INSERT INTO cards (name, rarity, photo_id) VALUES (?, ?, ?)",
             (data["name"], rarity, data["photo_id"]),
         )
+        card_id = cur.lastrowid
+        if sync_card_photo:
+            try:
+                path = await sync_card_photo(call.bot, card_id, data["photo_id"])
+                await db.execute(
+                    "UPDATE cards SET photo_path = ? WHERE id = ?",
+                    (path, card_id),
+                )
+            except Exception as e:
+                logger.error(f"sync_card_photo: {e}")
     r = RARITIES[rarity]
     await call.message.answer(
         f"✅  <b>Карточка добавлена</b>\n\n"
@@ -3023,6 +3072,15 @@ async def admin_card_edit_photo_save(message: Message, state: FSMContext):
     new_photo = message.photo[-1].file_id
     async with get_db() as db:
         await db.execute("UPDATE cards SET photo_id = ? WHERE id = ?", (new_photo, card_id))
+        if sync_card_photo:
+            try:
+                path = await sync_card_photo(message.bot, card_id, new_photo)
+                await db.execute(
+                    "UPDATE cards SET photo_path = ? WHERE id = ?",
+                    (path, card_id),
+                )
+            except Exception as e:
+                logger.error(f"sync_card_photo edit: {e}")
     await message.answer(
         f"✅  <b>Фото карточки обновлено</b> (ID <code>{card_id}</code>)",
         reply_markup=get_admin_main_kb(),
@@ -3515,7 +3573,7 @@ ADMIN_HELP_PAGES = [
         "body": (
             "<b>🧪  Тестовые</b>\n"
             "<blockquote>"
-            "<code>/migrate_crystals_to_gems</code>\n"
+            "<code>/migrate_photos</code> — фото на диск (мини-аппка)\n<code>/migrate_crystals_to_gems</code>\n"
             "<code>/reset_all_nicknames</code>\n"
             "<code>/promote_to_mythical</code>\n"
             "<code>/getfileid</code> — file_id фото\n"
@@ -4417,6 +4475,36 @@ async def test_set_registration_now(message: Message):
     )
 
 
+
+# ================= МИГРАЦИЯ ФОТО ДЛЯ МИНИ-АППКИ =================
+@router.message(Command("migrate_photos"), admin_filter)
+async def cmd_migrate_photos(message: Message):
+    """Скачивает все photo_id карточек на диск (card_photos/). Нужно для мини-аппки."""
+    if message.chat.type != "private":
+        await message.reply("⚠️ Только в ЛС.")
+        return
+    if not migrate_all_card_photos:
+        await message.reply(
+            "❌ Модуль <code>card_photos.py</code> не найден. "
+            "Положи его рядом с main.py и перезапусти бота."
+        )
+        return
+    status = await message.reply("⏳ Скачиваю фото карточек на диск…")
+    try:
+        async with get_db() as db:
+            ok, fail = await migrate_all_card_photos(message.bot, db)
+        await status.edit_text(
+            f"✅  <b>Миграция фото завершена</b>\n\n"
+            f"·  Успешно / уже было: <b>{ok}</b>\n"
+            f"·  Ошибок: <b>{fail}</b>\n\n"
+            f"Файлы: папка <code>card_photos</code> рядом с БД.\n"
+            f"В мини-аппке картинки появятся после обновления."
+        )
+    except Exception as e:
+        logger.error(f"migrate_photos: {e}")
+        await status.edit_text(f"❌ Ошибка миграции: {esc(str(e))}")
+
+
 # ================= ЗАПУСК =================
 async def main():
     try:
@@ -4425,6 +4513,10 @@ async def main():
             os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
         await init_db()
         logger.info("База данных инициализирована")
+        try:
+            ensure_photo_dir()
+        except Exception as _e:
+            logger.warning("card photos dir: %s", _e)
 
         bot = Bot(
             token=BOT_TOKEN,
