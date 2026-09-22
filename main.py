@@ -1690,27 +1690,36 @@ async def get_card_handler(message: Message):
 
 
 def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) -> str:
-    if bonus > 0 and streak == 1:
+    """Текст про стрик в сообщении с карточкой / кулдауном.
+    Показываем статус всегда, когда стрик > 0:
+    - день 1 → «Стрик начат!»
+    - день 2+ → текущий стрик + бонусы (если начислились).
+    """
+    if streak <= 0:
+        return ""
+    if streak == 1:
         return (
             "\n\n<blockquote expandable>"
             "🔥  <b>Стрик начат!</b>\n"
             "Заходите каждый день — стрик растёт, а с ним и награды."
             "</blockquote>"
         )
-    if bonus > 0 and streak >= 2:
-        text = (
-            f"\n\n<blockquote expandable>"
-            f"🔥  Стрик  ·  <b>{fmt_days(streak)}</b>\n"
-            f"🪙  Бонус  ·  <b>+{fmt_num(bonus)}</b>  →  {fmt_num(new_balance)}"
-        )
-        if gem_bonus > 0:
-            text += f"\n💎  Бонус  ·  <b>+{fmt_num(gem_bonus)}</b>"
+    # streak >= 2
+    text = (
+        f"\n\n<blockquote expandable>"
+        f"🔥  Стрик  ·  <b>{fmt_days(streak)}</b>"
+    )
+    if bonus > 0:
         text += (
-            "\n\n💡 Заходите ежедневно, чтобы не потерять стрик."
-            "</blockquote>"
+            f"\n🪙  Бонус  ·  <b>+{fmt_num(bonus)}</b>  →  {fmt_num(new_balance)}"
         )
-        return text
-    return ""
+    if gem_bonus > 0:
+        text += f"\n💎  Бонус  ·  <b>+{fmt_num(gem_bonus)}</b>"
+    text += (
+        "\n\n💡 Заходите ежедневно, чтобы не потерять стрик."
+        "</blockquote>"
+    )
+    return text
 
 
 def _card_caption(mention: str, card: dict) -> str:
