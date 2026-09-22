@@ -23,7 +23,7 @@ from aiogram.types import (
     BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
     CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
-    ReplyKeyboardMarkup, LinkPreviewOptions, WebAppInfo,
+    ReplyKeyboardMarkup, LinkPreviewOptions,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
@@ -34,9 +34,10 @@ try:
 except ImportError:
     sync_card_photo = None
     migrate_all_card_photos = None
+
+
     def ensure_photo_dir():
         pass
-
 
 # ================= КОНФИГУРАЦИЯ =================
 load_dotenv()
@@ -44,8 +45,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан. Укажите его в .env или окружении.")
 
-# URL мини-аппки (Vercel / GitHub Pages). Пусто = кнопка Web App не показывается.
+# URL мини-аппки (Vercel / GitHub Pages). Пусто = кнопка мини-приложения не показывается.
+# Кнопки открывают бота через t.me/bot?startapp (OPEN_APP_URL), а не прямой WEBAPP_URL.
+# Важно: url-кнопка t.me?startapp допустима везде; web_app — только в ЛС (иначе BUTTON_TYPE_INVALID).
 WEBAPP_URL = (os.getenv("WEBAPP_URL") or "").strip()
+
+BOT_USERNAME = (os.getenv("BOT_USERNAME", "milosttbot") or "milosttbot").lstrip("@").strip()
+BOT_URL = f"https://t.me/{BOT_USERNAME}"
+# Официальный формат direct link: https://t.me/botusername?startapp (без слэша перед ?)
+OPEN_APP_URL = f"{BOT_URL}?startapp"
+
+
+def get_app_url() -> str:
+    """Ссылка для открытия мини-приложения (t.me/bot?startapp).
+    Пустая строка — мини-приложение выключено (WEBAPP_URL не задан)."""
+    if not WEBAPP_URL or not BOT_USERNAME:
+        return ""
+    return OPEN_APP_URL
 
 
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
@@ -497,13 +513,13 @@ def _owner_check(callback: CallbackQuery, target_user_id: int) -> bool:
 USER_COMMANDS = [
     BotCommand(command="start", description="👋 Запуск бота"),
     BotCommand(command="meow", description="🃏 Получить карточку"),
+    BotCommand(command="miniapp", description="📱 Мини-приложение"),
+    BotCommand(command="market", description="🛒 Маркет"),
+    BotCommand(command="top", description="🏆 Топ"),
+    BotCommand(command="dice", description="🎲 Кубик"),
+    BotCommand(command="help", description="❓ Помощь"),
     BotCommand(command="profile", description="👤 Профиль"),
     BotCommand(command="collection", description="🃏 Моя коллекция"),
-    BotCommand(command="market", description="🛒 Маркет"),
-    BotCommand(command="top", description="🏆 Топ игроков"),
-    BotCommand(command="dice", description="🎲 Кубик"),
-    BotCommand(command="miniapp", description="🃏 Мини-приложение"),
-    BotCommand(command="help", description="❓ Помощь"),
     BotCommand(command="nickname", description="✏️ Сменить ник"),
     BotCommand(command="gender", description="⚧ Выбрать пол"),
 ]
@@ -578,6 +594,19 @@ def get_rarity_keyboard(callback_prefix: str = "set_rarity"):
     return b.as_markup()
 
 
+def get_app_kb(is_short=False):
+    """Инлайн-кнопка открытия мини-приложения через t.me/?startapp."""
+    app_url = get_app_url()
+    if not app_url:
+        return None
+    text = "📱 Открыть" if is_short else "📱 Мини-приложение"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=text, url=app_url)]
+        ]
+    )
+
+
 def get_admin_main_kb():
     """Админ-панель: 2 в ряд, справка на всю ширину."""
     b = InlineKeyboardBuilder()
@@ -590,11 +619,13 @@ def get_admin_main_kb():
     return b.as_markup()
 
 
-def get_profile_kb(owner_id: int):
+def get_profile_kb(owner_id: int, *, private: bool = True):
+    """Клавиатура профиля. URL мини-аппа только в ЛС — в группах даёт BUTTON_TYPE_INVALID."""
     b = InlineKeyboardBuilder()
     b.button(text="🃏  Коллекция", callback_data=MainMenuCallback(user_id=owner_id).pack())
-    if WEBAPP_URL:
-        b.button(text="📱  Мини-апп", web_app=WebAppInfo(url=WEBAPP_URL))
+    app_url = get_app_url() if private else ""
+    if app_url:
+        b.button(text="📱  Приложение", url=app_url)
     else:
         b.button(text="🛒  Маркет", callback_data="menu_market")
     b.button(text="⚧  Пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
@@ -620,23 +651,16 @@ def get_gender_kb(current: str = "none", owner_id: int = 0) -> InlineKeyboardMar
     return b.as_markup()
 
 
-def get_main_km(is_staff: bool = False) -> ReplyKeyboardMarkup:
+def get_main_km() -> ReplyKeyboardMarkup:
     """Reply-клавиатура: карточка + меню в один ряд, мини-апп отдельно."""
-    if WEBAPP_URL:
-        rows = [
-            [
-                KeyboardButton(text="🃏 Получить карточку"),
-                KeyboardButton(text="📋 Меню"),
-            ],
-            [KeyboardButton(text="📱 Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))],
-        ]
-    else:
-        rows = [
-            [
-                KeyboardButton(text="🃏 Получить карточку"),
-                KeyboardButton(text="📋 Меню"),
-            ],
-        ]
+    rows = [
+        [
+            KeyboardButton(text="🃏 Получить карточку"),
+            KeyboardButton(text="📋 Меню"),
+        ],
+    ]
+    if get_app_url():
+        rows.append([KeyboardButton(text="📱 Мини-приложение")])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
@@ -689,18 +713,26 @@ def get_card_action_keyboard(user_id: int, balance: int = 0,
     return b.as_markup()
 
 
-def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
+def get_after_card_keyboard(
+    user_id: int, balance: int = 0, *, private: bool = True
+) -> InlineKeyboardMarkup:
+    """Клавиатура после выдачи карточки.
+
+    URL мини-приложения добавляем только в ЛС: в группах/каналах Telegram
+    отклоняет часть кнопок с ошибкой BUTTON_TYPE_INVALID.
+    В группах всегда даём callback «Коллекция».
+    """
     cost = instant_cost(COOLDOWN_SECONDS)
     b = InlineKeyboardBuilder()
     if balance >= cost:
         _instant_button(b, user_id, "⚡ Ещё одну", "another", cost)
-    if WEBAPP_URL:
-        b.button(text="📱  Мини-апп", web_app=WebAppInfo(url=WEBAPP_URL))
-    else:
-        b.button(
-            text="🃏  Коллекция",
-            callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
-        )
+    app_url = get_app_url() if private else ""
+    if app_url:
+        b.button(text="📱  Приложение", url=app_url)
+    b.button(
+        text="🃏  Коллекция",
+        callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
+    )
     b.adjust(1)
     return b.as_markup()
 
@@ -729,7 +761,9 @@ async def get_user_photo(bot: Bot, user_id: int, nickname: str):
     return DEFAULT_AVATAR_FILE_ID
 
 
-async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None):
+async def render_profile(
+    bot: Bot, user_id: int, viewer_id: Optional[int] = None, *, private: bool = True
+):
     # Автосгорание стрика, если с last_claim прошло ≥ 24 ч
     await burn_expired_streak(user_id)
     async with get_db() as db:
@@ -768,8 +802,8 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
     gems = row["gems"] if row["gems"] is not None else 0
 
     caption = (
-        f"<b>{esc(nickname)}</b>\n"
-        f"<code>{user_id}</code>\n\n"
+        f"👤 <b>{esc(nickname)}</b>\n"
+        f"🆔 <code>{user_id}</code>\n\n"
         f"<blockquote>"
         f"🎭  {role_display_str}\n"
         f"⚧  {gender_display}\n"
@@ -780,7 +814,7 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
         f"💎  Кристаллы  ·  <b>{fmt_num(gems)}</b>\n"
         f"🔥  Стрик      ·  <b>{fmt_days(row['streak'])}</b>"
     )
-    kb = get_profile_kb(user_id)
+    kb = get_profile_kb(user_id, private=private)
     return await get_user_photo(bot, user_id, nickname), caption, kb
 
 
@@ -1183,18 +1217,13 @@ async def cmd_start(message: Message):
         if is_staff:
             welcome += f"\n\n{role_display(role)} — админ-панель в «📋 Меню»."
 
-        await message.reply(welcome, reply_markup=get_main_km(is_staff=is_staff))
-        if WEBAPP_URL:
+        await message.reply(welcome, reply_markup=get_main_km())
+        app_kb = get_app_kb()
+        if app_kb:
             try:
-                wa_kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="🃏 Открыть мини-аппку",
-                        web_app=WebAppInfo(url=WEBAPP_URL),
-                    )
-                ]])
                 await message.answer(
-                    "📱  Коллекция и топ — в мини-приложении:",
-                    reply_markup=wa_kb,
+                    "📱  Попробуйте наше мини-приложение:",
+                    reply_markup=app_kb,
                 )
             except Exception as e:
                 logger.warning(f"webapp button: {e}")
@@ -1262,63 +1291,63 @@ HELP_PAGES = [
     {
         "title": "📖  Маркет и кубик",
         "body": (
-            "<b>🛒  Покупка карточек</b>\n"
-            "<blockquote>"
-            "В маркете (только ЛС) выберите редкость\n"
-            "и купите недостающую карточку за кристаллы."
-            "</blockquote>\n\n"
-            "<b>💎  Цены</b>\n"
-            "<blockquote>"
-            + "\n".join(
-                f"{v['icon']}  {v['name']}  ·  {MARKET_PRICES[k]} 💎"
-                for k, v in RARITIES.items()
-            )
-            + "</blockquote>\n\n"
-            "<b>💱  Обмен на кристаллы</b>\n"
-            f"<blockquote>"
-            f"Маркет или профиль → «Купить кристаллы»\n"
-            f"Курс:  1 💎  =  {GEM_TO_COINS} 🪙"
-            "</blockquote>\n\n"
-            "<b>🎲  Кубик</b>\n"
-            f"<blockquote>"
-            f"/dice · «мряу кубик» · раз в 5 мин · от {DICE_MIN_BALANCE} 🪙\n"
-            "Результат зависит от выпавшего числа на кубике Telegram:\n"
-            "1 → −10 · 2 → −5 · 3 → 0 · 4 → +5 · 5 → +10 · 6 → +15 🪙"
-            "</blockquote>"
+                "<b>🛒  Покупка карточек</b>\n"
+                "<blockquote>"
+                "В маркете (только ЛС) выберите редкость\n"
+                "и купите недостающую карточку за кристаллы."
+                "</blockquote>\n\n"
+                "<b>💎  Цены</b>\n"
+                "<blockquote>"
+                + "\n".join(
+            f"{v['icon']}  {v['name']}  ·  {MARKET_PRICES[k]} 💎"
+            for k, v in RARITIES.items()
+        )
+                + "</blockquote>\n\n"
+                  "<b>💱  Обмен на кристаллы</b>\n"
+                  f"<blockquote>"
+                  f"Маркет или профиль → «Купить кристаллы»\n"
+                  f"Курс:  1 💎  =  {GEM_TO_COINS} 🪙"
+                  "</blockquote>\n\n"
+                  "<b>🎲  Кубик</b>\n"
+                  f"<blockquote>"
+                  f"/dice · «мряу кубик» · раз в 5 мин · от {DICE_MIN_BALANCE} 🪙\n"
+                  "Результат зависит от выпавшего числа на кубике Telegram:\n"
+                  "1 → −10 · 2 → −5 · 3 → 0 · 4 → +5 · 5 → +10 · 6 → +15 🪙"
+                  "</blockquote>"
         ),
     },
     {
-        "title": "📖  Профиль, мини-апп и топ",
+        "title": "📖  Профиль, мини-приложение и топ",
         "body": (
-            "<b>✏️  Смена ника</b>\n"
-            f"<blockquote>"
-            f"/nickname НовыйНик  ·  {NICKNAME_COST} 🪙\n"
-            "/nickname reset  ·  бесплатно\n"
-            "2–32 символа, без ссылок и @упоминаний\n"
-            "Подсказка: кнопка «Как сменить ник» в профиле"
-            "</blockquote>\n\n"
-            "<b>⚧  Пол</b>\n"
-            "<blockquote>"
-            "/gender м|ж|др|нет  или кнопка в профиле\n"
-            "Необязательное поле"
-            "</blockquote>\n\n"
-            "<b>🃏  Мини-приложение</b>\n"
-            "<blockquote>"
-            "/miniapp · кнопка «🃏 Мини-приложение»\n"
-            "Удобный просмотр коллекции и топа"
-            "</blockquote>\n\n"
-            "<b>🏆  Топ</b>\n"
-            "<blockquote>"
-            "«мряу топ» · /top · Меню → Топ\n"
-            "Переключение: монеты / карточки / стрик"
-            "</blockquote>\n\n"
-            "<b>🃏  Редкости</b>\n"
-            "<blockquote>"
-            + "\n".join(
-                f"{v['icon']}  {v['name']}  ·  {v['reward']} 🪙"
-                for v in RARITIES.values()
-            )
-            + "</blockquote>"
+                "<b>✏️  Смена ника</b>\n"
+                f"<blockquote>"
+                f"/nickname НовыйНик  ·  {NICKNAME_COST} 🪙\n"
+                "/nickname reset (сбросить ник)  ·  бесплатно\n"
+                "2–32 символа, без ссылок и @упоминаний\n"
+                "Подсказка: кнопка «Как сменить ник» в профиле"
+                "</blockquote>\n\n"
+                "<b>⚧  Пол</b>\n"
+                "<blockquote>"
+                "/gender м|ж|др|нет  или кнопка в профиле\n"
+                "Необязательное поле"
+                "</blockquote>\n\n"
+                "<b>🃏  Мини-приложение</b>\n"
+                "<blockquote>"
+                "/miniapp · кнопка «🃏 Мини-приложение»\n"
+                "Удобный просмотр коллекции и топа"
+                "</blockquote>\n\n"
+                "<b>🏆  Топ</b>\n"
+                "<blockquote>"
+                "«мряу топ» · /top · Меню → Топ\n"
+                "Переключение: монеты / карточки / стрик"
+                "</blockquote>\n\n"
+                "<b>🃏  Редкости</b>\n"
+                "<blockquote>"
+                + "\n".join(
+            f"{v['icon']}  {v['name']}  ·  {v['reward']} 🪙"
+            for v in RARITIES.values()
+        )
+                + "</blockquote>"
         ),
     },
 ]
@@ -1387,8 +1416,12 @@ async def menu_profile_cb(callback: CallbackQuery):
             callback.from_user.username,
             callback.from_user.full_name,
         )
+        is_private = callback.message.chat.type == "private"
         photo, caption, kb = await render_profile(
-            callback.bot, callback.from_user.id, viewer_id=callback.from_user.id
+            callback.bot,
+            callback.from_user.id,
+            viewer_id=callback.from_user.id,
+            private=is_private,
         )
         await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=kb)
         await callback.answer()
@@ -1499,28 +1532,24 @@ async def menu_admin_cb(callback: CallbackQuery):
 
 
 # ---------- Мини-приложение ----------
+@router.message(F.text == "📱 Мини-приложение")
 @router.message(Command("miniapp"))
 async def cmd_miniapp(message: Message):
     if not await check_not_banned(message):
         return
-    if not WEBAPP_URL:
+    app_kb = get_app_kb(is_short=True)
+    if not app_kb:
         await message.reply(
-            "🃏  <b>Мини-приложение пока недоступно.</b>\n"
-            "Администратор не задал WEBAPP_URL."
+            "📱  <b>Мини-приложение пока недоступно.</b>\n"
+            "Попробуйте чуть позже"
         )
         return
-    wa_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="🃏 Открыть мини-приложение",
-            web_app=WebAppInfo(url=WEBAPP_URL),
-        )
-    ]])
     await message.reply(
         "📱  <b>Мини-приложение</b>\n\n"
         "<blockquote>"
-        "Удобный просмотр коллекции и топа"
+        "Попробуйте наше мини-приложение прямо в Telegram"
         "</blockquote>",
-        reply_markup=wa_kb,
+        reply_markup=app_kb,
     )
 
 
@@ -1615,15 +1644,27 @@ async def get_card_handler(message: Message):
         caption = _card_caption(mention, card)
         caption += _streak_text(streak, bonus, new_balance, gem_bonus)
 
+        is_private = message.chat.type == "private"
+        kb = get_after_card_keyboard(user_id, card["balance"], private=is_private)
         try:
             await message.reply_photo(
                 photo=card["photo_id"],
                 caption=caption,
-                reply_markup=get_after_card_keyboard(user_id, card["balance"]),
+                reply_markup=kb,
             )
         except TelegramBadRequest as e:
             logger.error(f"reply_photo bad request: {e}")
-            await message.reply(caption, reply_markup=get_after_card_keyboard(user_id, card["balance"]))
+            # Fallback: без URL-кнопки мини-аппа (частая причина BUTTON_TYPE_INVALID)
+            safe_kb = get_after_card_keyboard(user_id, card["balance"], private=False)
+            try:
+                await message.reply_photo(
+                    photo=card["photo_id"], caption=caption, reply_markup=safe_kb
+                )
+            except TelegramBadRequest:
+                try:
+                    await message.reply(caption, reply_markup=safe_kb)
+                except TelegramBadRequest:
+                    await message.reply(caption)
     except Exception as e:
         logger.error(f"Ошибка в get_card_handler: {e}")
         await reply_ephemeral(message, "❌ <b>Произошла ошибка. Попробуйте позже.</b>")
@@ -1826,10 +1867,10 @@ async def show_profile(message: Message):
     try:
         target_user = message.from_user
         if (
-            message.chat.type != "private"
-            and message.reply_to_message
-            and message.reply_to_message.from_user
-            and not message.reply_to_message.from_user.is_bot
+                message.chat.type != "private"
+                and message.reply_to_message
+                and message.reply_to_message.from_user
+                and not message.reply_to_message.from_user.is_bot
         ):
             target_user = message.reply_to_message.from_user
 
@@ -1843,8 +1884,12 @@ async def show_profile(message: Message):
                 message.from_user.full_name,
             )
 
+        is_private = message.chat.type == "private"
         photo, caption, kb = await render_profile(
-            message.bot, target_user.id, viewer_id=message.from_user.id
+            message.bot,
+            target_user.id,
+            viewer_id=message.from_user.id,
+            private=is_private,
         )
         if photo == DEFAULT_AVATAR_FILE_ID and "не найден" in caption.lower():
             await message.reply(caption)
@@ -1853,7 +1898,12 @@ async def show_profile(message: Message):
             await message.reply_photo(photo=photo, caption=caption, reply_markup=kb)
         except TelegramBadRequest as e:
             logger.error(f"profile photo bad request: {e}")
-            await message.reply(caption, reply_markup=kb)
+            # Fallback без URL-кнопки
+            safe_kb = get_profile_kb(target_user.id, private=False)
+            try:
+                await message.reply_photo(photo=photo, caption=caption, reply_markup=safe_kb)
+            except TelegramBadRequest:
+                await message.reply(caption, reply_markup=safe_kb)
     except Exception as e:
         logger.error(f"Ошибка в show_profile: {e}")
         await message.reply("❌ <b>Произошла ошибка. Попробуйте позже.</b>")
@@ -1868,8 +1918,12 @@ async def process_back_to_profile(callback: CallbackQuery, callback_data: BackTo
         return
     try:
         target_id = callback_data.user_id or callback.from_user.id
+        is_private = callback.message.chat.type == "private"
         photo, caption, kb = await render_profile(
-            callback.message.bot, target_id, viewer_id=callback.from_user.id
+            callback.message.bot,
+            target_id,
+            viewer_id=callback.from_user.id,
+            private=is_private,
         )
         if "не найден" in (caption or "").lower():
             await callback.answer("Пользователь не найден")
@@ -2248,7 +2302,6 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
 
 
 @router.message(F.text == "🏆 Топ")
-@router.message(F.text == "🏆 Топ игроков")
 @router.message(Command("top"))
 @router.message(F.text.regexp(TOP_CMD_RE))
 async def show_top_players(message: Message):
@@ -2563,15 +2616,23 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             caption = _card_caption(mention, card)
             caption += _streak_text(streak, bonus, new_balance, gem_bonus)
 
+            is_private = callback.message.chat.type == "private"
+            kb = get_after_card_keyboard(user_id, card["balance"], private=is_private)
             try:
                 await callback.message.answer_photo(
                     photo=card["photo_id"],
                     caption=caption,
-                    reply_markup=get_after_card_keyboard(user_id, card["balance"]),
+                    reply_markup=kb,
                 )
             except TelegramBadRequest as e:
                 logger.error(f"instant photo error: {e}")
-                await callback.message.answer(caption)
+                safe_kb = get_after_card_keyboard(user_id, card["balance"], private=False)
+                try:
+                    await callback.message.answer_photo(
+                        photo=card["photo_id"], caption=caption, reply_markup=safe_kb
+                    )
+                except TelegramBadRequest:
+                    await callback.message.answer(caption, reply_markup=safe_kb)
             return
 
         if action == "collection":
@@ -2612,11 +2673,12 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
         missing_by_rarity = {}
         for r_key in RARITIES:
             cur = await db.execute(
-                """SELECT COUNT(*) FROM cards c
+                """SELECT COUNT(*)
+                   FROM cards c
                    WHERE c.rarity = ?
-                     AND c.id NOT IN (
-                         SELECT card_id FROM inventory WHERE user_id = ?
-                     )""",
+                     AND c.id NOT IN (SELECT card_id
+                                      FROM inventory
+                                      WHERE user_id = ?)""",
                 (r_key, user_id),
             )
             missing_by_rarity[r_key] = (await cur.fetchone())[0]
@@ -2656,7 +2718,7 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
 
 
 async def build_market_rarity_page(
-    user_id: int, rarity: str, page: int = 0
+        user_id: int, rarity: str, page: int = 0
 ) -> Tuple[str, InlineKeyboardMarkup, Optional[dict]]:
     price = MARKET_PRICES.get(rarity, 0)
     r_info = RARITIES.get(rarity, {})
@@ -2666,9 +2728,9 @@ async def build_market_rarity_page(
             """SELECT c.id, c.name, c.photo_id, c.rarity
                FROM cards c
                WHERE c.rarity = ?
-                 AND c.id NOT IN (
-                     SELECT card_id FROM inventory WHERE user_id = ?
-                 )
+                 AND c.id NOT IN (SELECT card_id
+                                  FROM inventory
+                                  WHERE user_id = ?)
                ORDER BY c.id ASC""",
             (rarity, user_id),
         )
@@ -2898,7 +2960,7 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
             await db.execute(
                 """INSERT INTO inventory (user_id, card_id, claim_time, amount)
                    VALUES (?, ?, ?, 1)
-                   ON CONFLICT(user_id, card_id) DO UPDATE SET amount = amount + 1,
+                   ON CONFLICT(user_id, card_id) DO UPDATE SET amount     = amount + 1,
                                                                claim_time = ?""",
                 (user_id, card_id, now, now),
             )
@@ -3069,7 +3131,7 @@ async def admin_panel(message: Message):
         await message.reply(
             "⚠️  <b>Доступ запрещён</b>\n\n"
             "У вас больше нет прав администратора.",
-            reply_markup=get_main_km(is_staff=False),
+            reply_markup=get_main_km(),
         )
         await update_user_commands(message.bot, message.from_user.id, "user")
         return
@@ -3525,7 +3587,14 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
 
         if filter_role == "all":
             cur = await db.execute(
-                """SELECT u.user_id, u.nickname, u.coins, u.gems, u.streak, u.role, u.registration, u.gender
+                """SELECT u.user_id,
+                          u.nickname,
+                          u.coins,
+                          u.gems,
+                          u.streak,
+                          u.role,
+                          u.registration,
+                          u.gender
                    FROM users u
                    ORDER BY u.registration DESC
                    LIMIT ? OFFSET ?""",
@@ -3533,7 +3602,14 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
             )
         else:
             cur = await db.execute(
-                """SELECT u.user_id, u.nickname, u.coins, u.gems, u.streak, u.role, u.registration, u.gender
+                """SELECT u.user_id,
+                          u.nickname,
+                          u.coins,
+                          u.gems,
+                          u.streak,
+                          u.role,
+                          u.registration,
+                          u.gender
                    FROM users u
                    WHERE u.role = ?
                    ORDER BY u.registration DESC
@@ -3663,19 +3739,25 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
 
     # Роли и бан — с ограничениями
     if role == "banned":
-        b.button(text="✅  Разблокировать", callback_data=AdminUserActionCallback(action="unban", user_id=user_id).pack())
+        b.button(text="✅  Разблокировать",
+                 callback_data=AdminUserActionCallback(action="unban", user_id=user_id).pack())
     elif role == "user":
         b.button(text="🚫  Заблокировать", callback_data=AdminUserActionCallback(action="ban", user_id=user_id).pack())
         if viewer_is_super:
-            b.button(text="🛡  Назначить админом", callback_data=AdminUserActionCallback(action="make_admin", user_id=user_id).pack())
+            b.button(text="🛡  Назначить админом",
+                     callback_data=AdminUserActionCallback(action="make_admin", user_id=user_id).pack())
     elif role == "admin":
         if viewer_is_super:
-            b.button(text="❌  Разжаловать", callback_data=AdminUserActionCallback(action="unadmin", user_id=user_id).pack())
-            b.button(text="👑  Сделать главным", callback_data=AdminUserActionCallback(action="make_super", user_id=user_id).pack())
-            b.button(text="🚫  Заблокировать", callback_data=AdminUserActionCallback(action="ban", user_id=user_id).pack())
+            b.button(text="❌  Разжаловать",
+                     callback_data=AdminUserActionCallback(action="unadmin", user_id=user_id).pack())
+            b.button(text="👑  Сделать главным",
+                     callback_data=AdminUserActionCallback(action="make_super", user_id=user_id).pack())
+            b.button(text="🚫  Заблокировать",
+                     callback_data=AdminUserActionCallback(action="ban", user_id=user_id).pack())
     elif role == "superadmin":
         if viewer_is_super and user_id != call.from_user.id:
-            b.button(text="❌  Разжаловать", callback_data=AdminUserActionCallback(action="unadmin", user_id=user_id).pack())
+            b.button(text="❌  Разжаловать",
+                     callback_data=AdminUserActionCallback(action="unadmin", user_id=user_id).pack())
 
     b.button(text="‹  К списку", callback_data=AdminUserPageCallback(page=0, filter_role="all").pack())
     b.adjust(1)
@@ -3907,7 +3989,7 @@ ADMIN_HELP_PAGES = [
         "body": (
             "<b>🧪  Тестовые</b>\n"
             "<blockquote>"
-            "<code>/migrate_photos</code> — фото на диск (мини-аппка)\n<code>/migrate_crystals_to_gems</code>\n"
+            "<code>/migrate_photos</code> — фото на диск (мини-приложение)\n<code>/migrate_crystals_to_gems</code>\n"
             "<code>/reset_all_nicknames</code>\n"
             "<code>/promote_to_mythical</code>\n"
             "<code>/getfileid</code> — file_id фото\n"
@@ -4324,10 +4406,10 @@ async def admin_stats(message: Message):
                 f"<b>🃏 Карточки</b>\n"
                 f"  ·  Всего: <b>{fmt_num(total_cards)}</b>\n"
                 + "\n".join(rarity_lines) + "\n\n"
-                f"<b>🎒 Коллекции</b>\n"
-                f"  ·  Экземпляров: <b>{fmt_num(total_owned)}</b>\n"
-                f"  ·  Уникальных: <b>{fmt_num(unique_owned)}</b> / {fmt_num(total_cards)}\n"
-                f"  ·  Коллекционеров: <b>{fmt_num(collectors)}</b>\n\n"
+                                            f"<b>🎒 Коллекции</b>\n"
+                                            f"  ·  Экземпляров: <b>{fmt_num(total_owned)}</b>\n"
+                                            f"  ·  Уникальных: <b>{fmt_num(unique_owned)}</b> / {fmt_num(total_cards)}\n"
+                                            f"  ·  Коллекционеров: <b>{fmt_num(collectors)}</b>\n\n"
         )
 
         if top_user:
@@ -4809,7 +4891,6 @@ async def test_set_registration_now(message: Message):
         f"👥  Обновлено: <b>{fmt_num(affected)}</b>\n"
         f"🕐  Время: <b>{datetime.fromtimestamp(now).strftime('%d.%m.%Y %H:%M:%S')}</b>"
     )
-
 
 
 # ================= МИГРАЦИЯ ФОТО ДЛЯ МИНИ-АППКИ =================
