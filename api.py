@@ -2,15 +2,14 @@
 API для Telegram Mini App «Мряу».
 
 Запуск (на том же сервере, где бот и БД):
-    pip install fastapi uvicorn python-multipart
+    pip install fastapi uvicorn python-multipart aiosqlite
     uvicorn api:app --host 0.0.0.0 --port 8080
-
-Или рядом с ботом через systemd / docker.
 
 Переменные окружения:
     BOT_TOKEN   — токен бота (обязательно, для проверки initData)
     DB_NAME     — путь к SQLite (по умолчанию /app/data/cards_game.db)
     CORS_ORIGINS — через запятую, например https://meow.vercel.app
+    CARDS_PHOTO_DIR — папка с фото карточек (опционально)
 """
 
 from __future__ import annotations
@@ -27,8 +26,8 @@ from urllib.parse import parse_qsl
 
 import aiosqlite
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 # ── Конфиг ──
@@ -76,11 +75,11 @@ ROLES = {
 COOLDOWN_SECONDS = 4 * 3600
 GEM_TO_COINS = 100
 
-app = FastAPI(title="Мряу Mini App API", version="1.0")
+app = FastAPI(title="Мряу Mini App API", version="1.1")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS + ["*"],  # Telegram WebView может слать разные origin
+    allow_origins=CORS_ORIGINS + ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,7 +106,6 @@ def validate_init_data(init_data: str) -> dict[str, Any]:
     if not hmac.compare_digest(calculated, received_hash):
         raise HTTPException(401, "Неверная подпись initData")
 
-    # auth_date не старше 24 часов
     auth_date = int(parsed.get("auth_date", 0))
     if auth_date and time.time() - auth_date > 86400:
         raise HTTPException(401, "initData устарел")
@@ -133,15 +131,12 @@ def get_user_from_header(x_telegram_init_data: Optional[str]) -> dict:
     return validate_init_data(x_telegram_init_data)["user"]
 
 
-# ── БД ──
-
-def card_photo_url(card_id: int, request_base: str | None = None) -> str:
-    """Относительный URL фото — фронт склеит с API_BASE."""
+# ── Фото карточек ──
+def card_photo_url(card_id: int) -> str:
     return f"/api/card/{int(card_id)}/photo"
 
 
 def _photo_search_dirs() -> list[Path]:
-    """Все возможные места, где могут лежать card_photos на Bothost."""
     dirs: list[Path] = []
     env_dir = os.getenv("CARDS_PHOTO_DIR")
     if env_dir:
@@ -157,12 +152,10 @@ def _photo_search_dirs() -> list[Path]:
             Path("/app/card_photos"),
             Path("card_photos"),
             Path("./card_photos"),
-            Path("/app/data") / "card_photos",
         ]
     )
-    # unique preserve order
-    seen = set()
-    out = []
+    seen: set[str] = set()
+    out: list[Path] = []
     for d in dirs:
         try:
             key = str(d.resolve()) if d.exists() else str(d)
@@ -175,12 +168,10 @@ def _photo_search_dirs() -> list[Path]:
 
 
 def resolve_card_photo_file(card_id: int, photo_path: str | None = None) -> Path | None:
-    """Ищет файл фото на диске (несколько типичных путей Bothost)."""
     if photo_path:
         pp = Path(str(photo_path))
         if pp.is_file() and pp.stat().st_size > 0:
             return pp
-        # иногда в БД путь с другой машины — берём только имя файла
         name = pp.name
         if name:
             for d in _photo_search_dirs():
@@ -196,7 +187,6 @@ def resolve_card_photo_file(card_id: int, photo_path: str | None = None) -> Path
             candidate = d / f"{cid}{ext}"
             if candidate.is_file() and candidate.stat().st_size > 0:
                 return candidate
-        # файлы вида 12_xxx.jpg
         try:
             for f in d.glob(f"{cid}.*"):
                 if f.is_file() and f.stat().st_size > 0:
@@ -206,6 +196,7 @@ def resolve_card_photo_file(card_id: int, photo_path: str | None = None) -> Path
     return None
 
 
+# ── БД ──
 async def get_db():
     db = await aiosqlite.connect(DB_NAME)
     db.row_factory = aiosqlite.Row
@@ -214,7 +205,6 @@ async def get_db():
 
 
 async def ensure_user(db: aiosqlite.Connection, tg_user: dict) -> aiosqlite.Row:
-    """Создаёт пользователя, если его ещё нет (как get_or_create_user в боте)."""
     user_id = tg_user["id"]
     cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = await cur.fetchone()
@@ -241,20 +231,30 @@ async def ensure_user(db: aiosqlite.Connection, tg_user: dict) -> aiosqlite.Row:
     return await cur.fetchone()
 
 
-# ── Эндпоинты ──
+async def require_admin(db: aiosqlite.Connection, tg_user: dict) -> aiosqlite.Row:
+    user = await ensure_user(db, tg_user)
+    role = user["role"] or "user"
+    if role not in ("admin", "superadmin"):
+        raise HTTPException(403, "Недостаточно прав")
+    return user
 
+
+async def ensure_photo_path_column(db: aiosqlite.Connection) -> None:
+    try:
+        await db.execute("ALTER TABLE cards ADD COLUMN photo_path TEXT")
+        await db.commit()
+    except Exception:
+        pass
+
+
+# ── Эндпоинты ──
 
 @app.get("/api/card/{card_id}/photo")
 async def api_card_photo(card_id: int):
-    """Публичная раздача фото карточки (без initData — только картинка)."""
+    """Публичная раздача фото карточки (без initData)."""
     db = await get_db()
     try:
-        # ensure column
-        try:
-            await db.execute("ALTER TABLE cards ADD COLUMN photo_path TEXT")
-            await db.commit()
-        except Exception:
-            pass
+        await ensure_photo_path_column(db)
         cur = await db.execute(
             "SELECT photo_path FROM cards WHERE id = ?", (card_id,)
         )
@@ -264,17 +264,7 @@ async def api_card_photo(card_id: int):
         photo_path = row["photo_path"] if row["photo_path"] else None
         path = resolve_card_photo_file(card_id, photo_path)
         if not path:
-            searched = [str(d) for d in _photo_search_dirs()]
-            raise HTTPException(
-                404,
-                detail={
-                    "error": "photo_not_found",
-                    "card_id": card_id,
-                    "photo_path_db": photo_path,
-                    "searched_dirs": searched,
-                    "hint": "Проверь CARDS_PHOTO_DIR или что файлы называются {id}.jpg",
-                },
-            )
+            raise HTTPException(404, "photo_not_found")
         media = "image/jpeg"
         suf = path.suffix.lower()
         if suf == ".png":
@@ -293,10 +283,8 @@ async def api_card_photo(card_id: int):
         await db.close()
 
 
-
 @app.get("/api/debug/photos")
 async def api_debug_photos():
-    """Список найденных фото и путей поиска (для отладки)."""
     dirs_info = []
     for d in _photo_search_dirs():
         files = []
@@ -382,8 +370,8 @@ async def api_collection(
     db = await get_db()
     try:
         await ensure_user(db, tg_user)
+        await ensure_photo_path_column(db)
 
-        # Статистика по редкостям
         cur = await db.execute(
             """SELECT c.rarity, COALESCE(SUM(i.amount), 0) AS cnt
                FROM inventory i
@@ -402,14 +390,6 @@ async def api_collection(
             (user_id,),
         )
         owned_unique = (await cur.fetchone())[0]
-
-        # Список карточек
-        # photo_path may be missing on old DBs
-        try:
-            await db.execute("ALTER TABLE cards ADD COLUMN photo_path TEXT")
-            await db.commit()
-        except Exception:
-            pass
 
         sql = """
             SELECT c.id, c.name, c.rarity, c.photo_id, c.photo_path, i.amount, i.claim_time
@@ -430,7 +410,8 @@ async def api_collection(
         for row in rows:
             r = RARITIES.get(row["rarity"], {})
             cid = row["id"]
-            has_photo = resolve_card_photo_file(cid, row["photo_path"] if "photo_path" in row.keys() else None) is not None
+            pp = row["photo_path"] if "photo_path" in row.keys() else None
+            has_photo = resolve_card_photo_file(cid, pp) is not None
             cards.append({
                 "id": cid,
                 "name": row["name"],
@@ -445,7 +426,6 @@ async def api_collection(
                 "claim_time": row["claim_time"],
             })
 
-        # Кол-во карточек каждой редкости в игре
         rarity_totals = {}
         for rk in RARITIES:
             cur = await db.execute(
@@ -685,6 +665,7 @@ async def api_market_cards(
                 "name": card["name"],
                 "photo_id": card["photo_id"],
                 "rarity": card["rarity"],
+                "photo_url": card_photo_url(card["id"]),
             },
         }
     finally:
@@ -707,6 +688,7 @@ async def api_market_buy(
     db = await get_db()
     try:
         await ensure_user(db, tg_user)
+        await ensure_photo_path_column(db)
 
         cur = await db.execute(
             "SELECT id, name, rarity, photo_id, photo_path FROM cards WHERE id = ?",
@@ -765,6 +747,7 @@ async def api_market_buy(
                 "rarity_icon": r_info.get("icon", ""),
                 "rarity_name": r_info.get("name", rarity),
                 "photo_id": card["photo_id"],
+                "photo_url": card_photo_url(card["id"]),
             },
             "price": price,
             "gems": new_gems,
@@ -774,7 +757,7 @@ async def api_market_buy(
 
 
 class ExchangeBody(BaseModel):
-    amount: int  # сколько кристаллов купить
+    amount: int
 
 
 @app.post("/api/market/exchange")
@@ -832,6 +815,7 @@ async def api_card(
 
     db = await get_db()
     try:
+        await ensure_photo_path_column(db)
         cur = await db.execute(
             "SELECT id, name, rarity, photo_id, photo_path FROM cards WHERE id = ?",
             (card_id,),
@@ -870,9 +854,82 @@ async def api_card(
         await db.close()
 
 
-# Для локального запуска:
-# uvicorn api:app --host 0.0.0.0 --port 8080 --reload
+@app.get("/api/admin/overview")
+async def api_admin_overview(x_telegram_init_data: Optional[str] = Header(None)):
+    """Сводка и последние получения — только admin / superadmin."""
+    tg_user = get_user_from_header(x_telegram_init_data)
+    db = await get_db()
+    try:
+        await require_admin(db, tg_user)
+
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        users_total = (await cur.fetchone())[0]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'banned'"
+        )
+        banned = (await cur.fetchone())[0]
+
+        cur = await db.execute("SELECT COUNT(*) FROM cards")
+        cards_total = (await cur.fetchone())[0]
+
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM inventory"
+        )
+        inventory_total = (await cur.fetchone())[0]
+
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(coins), 0), COALESCE(SUM(gems), 0) FROM users WHERE role != 'banned'"
+        )
+        row = await cur.fetchone()
+        coins_sum = row[0] or 0
+        gems_sum = row[1] or 0
+
+        cur = await db.execute(
+            """SELECT i.user_id, u.nickname, i.card_id, c.name AS card_name,
+                      c.rarity, i.amount, i.claim_time
+               FROM inventory i
+               JOIN users u ON u.user_id = i.user_id
+               JOIN cards c ON c.id = i.card_id
+               ORDER BY i.claim_time DESC
+               LIMIT 40"""
+        )
+        recent_rows = await cur.fetchall()
+        recent = []
+        for r in recent_rows:
+            ri = RARITIES.get(r["rarity"], {})
+            recent.append({
+                "user_id": r["user_id"],
+                "nickname": r["nickname"] or f"User{r['user_id']}",
+                "card_id": r["card_id"],
+                "card_name": r["card_name"],
+                "rarity": r["rarity"],
+                "rarity_icon": ri.get("icon", ""),
+                "amount": r["amount"] or 1,
+                "claim_time": r["claim_time"],
+            })
+
+        return {
+            "stats": {
+                "users_total": users_total,
+                "banned": banned,
+                "cards_total": cards_total,
+                "inventory_total": inventory_total,
+                "coins_sum": coins_sum,
+                "gems_sum": gems_sum,
+            },
+            "recent": recent,
+        }
+    finally:
+        await db.close()
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("api:app", host="0.0.0.0", port=int(os.getenv("API_PORT", "8080")), reload=False)
+    uvicorn.run(
+        "api:app",
+        host="0.0.0.0",
+        port=int(os.getenv("API_PORT", "8080")),
+        reload=False,
+    )
