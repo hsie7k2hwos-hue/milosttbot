@@ -127,12 +127,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ================= ВИЗУАЛЬНЫЕ КОНСТАНТЫ =================
-SEP = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
-SEP_BOLD = "━━━━━━━━━━━━━━━━"
-BULLET = "·"
-
-
 # ================= ХЕЛПЕРЫ =================
 def esc(text) -> str:
     return html.escape(str(text), quote=False)
@@ -199,11 +193,6 @@ def dice_delta_from_value(value: int) -> int:
 def role_display(role: str) -> str:
     info = ROLES.get(role, ROLES["user"])
     return f"{info['icon']}  {info['name']}"
-
-
-def _row(icon: str, label: str, value: str, pad: int = 12) -> str:
-    """Единый формат строки «иконка  метка  ·  значение»."""
-    return f"{icon}  {label:<{pad}}  {BULLET}  <b>{value}</b>"
 
 
 # ================= CALLBACK DATA =================
@@ -509,11 +498,11 @@ USER_COMMANDS = [
     BotCommand(command="start", description="👋 Запуск бота"),
     BotCommand(command="meow", description="🃏 Получить карточку"),
     BotCommand(command="profile", description="👤 Профиль"),
-    BotCommand(command="collection", description="📚 Моя коллекция"),
+    BotCommand(command="collection", description="🃏 Моя коллекция"),
     BotCommand(command="market", description="🛒 Маркет"),
     BotCommand(command="top", description="🏆 Топ игроков"),
     BotCommand(command="dice", description="🎲 Кубик"),
-    BotCommand(command="miniapp", description="📱 Мини-приложение"),
+    BotCommand(command="miniapp", description="🃏 Мини-приложение"),
     BotCommand(command="help", description="❓ Помощь"),
     BotCommand(command="nickname", description="✏️ Сменить ник"),
     BotCommand(command="gender", description="⚧ Выбрать пол"),
@@ -585,58 +574,69 @@ def get_rarity_keyboard(callback_prefix: str = "set_rarity"):
     for key, val in RARITIES.items():
         b.button(text=f"{val['icon']}  {val['name']}", callback_data=f"{callback_prefix}:{key}")
     b.button(text="✕  Отмена", callback_data="cancel_add_card")
-    b.adjust(2)
+    b.adjust(2, 2, 1, 1)  # 5 rarities + cancel: 2+2+1 + cancel full width
     return b.as_markup()
 
 
 def get_admin_main_kb():
-    """Главное меню админ-панели — чистые блоки по одной кнопке."""
+    """Админ-панель: 2 в ряд, справка на всю ширину."""
     b = InlineKeyboardBuilder()
-    b.button(text="➕  Добавить карточку", callback_data="admin_add_card")
-    b.button(text="📜  Список карточек", callback_data=AdminCardPageCallback(page=0).pack())
+    b.button(text="➕  Добавить", callback_data="admin_add_card")
+    b.button(text="📜  Карточки", callback_data=AdminCardPageCallback(page=0).pack())
     b.button(text="👥  Пользователи", callback_data=AdminUserPageCallback(page=0, filter_role="all").pack())
     b.button(text="📊  Статистика", callback_data="admin_stats_quick")
-    b.button(text="🛠  Справка", callback_data=AdminHelpCallback(page=0).pack())
-    b.adjust(1)
+    b.button(text="🛠  Справка админа", callback_data=AdminHelpCallback(page=0).pack())
+    b.adjust(2, 2, 1)
     return b.as_markup()
 
 
 def get_profile_kb(owner_id: int):
     b = InlineKeyboardBuilder()
-    b.button(text="📚  Моя коллекция", callback_data=MainMenuCallback(user_id=owner_id).pack())
+    b.button(text="🃏  Коллекция", callback_data=MainMenuCallback(user_id=owner_id).pack())
     if WEBAPP_URL:
-        b.button(text="📱  Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))
-    b.button(text="⚧  Выбрать пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
-    b.button(text="✏️  Как сменить ник", callback_data=NicknameCallback(action="change").pack())
+        b.button(text="📱  Мини-апп", web_app=WebAppInfo(url=WEBAPP_URL))
+    else:
+        b.button(text="🛒  Маркет", callback_data="menu_market")
+    b.button(text="⚧  Пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
+    b.button(text="✏️  Ник", callback_data=NicknameCallback(action="change").pack())
     b.button(
         text="💎  Купить кристаллы",
         callback_data=MarketExchangeCallback(action="menu", user_id=owner_id).pack(),
     )
-    b.adjust(1)
+    b.adjust(2, 2, 1)
     return b.as_markup()
 
 
 def get_gender_kb(current: str = "none", owner_id: int = 0) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for key, info in GENDERS.items():
-        mark = "●" if key == current else "○"
+        mark = "● " if key == current else "○ "
         b.button(
-            text=f"{mark}  {info['icon']}  {info['name']}",
+            text=f"{mark}{info['icon']}  {info['name']}",
             callback_data=GenderCallback(value=key, user_id=owner_id).pack(),
         )
     b.button(text="‹  Назад в профиль", callback_data=BackToProfileCallback(user_id=owner_id).pack())
-    b.adjust(1)
+    b.adjust(2, 2, 1)
     return b.as_markup()
 
 
 def get_main_km(is_staff: bool = False) -> ReplyKeyboardMarkup:
-    """Компактная основная клавиатура: карточка, меню, мини-приложение."""
-    rows = [
-        [KeyboardButton(text="🃏 Получить карточку")],
-        [KeyboardButton(text="📋 Меню")],
-    ]
+    """Reply-клавиатура: карточка + меню в один ряд, мини-апп отдельно."""
     if WEBAPP_URL:
-        rows.append([KeyboardButton(text="📱 Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))])
+        rows = [
+            [
+                KeyboardButton(text="🃏 Получить карточку"),
+                KeyboardButton(text="📋 Меню"),
+            ],
+            [KeyboardButton(text="📱 Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))],
+        ]
+    else:
+        rows = [
+            [
+                KeyboardButton(text="🃏 Получить карточку"),
+                KeyboardButton(text="📋 Меню"),
+            ],
+        ]
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
@@ -645,31 +645,33 @@ def get_main_km(is_staff: bool = False) -> ReplyKeyboardMarkup:
 
 
 def get_menu_inline_kb(is_staff: bool = False) -> InlineKeyboardMarkup:
-    """Инлайн-меню со всеми разделами (открывается по кнопке «Меню»)."""
+    """Инлайн-меню: 2 в ряд (50/50), админ — на всю ширину."""
     b = InlineKeyboardBuilder()
     b.button(text="👤  Профиль", callback_data="menu_profile")
-    b.button(text="📚  Коллекция", callback_data="menu_collection")
+    b.button(text="🃏  Коллекция", callback_data="menu_collection")
     b.button(text="🛒  Маркет", callback_data="menu_market")
     b.button(text="🏆  Топ", callback_data="menu_top")
     b.button(text="🎲  Кубик", callback_data="menu_dice")
     b.button(text="❓  Помощь", callback_data="menu_help")
     if is_staff:
         b.button(text="⚙️  Админ-панель", callback_data="menu_admin")
-    b.adjust(2)
+        b.adjust(2, 2, 2, 1)
+    else:
+        b.adjust(2, 2, 2)
     return b.as_markup()
 
 
 def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str,
                     action: str, cost: int = INSTANT_COST):
     b.button(
-        text=f"{label}  ·  {fmt_num(cost)} 🪙",
+        text=f"{label} · {fmt_num(cost)} 🪙",
         callback_data=CardActionCallback(action=action, user_id=user_id).pack(),
     )
 
 
 def get_ok_kb() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="Понятно  ✓", callback_data=OkDeleteCallback().pack())
+    b.button(text="✓  Понятно", callback_data=OkDeleteCallback().pack())
     return b.as_markup()
 
 
@@ -678,9 +680,12 @@ def get_card_action_keyboard(user_id: int, balance: int = 0,
     cost = instant_cost(remaining)
     b = InlineKeyboardBuilder()
     if balance >= cost:
-        _instant_button(b, user_id, "⚡ Получить сейчас", "instant", cost)
-    b.button(text="Понятно  ✓", callback_data=OkDeleteCallback().pack())
-    b.adjust(1)
+        _instant_button(b, user_id, "⚡ Сейчас", "instant", cost)
+        b.button(text="Понятно ✓", callback_data=OkDeleteCallback().pack())
+        b.adjust(1)
+    else:
+        b.button(text="Понятно ✓", callback_data=OkDeleteCallback().pack())
+        b.adjust(1)
     return b.as_markup()
 
 
@@ -690,10 +695,10 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
     if balance >= cost:
         _instant_button(b, user_id, "⚡ Ещё одну", "another", cost)
     if WEBAPP_URL:
-        b.button(text="📱  Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))
+        b.button(text="📱  Мини-апп", web_app=WebAppInfo(url=WEBAPP_URL))
     else:
         b.button(
-            text="📚  Моя коллекция",
+            text="🃏  Коллекция",
             callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
         )
     b.adjust(1)
@@ -702,18 +707,12 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
 
 def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(
-        text=("● 🪙" if kind == "coins" else "○ 🪙") + "  Монеты",
-        callback_data=TopCallback(kind="coins").pack(),
-    )
-    b.button(
-        text=("● 🃏" if kind == "cards" else "○ 🃏") + "  Карты",
-        callback_data=TopCallback(kind="cards").pack(),
-    )
-    b.button(
-        text=("● 🔥" if kind == "streak" else "○ 🔥") + "  Стрик",
-        callback_data=TopCallback(kind="streak").pack(),
-    )
+    b.button(text=("● " if kind == "coins" else "○ ") + "🪙",
+             callback_data=TopCallback(kind="coins").pack())
+    b.button(text=("● " if kind == "cards" else "○ ") + "🃏",
+             callback_data=TopCallback(kind="cards").pack())
+    b.button(text=("● " if kind == "streak" else "○ ") + "🔥",
+             callback_data=TopCallback(kind="streak").pack())
     b.button(text="↻  Обновить", callback_data=TopRefreshCallback(kind=kind).pack())
     b.adjust(3, 1)
     return b.as_markup()
@@ -764,21 +763,22 @@ async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None
 
     gender = row["gender"] or "none"
     g = GENDERS.get(gender, GENDERS["none"])
-    gender_display = f"{g['icon']}  {g['name']}"
+    gender_display = f"{g['icon']} {g['name']}"
 
     gems = row["gems"] if row["gems"] is not None else 0
 
     caption = (
         f"<b>{esc(nickname)}</b>\n"
         f"<code>{user_id}</code>\n\n"
-        f"{role_display_str}\n"
+        f"<blockquote>"
+        f"🎭  {role_display_str}\n"
         f"⚧  {gender_display}\n"
-        f"📅  с <b>{reg_date}</b>\n\n"
-        f"<code>{SEP}</code>\n"
-        f"🃏  Карточки    {BULLET}  <b>{fmt_num(row['cards_count'])}</b> / {fmt_num(total_cards)}\n"
-        f"🪙  Монеты      {BULLET}  <b>{fmt_num(row['coins'])}</b>\n"
-        f"💎  Кристаллы   {BULLET}  <b>{fmt_num(gems)}</b>\n"
-        f"🔥  Стрик       {BULLET}  <b>{fmt_days(row['streak'])}</b>"
+        f"📅  с <b>{reg_date}</b>"
+        f"</blockquote>\n\n"
+        f"🃏  Карточки   ·  <b>{fmt_num(row['cards_count'])}</b> / {fmt_num(total_cards)}\n"
+        f"🪙  Монеты     ·  <b>{fmt_num(row['coins'])}</b>\n"
+        f"💎  Кристаллы  ·  <b>{fmt_num(gems)}</b>\n"
+        f"🔥  Стрик      ·  <b>{fmt_days(row['streak'])}</b>"
     )
     kb = get_profile_kb(user_id)
     return await get_user_photo(bot, user_id, nickname), caption, kb
@@ -789,10 +789,11 @@ async def render_collection(bot: Bot, user_id: int):
     nickname = await get_user_nickname(user_id)
     photo = await get_user_photo(bot, user_id, nickname)
     caption = (
-        f"📚  <b>Коллекция</b>\n"
-        f"<code>{SEP}</code>\n"
+        f"🃏  <b>Коллекция</b>\n\n"
+        f"<blockquote>"
         f"{esc(nickname)}\n"
         f"<b>{fmt_num(total)}</b> из {fmt_num(total_in_game)} карточек"
+        f"</blockquote>"
     )
     return photo, caption, keyboard, total
 
@@ -1115,8 +1116,10 @@ async def check_not_banned(message: Message) -> bool:
         await reply_ephemeral(
             message,
             "🚫  <b>Вы заблокированы</b>\n\n"
+            "<blockquote>"
             "Доступ к боту ограничен.\n"
-            "Если это ошибка — обратитесь к администрации.",
+            "Если это ошибка — обратитесь к администрации."
+            "</blockquote>",
         )
         return False
     return True
@@ -1169,11 +1172,13 @@ async def cmd_start(message: Message):
 
         welcome = (
             "👋  <b>Привет!</b>\n\n"
+            "<blockquote>"
             "Напишите <b>«мряу»</b> или нажмите «🃏 Получить карточку» —\n"
-            "и получите милую карточку.\n\n"
-            f"<code>{SEP}</code>\n"
-            "<i>Бесплатно раз в 4 часа · мгновенно за монеты</i>\n\n"
-            "📋 <b>Меню</b> — профиль, коллекция, маркет, топ и другое."
+            "и получите случайную карточку."
+            "</blockquote>\n\n"
+            "⏱  Бесплатно раз в <b>4 часа</b>\n"
+            "⚡  Мгновенно — за монеты\n\n"
+            "📋  <b>Меню</b> — профиль, коллекция, маркет, топ и другое."
         )
         if is_staff:
             welcome += f"\n\n{role_display(role)} — админ-панель в «📋 Меню»."
@@ -1183,12 +1188,12 @@ async def cmd_start(message: Message):
             try:
                 wa_kb = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(
-                        text="📱  Открыть мини-аппку",
+                        text="🃏 Открыть мини-аппку",
                         web_app=WebAppInfo(url=WEBAPP_URL),
                     )
                 ]])
                 await message.answer(
-                    "Удобный просмотр коллекции и топа — в мини-аппке:",
+                    "📱  Коллекция и топ — в мини-приложении:",
                     reply_markup=wa_kb,
                 )
             except Exception as e:
@@ -1218,7 +1223,7 @@ HELP_PAGES = [
             "«мряу профиль» · /profile · Меню → Профиль\n"
             "В группе — ответом на сообщение можно открыть чужой профиль"
             "</blockquote>\n\n"
-            "<b>📚  Коллекция</b>\n"
+            "<b>🃏  Коллекция</b>\n"
             "<blockquote>"
             "«мряу коллекция» · «мряу карточки» · /collection\n"
             "Только своя коллекция"
@@ -1297,9 +1302,9 @@ HELP_PAGES = [
             "/gender м|ж|др|нет  или кнопка в профиле\n"
             "Необязательное поле"
             "</blockquote>\n\n"
-            "<b>📱  Мини-приложение</b>\n"
+            "<b>🃏  Мини-приложение</b>\n"
             "<blockquote>"
-            "/miniapp · кнопка «📱 Мини-приложение»\n"
+            "/miniapp · кнопка «🃏 Мини-приложение»\n"
             "Удобный просмотр коллекции и топа"
             "</blockquote>\n\n"
             "<b>🏆  Топ</b>\n"
@@ -1326,14 +1331,14 @@ def get_help_keyboard(page: int) -> InlineKeyboardMarkup:
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(
-            text="‹  Назад", callback_data=HelpCallback(page=page - 1).pack()
+            text="‹", callback_data=HelpCallback(page=page - 1).pack()
         ))
     nav.append(InlineKeyboardButton(
         text=f"{page + 1} / {total}", callback_data="ignore"
     ))
     if page < total - 1:
         nav.append(InlineKeyboardButton(
-            text="Далее  ›", callback_data=HelpCallback(page=page + 1).pack()
+            text="›", callback_data=HelpCallback(page=page + 1).pack()
         ))
     b.row(*nav)
     return b.as_markup()
@@ -1343,7 +1348,7 @@ def build_help_text(page: int) -> str:
     total = len(HELP_PAGES)
     page = max(0, min(page, total - 1))
     p = HELP_PAGES[page]
-    return f"<b>{p['title']}</b>\n<code>{SEP}</code>\n\n{p['body']}"
+    return f"<b>{p['title']}</b>\n<code>{'─' * 20}</code>\n\n{p['body']}"
 
 
 @router.message(Command("help"))
@@ -1366,7 +1371,8 @@ async def show_menu(message: Message):
     role = await get_user_role(message.from_user.id)
     is_staff = role in ("admin", "superadmin")
     await message.reply(
-        f"📋  <b>Меню</b>\n<code>{SEP}</code>\n\nВыберите раздел:",
+        "📋  <b>Меню</b>\n\n"
+        "<blockquote>Выберите раздел:</blockquote>",
         reply_markup=get_menu_inline_kb(is_staff=is_staff),
     )
 
@@ -1452,12 +1458,16 @@ async def menu_dice_cb(callback: CallbackQuery):
     if not await check_not_banned_cb(callback):
         return
     await callback.answer()
+    # Переиспользуем логику кубика через «фейковое» сообщение невозможно —
+    # подсказываем команду
     await callback.message.answer(
-        f"🎲  <b>Кубик</b>\n<code>{SEP}</code>\n\n"
-        "Бросьте кубик командой <code>/dice</code>\n"
-        "или напишите «мряу кубик».\n\n"
-        f"Кулдаун: 5 мин · минимум {DICE_MIN_BALANCE} 🪙\n"
-        "1→−10 · 2→−5 · 3→0 · 4→+5 · 5→+10 · 6→+15"
+        "🎲  <b>Кубик</b>\n\n"
+        "<blockquote>"
+        "Команда:  <code>/dice</code>  или  «мряу кубик»\n"
+        f"Кулдаун:  <b>5 мин</b>  ·  минимум  <b>{DICE_MIN_BALANCE} 🪙</b>"
+        "</blockquote>\n\n"
+        "1 → −10   ·   2 → −5   ·   3 → 0\n"
+        "4 → +5    ·   5 → +10  ·   6 → +15"
     )
 
 
@@ -1480,8 +1490,8 @@ async def menu_admin_cb(callback: CallbackQuery):
     role = await get_user_role(callback.from_user.id)
     text = (
         f"⚙️  <b>Админ-панель</b>\n"
-        f"<code>{SEP}</code>\n\n"
-        f"Ваша роль:  {role_display(role)}\n\n"
+        f"<code>{'─' * 18}</code>\n\n"
+        f"<blockquote>Ваша роль:  {role_display(role)}</blockquote>\n\n"
         f"Выберите раздел:"
     )
     await callback.message.answer(text, reply_markup=get_admin_main_kb())
@@ -1495,19 +1505,21 @@ async def cmd_miniapp(message: Message):
         return
     if not WEBAPP_URL:
         await message.reply(
-            "📱  <b>Мини-приложение пока недоступно.</b>\n"
+            "🃏  <b>Мини-приложение пока недоступно.</b>\n"
             "Администратор не задал WEBAPP_URL."
         )
         return
     wa_kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
-            text="📱  Открыть мини-приложение",
+            text="🃏 Открыть мини-приложение",
             web_app=WebAppInfo(url=WEBAPP_URL),
         )
     ]])
     await message.reply(
-        f"📱  <b>Мини-приложение</b>\n<code>{SEP}</code>\n\n"
-        "Удобный просмотр коллекции и топа:",
+        "📱  <b>Мини-приложение</b>\n\n"
+        "<blockquote>"
+        "Удобный просмотр коллекции и топа"
+        "</blockquote>",
         reply_markup=wa_kb,
     )
 
@@ -1580,7 +1592,9 @@ async def get_card_handler(message: Message):
 
             text = (
                 f"⏳  <b>{mention}</b>\n\n"
+                f"<blockquote>"
                 f"Следующая карточка через  <b>{time_str}</b>"
+                f"</blockquote>"
             )
             text += _streak_text(streak, bonus, new_balance, gem_bonus)
 
@@ -1619,18 +1633,18 @@ def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) 
     if bonus > 0 and streak == 1:
         return (
             "\n\n<blockquote expandable>"
-            "🔥 <b>Стрик начат!</b>\n"
-            "Заходите каждый день — стрик растёт, а вместе с ним и награды."
+            "🔥  <b>Стрик начат!</b>\n"
+            "Заходите каждый день — стрик растёт, а с ним и награды."
             "</blockquote>"
         )
     if bonus > 0 and streak >= 2:
         text = (
             f"\n\n<blockquote expandable>"
-            f"🔥 Стрик  ·  <b>{fmt_days(streak)}</b>\n"
-            f"🪙 Бонус  ·  <b>+{fmt_num(bonus)}</b>  →  {fmt_num(new_balance)}"
+            f"🔥  Стрик  ·  <b>{fmt_days(streak)}</b>\n"
+            f"🪙  Бонус  ·  <b>+{fmt_num(bonus)}</b>  →  {fmt_num(new_balance)}"
         )
         if gem_bonus > 0:
-            text += f"\n💎 Бонус  ·  <b>+{fmt_num(gem_bonus)}</b>"
+            text += f"\n💎  Бонус  ·  <b>+{fmt_num(gem_bonus)}</b>"
         text += (
             "\n\n💡 Заходите ежедневно, чтобы не потерять стрик."
             "</blockquote>"
@@ -1646,10 +1660,11 @@ def _card_caption(mention: str, card: dict) -> str:
     else:
         title = "✨  <b>Новая карточка</b>"
     text = (
-        f"{title}\n"
-        f"<code>{SEP}</code>\n"
+        f"{title}\n\n"
+        f"<blockquote>"
         f"<b>{esc(card['name'])}</b>\n"
-        f"{r['icon']}  {r['name']}\n\n"
+        f"{r['icon']}  {r['name']}"
+        f"</blockquote>\n\n"
         f"🪙  +<b>{fmt_num(card['coins_earned'])}</b>  →  {fmt_num(card['balance'])}"
     )
     gems_earned = card.get("gems_earned") or 0
@@ -1667,7 +1682,7 @@ async def disabled_slot_handler(message: Message):
         return
     await reply_ephemeral(
         message,
-        "⚠️ <b>Команда отключена.</b>\nОбратитесь к системному администратору.",
+        "⚠️ <b>Команда отключена.</b> Обратитесь к системному администратору",
     )
 
 
@@ -1677,7 +1692,7 @@ async def disabled_transfer_handler(message: Message):
         return
     await reply_ephemeral(
         message,
-        "⚠️ <b>Команда отключена.</b>\nОбратитесь к системному администратору.",
+        "⚠️ <b>Команда отключена.</b> Обратитесь к системному администратору",
     )
 
 
@@ -1717,8 +1732,10 @@ async def dice_handler(message: Message):
                 await reply_ephemeral(
                     message,
                     f"⚠️  <b>Недостаточно монет</b>\n\n"
+                    f"<blockquote>"
                     f"Нужно минимум  <b>{fmt_num(DICE_MIN_BALANCE)} 🪙</b>\n"
-                    f"У вас  ·  <b>{fmt_num(balance)} 🪙</b>",
+                    f"У вас  ·  <b>{fmt_num(balance)} 🪙</b>"
+                    f"</blockquote>",
                 )
                 return
 
@@ -1733,7 +1750,9 @@ async def dice_handler(message: Message):
                 await reply_ephemeral(
                     message,
                     f"⏳  <b>{mention}</b>\n\n"
-                    f"Кубик можно бросить через  <b>{time_str}</b>",
+                    f"<blockquote>"
+                    f"Кубик можно бросить через  <b>{time_str}</b>"
+                    f"</blockquote>",
                 )
                 return
 
@@ -1778,11 +1797,12 @@ async def dice_handler(message: Message):
             title = "·  Ничья"
 
         result_caption = (
-            f"🎲  <b>{title}</b>\n"
-            f"<code>{SEP}</code>\n\n"
+            f"🎲  <b>{title}</b>\n\n"
+            f"<blockquote>"
             f"Выпало     ·  <b>{dice_value}</b>\n"
             f"Результат  ·  <b>{delta_str} 🪙</b>\n"
             f"Баланс     ·  <b>{fmt_num(new_balance)}</b>"
+            f"</blockquote>"
         )
 
         try:
@@ -1885,22 +1905,24 @@ async def nickname_cmd(message: Message, command: Command, state: FSMContext):
     if arg.lower() == "reset":
         default = default_nickname(message.from_user.username, message.from_user.full_name, user_id)
         b = InlineKeyboardBuilder()
-        b.button(text="✅  Подтвердить", callback_data=NickConfirmCallback(action="reset").pack())
+        b.button(text="✓  Подтвердить", callback_data=NickConfirmCallback(action="reset").pack())
         b.button(text="✕  Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
         b.adjust(2)
         await state.set_state(NicknameSG.pending)
         await state.update_data(pending_nick=None, pending_action="reset")
         await message.reply(
-            f"♻️  <b>Сбросить ник?</b>\n<code>{SEP}</code>\n\n"
-            f"Будет установлен: <b>{esc(default)}</b>\n"
-            f"Сброс — <b>бесплатно</b>.",
+            f"♻️  <b>Сбросить ник?</b>\n\n"
+            f"<blockquote>"
+            f"Будет установлен:  <b>{esc(default)}</b>\n"
+            f"Сброс — <b>бесплатно</b>"
+            f"</blockquote>",
             reply_markup=b.as_markup(),
         )
         return
 
     if not arg:
         await message.reply(
-            f"✏️  Использование: <code>/nickname НовыйНик</code>\n"
+            f"✏️ Использование: <code>/nickname НовыйНик</code>\n"
             f"Смена ника стоит <b>{NICKNAME_COST} 🪙</b>.\n"
             f"Сброс: <code>/nickname reset</code> (бесплатно)."
         )
@@ -1909,8 +1931,8 @@ async def nickname_cmd(message: Message, command: Command, state: FSMContext):
     new_nick = validate_nickname(arg)
     if not new_nick:
         await message.reply(
-            "❌  <b>Неверный ник.</b>\n"
-            "Требования: 2–32 символа, без ссылок и упоминаний."
+            "❌ <b>Неверный ник.</b> Требования: 2–32 символа, "
+            "без ссылок и упоминаний."
         )
         return
 
@@ -1918,15 +1940,14 @@ async def nickname_cmd(message: Message, command: Command, state: FSMContext):
     balance = row["coins"] if row else 0
     if balance < NICKNAME_COST:
         await message.reply(
-            f"⚠️  Недостаточно монет.\n"
-            f"Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
+            f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
             f"у вас <b>{fmt_num(balance)} 🪙</b>."
         )
         return
 
     b = InlineKeyboardBuilder()
     b.button(
-        text="✅  Подтвердить",
+        text="✓  Подтвердить",
         callback_data=NickConfirmCallback(action="apply").pack(),
     )
     b.button(text="✕  Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
@@ -1934,9 +1955,12 @@ async def nickname_cmd(message: Message, command: Command, state: FSMContext):
     await state.set_state(NicknameSG.pending)
     await state.update_data(pending_nick=new_nick, pending_action="apply")
     await message.reply(
-        f"✏️  <b>Сменить ник?</b>\n<code>{SEP}</code>\n\n"
-        f"Новый ник: <b>{esc(new_nick)}</b>\n"
-        f"Стоимость: <b>{NICKNAME_COST} 🪙</b> (баланс: {fmt_num(balance)})",
+        f"✏️  <b>Сменить ник?</b>\n\n"
+        f"<blockquote>"
+        f"Новый ник:  <b>{esc(new_nick)}</b>\n"
+        f"Стоимость:  <b>{NICKNAME_COST} 🪙</b>\n"
+        f"Баланс:     {fmt_num(balance)}"
+        f"</blockquote>",
         reply_markup=b.as_markup(),
     )
 
@@ -1949,8 +1973,8 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
 
     if callback_data.action == "cancel":
         await state.clear()
-        await callback.message.edit_text("✅  <b>Отменено</b>")
         await callback.answer()
+        await _try_delete(callback.message)
         return
 
     data = await state.get_data()
@@ -1970,7 +1994,11 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
                 "UPDATE users SET nickname = ? WHERE user_id = ?", (default, user_id)
             )
         await state.clear()
-        await callback.message.edit_text(f"✅  <b>Ник сброшен:</b> {esc(default)}")
+        await callback.message.edit_text(
+            f"✓  <b>Ник сброшен</b>\n\n"
+            f"<blockquote>{esc(default)}</blockquote>",
+            reply_markup=get_ok_kb(),
+        )
         await callback.answer()
         return
 
@@ -1978,7 +2006,7 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
         new_nick = pending_nick
         if not new_nick or not validate_nickname(new_nick):
             await state.clear()
-            await callback.message.edit_text("❌  <b>Неверный ник</b>")
+            await callback.message.edit_text("❌ <b>Неверный ник</b>")
             await callback.answer()
             return
 
@@ -1991,7 +2019,7 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
             if balance < NICKNAME_COST:
                 await state.clear()
                 await callback.message.edit_text(
-                    f"⚠️  Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
+                    f"⚠️ Недостаточно монет. Нужно <b>{fmt_num(NICKNAME_COST)} 🪙</b>, "
                     f"у вас <b>{fmt_num(balance)} 🪙</b>."
                 )
                 await callback.answer()
@@ -2002,8 +2030,10 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
             )
         await state.clear()
         await callback.message.edit_text(
-            f"✅  <b>Ник изменён:</b> {esc(new_nick)}\n"
-            f"Списано: <b>{NICKNAME_COST} 🪙</b>"
+            f"✓  <b>Ник изменён</b>\n\n"
+            f"<blockquote>{esc(new_nick)}</blockquote>\n"
+            f"Списано:  <b>{NICKNAME_COST} 🪙</b>",
+            reply_markup=get_ok_kb(),
         )
         await callback.answer()
         return
@@ -2034,8 +2064,12 @@ async def gender_menu(callback: CallbackQuery, callback_data: GenderCallback):
         row = await cur.fetchone()
     current = (row["gender"] if row and row["gender"] else "none")
     await callback.message.edit_caption(
-        caption=f"⚧  <b>Выберите пол</b>\n<code>{SEP}</code>\n\n"
-                "<i>Необязательное поле — можно оставить «Не задан».</i>",
+        caption=(
+            "⚧  <b>Выберите пол</b>\n\n"
+            "<blockquote>"
+            "Необязательное поле — можно оставить «Не задан»."
+            "</blockquote>"
+        ),
         reply_markup=get_gender_kb(current, owner_id=user_id),
     )
     await callback.answer()
@@ -2059,8 +2093,10 @@ async def gender_set(callback: CallbackQuery, callback_data: GenderCallback):
 
     g = GENDERS[value]
     await callback.message.edit_caption(
-        caption=f"✓  <b>Пол сохранён</b>\n"
-                f"{g['icon']}  {g['name']}",
+        caption=(
+            f"✓  <b>Пол сохранён</b>\n\n"
+            f"<blockquote>{g['icon']}  {g['name']}</blockquote>"
+        ),
         reply_markup=get_gender_kb(value, owner_id=user_id),
     )
     await callback.answer("Сохранено ✓")
@@ -2079,7 +2115,7 @@ async def gender_cmd(message: Message, command: Command):
             cur = await db.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
             row = await cur.fetchone()
         current = (row["gender"] if row and row["gender"] else "none")
-        await message.reply("⚧  <b>Выберите пол:</b>", reply_markup=get_gender_kb(current, owner_id=user_id))
+        await message.reply("⚧ <b>Выберите пол:</b>", reply_markup=get_gender_kb(current, owner_id=user_id))
         return
 
     aliases = {
@@ -2091,7 +2127,7 @@ async def gender_cmd(message: Message, command: Command):
     value = aliases.get(arg)
     if not value:
         await message.reply(
-            "✏️  Использование: <code>/gender м|ж|др|нет</code>\n"
+            "✏️ Использование: <code>/gender м|ж|др|нет</code>\n"
             "Например: <code>/gender ж</code>"
         )
         return
@@ -2100,7 +2136,7 @@ async def gender_cmd(message: Message, command: Command):
         await db.execute("UPDATE users SET gender = ? WHERE user_id = ?", (value, user_id))
 
     g = GENDERS[value]
-    await message.reply(f"✅  <b>Пол сохранён:</b> {g['icon']} {g['name']}")
+    await message.reply(f"✅ <b>Пол сохранён:</b> {g['icon']} {g['name']}")
 
 
 # ---------- Топ ----------
@@ -2195,7 +2231,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
         my_nick = my_row2["nickname"] if my_row2 and my_row2["nickname"] else f"User{current_user_id}"
 
     medals = ["🥇", "🥈", "🥉"]
-    text = f"<b>{title}</b>\n<code>{SEP}</code>\n\n"
+    text = f"<b>{title}</b>\n<code>{'─' * 18}</code>\n\n"
     for i, row in enumerate(top, 1):
         medal = medals[i - 1] if i <= 3 else f"<code>{i:>2}.</code>"
         nick = row["nickname"] or f"User{row['user_id']}"
@@ -2203,9 +2239,10 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
         text += f"{medal}  {mention}  ·  <b>{fmt_num(row['value'])}</b> {unit}\n"
 
     text += (
-        f"\n<code>{SEP}</code>\n"
+        f"\n<blockquote>"
         f"📌  Ваше место  ·  <b>#{fmt_num(my_rank)}</b>\n"
-        f"    {esc(my_nick)}  ·  <b>{fmt_num(my_value)}</b> {unit}"
+        f"{esc(my_nick)}  ·  <b>{fmt_num(my_value)}</b> {unit}"
+        f"</blockquote>"
     )
     return text
 
@@ -2393,9 +2430,10 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         card = cards[page]
         info = RARITIES.get(rarity, {})
         caption = (
+            f"<blockquote>"
             f"<b>{esc(card['name'])}</b>\n"
-            f"{info.get('icon', '')}  {info.get('name', rarity)}\n"
-            f"<code>{SEP}</code>\n"
+            f"{info.get('icon', '')}  {info.get('name', rarity)}"
+            f"</blockquote>\n\n"
             f"🪙  Награда  ·  +{fmt_num(info.get('reward', 0))}\n"
             f"📦  У вас    ·  <b>{fmt_num(card['amount'])}</b>"
         )
@@ -2416,7 +2454,7 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             nav,
             [InlineKeyboardButton(
-                text="‹  К редкостям",
+                text="‹  К категориям",
                 callback_data=MainMenuCallback(user_id=user_id).pack(),
             )],
         ])
@@ -2585,11 +2623,12 @@ async def build_market_main(user_id: int) -> Tuple[str, InlineKeyboardMarkup]:
 
     nickname = await get_user_nickname(user_id)
     text = (
-        f"🛒  <b>Маркет</b>\n"
-        f"<code>{SEP}</code>\n"
+        f"🛒  <b>Маркет</b>\n\n"
+        f"<blockquote>"
         f"{esc(nickname)}\n"
-        f"💎  <b>{fmt_num(gems)}</b>  ·  🪙  <b>{fmt_num(coins)}</b>\n\n"
-        f"<i>Курс:  1 💎  =  {GEM_TO_COINS} 🪙</i>\n\n"
+        f"💎  <b>{fmt_num(gems)}</b>    ·    🪙  <b>{fmt_num(coins)}</b>"
+        f"</blockquote>\n\n"
+        f"💱  Курс:  <b>1 💎 = {GEM_TO_COINS} 🪙</b>\n\n"
         f"Выберите редкость — купите недостающие карточки:"
     )
 
@@ -2638,8 +2677,7 @@ async def build_market_rarity_page(
 
     if not cards:
         text = (
-            f"{r_info.get('icon', '')}  <b>{r_info.get('name', rarity)}</b>\n"
-            f"<code>{SEP}</code>\n\n"
+            f"{r_info.get('icon', '')}  <b>{r_info.get('name', rarity)}</b>\n\n"
             f"Все карточки этой редкости уже у вас 🎉"
         )
         b = InlineKeyboardBuilder()
@@ -2652,10 +2690,11 @@ async def build_market_rarity_page(
     card = cards[page]
 
     text = (
-        f"🛒  <b>Маркет</b>  ·  {r_info.get('icon', '')} {r_info.get('name', rarity)}\n"
-        f"<code>{SEP}</code>\n"
+        f"🛒  <b>Маркет</b>  ·  {r_info.get('icon', '')} {r_info.get('name', rarity)}\n\n"
+        f"<blockquote>"
         f"<b>{esc(card['name'])}</b>\n"
-        f"💎  <b>{fmt_num(price)}</b>  ·  баланс {fmt_num(gems)}\n\n"
+        f"💎  <b>{fmt_num(price)}</b>    ·    баланс  {fmt_num(gems)}"
+        f"</blockquote>\n\n"
         f"<i>{page + 1} / {total}</i>"
     )
 
@@ -2870,10 +2909,11 @@ async def market_buy_card(callback: CallbackQuery, callback_data: MarketBuyCallb
 
         r_info = RARITIES.get(rarity, {})
         caption = (
-            f"✓  <b>Покупка успешна</b>\n"
-            f"<code>{SEP}</code>\n"
+            f"✓  <b>Покупка успешна</b>\n\n"
+            f"<blockquote>"
             f"<b>{esc(card['name'])}</b>\n"
-            f"{r_info.get('icon', '')}  {r_info.get('name', rarity)}\n\n"
+            f"{r_info.get('icon', '')}  {r_info.get('name', rarity)}"
+            f"</blockquote>\n\n"
             f"💎  −{fmt_num(price)}  →  <b>{fmt_num(new_gems)}</b>"
         )
         b = InlineKeyboardBuilder()
@@ -2921,12 +2961,13 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
             max_buy = coins // GEM_TO_COINS
 
             text = (
-                f"💱  <b>Обмен монет → кристаллы</b>\n"
-                f"<code>{SEP}</code>\n\n"
-                f"Курс  ·  <b>1 💎 = {GEM_TO_COINS} 🪙</b>\n\n"
-                f"🪙  Монеты      ·  <b>{fmt_num(coins)}</b>\n"
-                f"💎  Кристаллы   ·  <b>{fmt_num(gems)}</b>\n"
-                f"Можно купить    ·  до <b>{fmt_num(max_buy)}</b> 💎\n\n"
+                f"💱  <b>Обмен монет → кристаллы</b>\n\n"
+                f"<blockquote>"
+                f"Курс  ·  <b>1 💎 = {GEM_TO_COINS} 🪙</b>"
+                f"</blockquote>\n\n"
+                f"🪙  Монеты     ·  <b>{fmt_num(coins)}</b>\n"
+                f"💎  Кристаллы  ·  <b>{fmt_num(gems)}</b>\n"
+                f"Можно купить   ·  до <b>{fmt_num(max_buy)}</b> 💎\n\n"
                 f"Выберите количество:"
             )
             b = InlineKeyboardBuilder()
@@ -2993,10 +3034,11 @@ async def market_exchange(callback: CallbackQuery, callback_data: MarketExchange
                 new_gems = row["gems"] or 0
 
             text = (
-                f"✓  <b>Обмен выполнен</b>\n"
-                f"<code>{SEP}</code>\n\n"
+                f"✓  <b>Обмен выполнен</b>\n\n"
+                f"<blockquote>"
                 f"💎  +<b>{fmt_num(amount)}</b>  →  {fmt_num(new_gems)}\n"
                 f"🪙  −<b>{fmt_num(cost)}</b>  →  {fmt_num(new_coins)}"
+                f"</blockquote>"
             )
             b = InlineKeyboardBuilder()
             b.button(
@@ -3035,8 +3077,8 @@ async def admin_panel(message: Message):
     role = await get_user_role(message.from_user.id)
     text = (
         f"⚙️  <b>Админ-панель</b>\n"
-        f"<code>{SEP}</code>\n\n"
-        f"Ваша роль:  {role_display(role)}\n\n"
+        f"<code>{'─' * 18}</code>\n\n"
+        f"<blockquote>Ваша роль:  {role_display(role)}</blockquote>\n\n"
         f"Выберите раздел:"
     )
     await message.answer(text, reply_markup=get_admin_main_kb())
@@ -3051,8 +3093,8 @@ async def admin_main_back(call: CallbackQuery):
     role = await get_user_role(call.from_user.id)
     text = (
         f"⚙️  <b>Админ-панель</b>\n"
-        f"<code>{SEP}</code>\n\n"
-        f"Ваша роль:  {role_display(role)}\n\n"
+        f"<code>{'─' * 18}</code>\n\n"
+        f"<blockquote>Ваша роль:  {role_display(role)}</blockquote>\n\n"
         f"Выберите раздел:"
     )
     try:
@@ -3069,10 +3111,7 @@ async def add_card_start(call: CallbackQuery, state: FSMContext):
         await call.answer("⚠️ Ошибка доступа")
         return
     await state.set_state(AddCardSG.photo)
-    await call.message.answer(
-        f"📷  <b>Отправьте фото новой карточки</b>\n<code>{SEP}</code>\n\n"
-        "<code>/cancel</code> — отмена"
-    )
+    await call.message.answer("📷  <b>Отправьте фото новой карточки</b>\n\n<code>/cancel</code> — отмена")
     await call.answer()
 
 
@@ -3083,7 +3122,7 @@ async def quick_add_card(message: Message, command: Command):
     args = (command.args or "").strip().split()
     if len(args) < 2:
         await message.reply(
-            "✏️  Использование: <code>/addcard Название редкость</code> (фото в подписи)\n"
+            "✏️ Использование: <code>/addcard Название редкость</code> (фото в подписи)\n"
             "Редкости: " + ", ".join(RARITIES.keys())
         )
         return
@@ -3091,7 +3130,7 @@ async def quick_add_card(message: Message, command: Command):
     name = " ".join(args[:-1])
     if rarity not in RARITIES:
         await message.reply(
-            f"❌  Неизвестная редкость <b>{esc(rarity)}</b>. Доступные: "
+            f"❌ Неизвестная редкость <b>{esc(rarity)}</b>. Доступные: "
             + ", ".join(f"<code>{k}</code>" for k in RARITIES)
         )
         return
@@ -3114,9 +3153,11 @@ async def quick_add_card(message: Message, command: Command):
             except Exception as e:
                 logger.error(f"sync_card_photo: {e}")
     await message.reply(
-        f"✅  <b>Карточка добавлена</b>\n<code>{SEP}</code>\n"
+        f"✓  <b>Карточка добавлена</b>\n\n"
+        f"<blockquote>"
         f"<b>{esc(name)}</b>\n"
-        f"{RARITIES[rarity]['icon']}  {RARITIES[rarity]['name']}",
+        f"{RARITIES[rarity]['icon']}  {RARITIES[rarity]['name']}"
+        f"</blockquote>",
         reply_markup=get_admin_main_kb(),
     )
 
@@ -3126,17 +3167,30 @@ async def cancel_handler(message: Message, state: FSMContext):
     if await state.get_state() is None:
         return
     await state.clear()
+    await _try_delete(message)
     if await is_admin(message.from_user.id):
-        await message.reply("✅  <b>Операция отменена</b>", reply_markup=get_admin_main_kb())
+        sent = await message.answer(
+            "✓  <b>Операция отменена</b>",
+            reply_markup=get_ok_kb(),
+        )
+        # soft notice with OK delete
+        if message.chat.type != "private":
+            asyncio.create_task(_auto_delete_pair(sent, None, GROUP_AUTODELETE_SECONDS))
     else:
-        await message.reply("✅  <b>Операция отменена</b>")
+        sent = await message.answer("✓  <b>Операция отменена</b>", reply_markup=get_ok_kb())
+        if message.chat.type != "private":
+            asyncio.create_task(_auto_delete_pair(sent, None, GROUP_AUTODELETE_SECONDS))
 
 
 @router.callback_query(F.data == "cancel_add_card")
 async def cancel_add_card_callback(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.answer("✅  <b>Операция отменена</b>", reply_markup=get_admin_main_kb())
     await call.answer()
+    await _try_delete(call.message)
+    await call.message.answer(
+        "✓  <b>Операция отменена</b>",
+        reply_markup=get_admin_main_kb(),
+    )
 
 
 @router.message(AddCardSG.photo, F.photo)
@@ -3184,9 +3238,11 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
                 logger.error(f"sync_card_photo: {e}")
     r = RARITIES[rarity]
     await call.message.answer(
-        f"✅  <b>Карточка добавлена</b>\n<code>{SEP}</code>\n"
+        f"✓  <b>Карточка добавлена</b>\n\n"
+        f"<blockquote>"
         f"<b>{esc(data['name'])}</b>\n"
-        f"{r['icon']}  {r['name']}",
+        f"{r['icon']}  {r['name']}"
+        f"</blockquote>",
         reply_markup=get_admin_main_kb(),
     )
     await state.clear()
@@ -3201,7 +3257,7 @@ async def build_admin_cards_page(page: int = 0):
         total = (await cur.fetchone())[0]
         if total == 0:
             return (
-                f"📜  <b>Карточки</b>\n<code>{SEP}</code>\n\n"
+                "📜  <b>Карточки</b>\n<code>──────────────────</code>\n\n"
                 "🔴  В базе пока нет карточек.\n\n"
                 "Добавьте первую через «➕ Добавить карточку».",
                 get_admin_main_kb(),
@@ -3224,7 +3280,7 @@ async def build_admin_cards_page(page: int = 0):
         b = InlineKeyboardBuilder()
         text = (
             f"📜  <b>Карточки</b>\n"
-            f"<code>{SEP}</code>\n"
+            f"<code>{'─' * 18}</code>\n"
             f"Стр. <b>{page + 1}</b> / {total_pages}  ·  всего <b>{fmt_num(total)}</b>\n\n"
         )
         for c in cards:
@@ -3294,11 +3350,13 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
     r = RARITIES.get(card["rarity"], {})
     caption = (
         f"🃏  <b>{esc(card['name'])}</b>\n"
-        f"<code>{SEP}</code>\n\n"
+        f"<code>{'─' * 20}</code>\n\n"
+        f"<blockquote>"
         f"🆔  <code>{card_id}</code>\n"
         f"{r.get('icon', '')}  Редкость  ·  <b>{r.get('name', card['rarity'])}</b>\n"
         f"👥  Владельцев  ·  <b>{fmt_num(owners)}</b>\n"
-        f"📦  Экземпляров ·  <b>{fmt_num(instances)}</b>"
+        f"📦  Экземпляров  ·  <b>{fmt_num(instances)}</b>"
+        f"</blockquote>"
     )
     b = InlineKeyboardBuilder()
     b.button(text="✏️  Изменить название", callback_data=f"edit_name:{card_id}")
@@ -3329,10 +3387,7 @@ async def admin_card_edit_photo_start(call: CallbackQuery, callback_data: AdminC
         return
     await state.set_state(EditCardPhotoSG.photo)
     await state.update_data(card_id=callback_data.card_id)
-    await call.message.answer(
-        f"📷  <b>Отправьте новое фото для карточки</b>\n<code>{SEP}</code>\n\n"
-        "<code>/cancel</code> — отмена"
-    )
+    await call.message.answer("📷  <b>Отправьте новое фото для карточки</b>\n\n<code>/cancel</code> — отмена")
     await call.answer()
 
 
@@ -3414,7 +3469,7 @@ async def edit_card_rarity_start(call: CallbackQuery):
     b = InlineKeyboardBuilder()
     for key, info in RARITIES.items():
         b.button(
-            text=f"{info['icon']}  {info['name']}",
+            text=info["name"],
             callback_data=AdminRarityCallback(card_id=card_id, rarity=key).pack(),
         )
     b.button(text="‹  Назад", callback_data=AdminCardManageCallback(card_id=card_id).pack())
@@ -3458,7 +3513,7 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
                 "banned": "заблокированные",
             }.get(filter_role, filter_role)
             return (
-                f"👥  <b>Пользователи</b>\n<code>{SEP}</code>\n\n"
+                f"👥  <b>Пользователи</b>\n<code>{'─' * 18}</code>\n\n"
                 f"Нет записей (фильтр: {filter_label}).",
                 get_admin_main_kb(),
                 0,
@@ -3506,7 +3561,7 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
 
         text = (
             f"👥  <b>Пользователи</b>\n"
-            f"<code>{SEP}</code>\n"
+            f"<code>{'─' * 18}</code>\n"
             f"Стр. <b>{page + 1}</b> / {total_pages}  ·  всего <b>{fmt_num(total)}</b>\n\n"
         )
         for u in users:
@@ -3587,15 +3642,17 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
 
     caption = (
         f"👤  <b>{esc(nick)}</b>\n"
-        f"<code>{SEP}</code>\n\n"
+        f"<code>{'─' * 20}</code>\n\n"
+        f"<blockquote>"
         f"🆔  <code>{user_id}</code>\n"
         f"🎭  Роль  ·  {role_display(role)}\n"
         f"⚧  Пол  ·  {g['icon']} {g['name']}\n"
-        f"📅  Регистрация  ·  {reg}\n\n"
-        f"🪙  Монеты    ·  <b>{fmt_num(user['coins'])}</b>\n"
-        f"💎  Кристаллы ·  <b>{fmt_num(gems)}</b>\n"
-        f"🃏  Карточек  ·  <b>{fmt_num(user['cards_count'])}</b>\n"
-        f"🔥  Стрик     ·  <b>{fmt_days(user['streak'])}</b>"
+        f"📅  Регистрация  ·  {reg}"
+        f"</blockquote>\n\n"
+        f"🪙  Монеты     ·  <b>{fmt_num(user['coins'])}</b>\n"
+        f"💎  Кристаллы  ·  <b>{fmt_num(gems)}</b>\n"
+        f"🃏  Карточек   ·  <b>{fmt_num(user['cards_count'])}</b>\n"
+        f"🔥  Стрик      ·  <b>{fmt_days(user['streak'])}</b>"
     )
 
     b = InlineKeyboardBuilder()
@@ -3756,23 +3813,23 @@ async def admin_setnick(message: Message, command: Command):
         return
     args = (command.args or "").strip().split()
     if len(args) < 2:
-        await message.reply("✏️  Использование: <code>/setnick USERID НовыйНик</code>")
+        await message.reply("✏️ Использование: <code>/setnick USERID НовыйНик</code>")
         return
     try:
         target_id = int(args[0])
     except ValueError:
-        await message.reply("❌  USERID должен быть числом.")
+        await message.reply("❌ USERID должен быть числом.")
         return
     new_nick_raw = " ".join(args[1:])
     new_nick = validate_nickname(new_nick_raw)
     if not new_nick:
-        await message.reply("❌  Ник не проходит валидацию (2-32 символа, без ссылок).")
+        await message.reply("❌ Ник не проходит валидацию (2-32 символа, без ссылок).")
         return
     async with get_db() as db:
         cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (target_id,))
         row = await cur.fetchone()
         if not row:
-            await message.reply("❌  Пользователь не найден.")
+            await message.reply("❌ Пользователь не найден.")
             return
         old = row["nickname"]
         await db.execute("UPDATE users SET nickname = ? WHERE user_id = ?", (new_nick, target_id))
@@ -3876,14 +3933,14 @@ def get_admin_help_keyboard(page: int) -> InlineKeyboardMarkup:
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(
-            text="‹  Назад", callback_data=AdminHelpCallback(page=page - 1).pack()
+            text="‹", callback_data=AdminHelpCallback(page=page - 1).pack()
         ))
     nav.append(InlineKeyboardButton(
         text=f"{page + 1} / {total}", callback_data="ignore"
     ))
     if page < total - 1:
         nav.append(InlineKeyboardButton(
-            text="Далее  ›", callback_data=AdminHelpCallback(page=page + 1).pack()
+            text="›", callback_data=AdminHelpCallback(page=page + 1).pack()
         ))
     b.row(*nav)
     b.row(InlineKeyboardButton(text="‹  В админ-меню", callback_data="admin_main"))
@@ -3894,7 +3951,7 @@ def build_admin_help_text(page: int) -> str:
     total = len(ADMIN_HELP_PAGES)
     page = max(0, min(page, total - 1))
     p = ADMIN_HELP_PAGES[page]
-    return f"<b>{p['title']}</b>\n<code>{SEP}</code>\n\n{p['body']}"
+    return f"<b>{p['title']}</b>\n<code>{'─' * 20}</code>\n\n{p['body']}"
 
 
 @router.message(Command("adminhelp"), admin_filter)
@@ -3931,7 +3988,10 @@ async def admin_stats_quick(call: CallbackQuery):
     if not await is_admin(call.from_user.id):
         await call.answer("⚠️ Ошибка доступа")
         return
+    # Переиспользуем логику /stats
     await call.answer()
+    # Создаём фейковый message-like вызов через существующий handler
+    # Проще — дублируем краткую статистику
     try:
         async with get_db() as db:
             cur = await db.execute("SELECT COUNT(*) FROM users")
@@ -3949,10 +4009,12 @@ async def admin_stats_quick(call: CallbackQuery):
 
         text = (
             f"📊  <b>Краткая статистика</b>\n"
-            f"<code>{SEP}</code>\n\n"
+            f"<code>{'─' * 20}</code>\n\n"
+            f"<blockquote>"
             f"👥  Пользователей  ·  <b>{fmt_num(total_users)}</b>\n"
             f"🛡  Админов        ·  <b>{fmt_num(staff)}</b>\n"
-            f"🚫  Заблокировано  ·  <b>{fmt_num(banned)}</b>\n\n"
+            f"🚫  Заблокировано  ·  <b>{fmt_num(banned)}</b>"
+            f"</blockquote>\n\n"
             f"🃏  Карточек       ·  <b>{fmt_num(total_cards)}</b>\n"
             f"🪙  Монет в игре   ·  <b>{fmt_num(total_coins)}</b>\n"
             f"💎  Кристаллов     ·  <b>{fmt_num(total_gems)}</b>\n\n"
@@ -3976,7 +4038,7 @@ async def set_admin_cmd(message: Message, command: Command):
     arg = (command.args or "").strip()
     if not arg:
         await message.reply(
-            "✏️  Использование: <code>/setadmin USERID</code>\n"
+            "✏️ Использование: <code>/setadmin USERID</code>\n"
             "Например: <code>/setadmin 123456789</code>"
         )
         return
@@ -3984,11 +4046,11 @@ async def set_admin_cmd(message: Message, command: Command):
     try:
         target_id = int(arg)
     except ValueError:
-        await message.reply("❌  <b>USERID должен быть числом.</b>")
+        await message.reply("❌ <b>USERID должен быть числом.</b>")
         return
 
     if target_id <= 0:
-        await message.reply("❌  <b>Некорректный USERID.</b>")
+        await message.reply("❌ <b>Некорректный USERID.</b>")
         return
 
     async with get_db() as db:
@@ -3998,7 +4060,7 @@ async def set_admin_cmd(message: Message, command: Command):
         row = await cur.fetchone()
         if not row:
             await message.reply(
-                f"❌  <b>Пользователь не найден.</b>\n"
+                f"❌ <b>Пользователь не найден.</b>\n"
                 f"Он должен хотя бы раз запустить бота (<code>/start</code>)."
             )
             return
@@ -4031,18 +4093,18 @@ async def unset_admin_cmd(message: Message, command: Command):
     arg = (command.args or "").strip()
     if not arg:
         await message.reply(
-            "✏️  Использование: <code>/unsetadmin USERID</code>"
+            "✏️ Использование: <code>/unsetadmin USERID</code>"
         )
         return
 
     try:
         target_id = int(arg)
     except ValueError:
-        await message.reply("❌  <b>USERID должен быть числом.</b>")
+        await message.reply("❌ <b>USERID должен быть числом.</b>")
         return
 
     if target_id <= 0:
-        await message.reply("❌  <b>Некорректный USERID.</b>")
+        await message.reply("❌ <b>Некорректный USERID.</b>")
         return
 
     if target_id == message.from_user.id:
@@ -4058,7 +4120,7 @@ async def unset_admin_cmd(message: Message, command: Command):
         )
         row = await cur.fetchone()
         if not row:
-            await message.reply("❌  <b>Пользователь не найден.</b>")
+            await message.reply("❌ <b>Пользователь не найден.</b>")
             return
 
         if row["role"] not in ("admin", "superadmin"):
@@ -4087,31 +4149,31 @@ async def ban_cmd(message: Message, command: Command):
 
     arg = (command.args or "").strip()
     if not arg:
-        await message.reply("✏️  Использование: <code>/ban USERID</code>")
+        await message.reply("✏️ Использование: <code>/ban USERID</code>")
         return
 
     try:
         target_id = int(arg)
     except ValueError:
-        await message.reply("❌  USERID должен быть числом.")
+        await message.reply("❌ USERID должен быть числом.")
         return
 
     if target_id == message.from_user.id:
-        await message.reply("❌  Нельзя заблокировать себя.")
+        await message.reply("❌ Нельзя заблокировать себя.")
         return
 
     target_role = await get_user_role(target_id)
     if target_role in ("admin", "superadmin") and not await is_superadmin(message.from_user.id):
-        await message.reply("❌  Недостаточно прав для блокировки администратора.")
+        await message.reply("❌ Недостаточно прав для блокировки администратора.")
         return
 
     if target_role == "banned":
-        await message.reply("ℹ️  Пользователь уже заблокирован.")
+        await message.reply("ℹ️ Пользователь уже заблокирован.")
         return
 
     ok = await set_user_role(target_id, "banned")
     if not ok:
-        await message.reply("❌  Пользователь не найден.")
+        await message.reply("❌ Пользователь не найден.")
         return
 
     await update_user_commands(message.bot, target_id, "banned")
@@ -4131,22 +4193,22 @@ async def unban_cmd(message: Message, command: Command):
 
     arg = (command.args or "").strip()
     if not arg:
-        await message.reply("✏️  Использование: <code>/unban USERID</code>")
+        await message.reply("✏️ Использование: <code>/unban USERID</code>")
         return
 
     try:
         target_id = int(arg)
     except ValueError:
-        await message.reply("❌  USERID должен быть числом.")
+        await message.reply("❌ USERID должен быть числом.")
         return
 
     if await get_user_role(target_id) != "banned":
-        await message.reply("ℹ️  Пользователь не заблокирован.")
+        await message.reply("ℹ️ Пользователь не заблокирован.")
         return
 
     ok = await set_user_role(target_id, "user")
     if not ok:
-        await message.reply("❌  Пользователь не найден.")
+        await message.reply("❌ Пользователь не найден.")
         return
 
     await update_user_commands(message.bot, target_id, "user")
@@ -4245,7 +4307,7 @@ async def admin_stats(message: Message):
 
         text = (
                 f"📊  <b>Статистика бота</b>\n"
-                f"<code>{SEP}</code>\n\n"
+                f"<code>{'─' * 20}</code>\n\n"
                 f"<b>👥 Пользователи</b>\n"
                 f"  ·  Всего: <b>{fmt_num(total_users)}</b>\n"
                 f"  ·  Активных: <b>{fmt_num(active_users)}</b>\n"
@@ -4282,7 +4344,7 @@ async def admin_stats(message: Message):
         await message.reply(text)
     except Exception as e:
         logger.error(f"Ошибка /stats: {e}")
-        await message.reply("❌  <b>Ошибка при сборе статистики.</b>")
+        await message.reply("❌ <b>Ошибка при сборе статистики.</b>")
 
 
 @router.message(Command("setcoins"), admin_filter)
@@ -4294,7 +4356,7 @@ async def admin_setcoins(message: Message, command: Command):
     args = (command.args or "").strip().split()
     if not args:
         await message.reply(
-            "✏️  Использование:\n"
+            "✏️ Использование:\n"
             "<code>/setcoins COINS</code> — себе\n"
             "<code>/setcoins USERID COINS</code> — другому"
         )
@@ -4306,21 +4368,21 @@ async def admin_setcoins(message: Message, command: Command):
         try:
             coins = int(args[0])
         except ValueError:
-            await message.reply("❌  <b>COINS должно быть числом.</b>")
+            await message.reply("❌ <b>COINS должно быть числом.</b>")
             return
     elif len(args) == 2:
         try:
             target_id = int(args[0])
             coins = int(args[1])
         except ValueError:
-            await message.reply("❌  <b>USERID и COINS должны быть числами.</b>")
+            await message.reply("❌ <b>USERID и COINS должны быть числами.</b>")
             return
     else:
-        await message.reply("❌  Слишком много аргументов.")
+        await message.reply("❌ Слишком много аргументов.")
         return
 
     if target_id <= 0 or coins < 0:
-        await message.reply("❌  Некорректные значения.")
+        await message.reply("❌ Некорректные значения.")
         return
 
     async with get_db() as db:
@@ -4330,7 +4392,7 @@ async def admin_setcoins(message: Message, command: Command):
         )
         row = await cur.fetchone()
         if not row:
-            await message.reply("❌  Пользователь не найден.")
+            await message.reply("❌ Пользователь не найден.")
             return
 
         old_coins = row["coins"] or 0
@@ -4355,7 +4417,7 @@ async def admin_setgems(message: Message, command: Command):
     args = (command.args or "").strip().split()
     if not args:
         await message.reply(
-            "✏️  Использование:\n"
+            "✏️ Использование:\n"
             "<code>/setgems N</code> — себе\n"
             "<code>/setgems USERID N</code> — другому"
         )
@@ -4367,21 +4429,21 @@ async def admin_setgems(message: Message, command: Command):
         try:
             gems = int(args[0])
         except ValueError:
-            await message.reply("❌  <b>N должно быть числом.</b>")
+            await message.reply("❌ <b>N должно быть числом.</b>")
             return
     elif len(args) == 2:
         try:
             target_id = int(args[0])
             gems = int(args[1])
         except ValueError:
-            await message.reply("❌  <b>USERID и N должны быть числами.</b>")
+            await message.reply("❌ <b>USERID и N должны быть числами.</b>")
             return
     else:
-        await message.reply("❌  Слишком много аргументов.")
+        await message.reply("❌ Слишком много аргументов.")
         return
 
     if target_id <= 0 or gems < 0:
-        await message.reply("❌  Некорректные значения.")
+        await message.reply("❌ Некорректные значения.")
         return
 
     async with get_db() as db:
@@ -4391,7 +4453,7 @@ async def admin_setgems(message: Message, command: Command):
         )
         row = await cur.fetchone()
         if not row:
-            await message.reply("❌  Пользователь не найден.")
+            await message.reply("❌ Пользователь не найден.")
             return
 
         old_gems = row["gems"] or 0
@@ -4424,14 +4486,14 @@ async def admin_resetcd(message: Message, command: Command):
         try:
             target_id = int(args[0])
         except ValueError:
-            await message.reply("❌  <b>USERID должен быть числом.</b>")
+            await message.reply("❌ <b>USERID должен быть числом.</b>")
             return
     if len(args) > 1:
-        await message.reply("❌  Слишком много аргументов.")
+        await message.reply("❌ Слишком много аргументов.")
         return
 
     if target_id <= 0:
-        await message.reply("❌  Некорректный USERID.")
+        await message.reply("❌ Некорректный USERID.")
         return
 
     now = int(time.time())
@@ -4442,7 +4504,7 @@ async def admin_resetcd(message: Message, command: Command):
         )
         row = await cur.fetchone()
         if not row:
-            await message.reply("❌  Пользователь не найден.")
+            await message.reply("❌ Пользователь не найден.")
             return
 
         old_last_claim = row["last_claim"] or 0
@@ -4489,7 +4551,7 @@ async def admin_getusers(message: Message):
             users = await cur.fetchall()
 
         if not users:
-            await message.reply("🔴  <b>В базе пока нет пользователей.</b>")
+            await message.reply("🔴 <b>В базе пока нет пользователей.</b>")
             return
 
         lines = [f"👥  <b>Пользователи</b> (всего: {fmt_num(len(users))})\n"]
@@ -4527,7 +4589,7 @@ async def admin_getusers(message: Message):
             await message.reply(header + part)
     except Exception as e:
         logger.error(f"Ошибка /getusers: {e}")
-        await message.reply("❌  <b>Ошибка при получении списка пользователей.</b>")
+        await message.reply("❌ <b>Ошибка при получении списка пользователей.</b>")
 
 
 @router.message(Command("delcard"), admin_filter)
@@ -4539,7 +4601,7 @@ async def admin_delcard(message: Message, command: Command):
     arg = (command.args or "").strip()
     if not arg:
         await message.reply(
-            "✏️  Использование: <code>/delcard ID</code>\n"
+            "✏️ Использование: <code>/delcard ID</code>\n"
             "ID можно посмотреть в /admin → 📜 Список карточек."
         )
         return
@@ -4547,11 +4609,11 @@ async def admin_delcard(message: Message, command: Command):
     try:
         card_id = int(arg)
     except ValueError:
-        await message.reply("❌  <b>ID должен быть числом.</b>")
+        await message.reply("❌ <b>ID должен быть числом.</b>")
         return
 
     if card_id <= 0:
-        await message.reply("❌  <b>Некорректный ID.</b>")
+        await message.reply("❌ <b>Некорректный ID.</b>")
         return
 
     async with get_db() as db:
@@ -4560,7 +4622,7 @@ async def admin_delcard(message: Message, command: Command):
         )
         card = await cur.fetchone()
         if not card:
-            await message.reply(f"❌  <b>Карточка с ID {card_id} не найдена.</b>")
+            await message.reply(f"❌ <b>Карточка с ID {card_id} не найдена.</b>")
             return
 
         cur = await db.execute(
@@ -4759,11 +4821,11 @@ async def cmd_migrate_photos(message: Message):
         return
     if not migrate_all_card_photos:
         await message.reply(
-            "❌  Модуль <code>card_photos.py</code> не найден. "
+            "❌ Модуль <code>card_photos.py</code> не найден. "
             "Положи его рядом с main.py и перезапусти бота."
         )
         return
-    status = await message.reply("⏳  Скачиваю фото карточек на диск…")
+    status = await message.reply("⏳ Скачиваю фото карточек на диск…")
     try:
         async with get_db() as db:
             ok, fail = await migrate_all_card_photos(message.bot, db)
@@ -4776,7 +4838,7 @@ async def cmd_migrate_photos(message: Message):
         )
     except Exception as e:
         logger.error(f"migrate_photos: {e}")
-        await status.edit_text(f"❌  Ошибка миграции: {esc(str(e))}")
+        await status.edit_text(f"❌ Ошибка миграции: {esc(str(e))}")
 
 
 # ================= ЗАПУСК =================
