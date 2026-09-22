@@ -714,27 +714,31 @@ def get_card_action_keyboard(user_id: int, balance: int = 0,
 
 
 def get_after_card_keyboard(
-    user_id: int, balance: int = 0, *, private: bool = True
+        user_id: int,
+        balance: int = 0,
+        *,
+        private: bool = True,
 ) -> InlineKeyboardMarkup:
-    """Клавиатура после выдачи карточки.
-
-    URL мини-приложения добавляем только в ЛС: в группах/каналах Telegram
-    отклоняет часть кнопок с ошибкой BUTTON_TYPE_INVALID.
-    В группах всегда даём callback «Коллекция».
-    """
+    """Клавиатура после выдачи карточки."""
     cost = instant_cost(COOLDOWN_SECONDS)
-    b = InlineKeyboardBuilder()
+    builder = InlineKeyboardBuilder()
+
     if balance >= cost:
-        _instant_button(b, user_id, "⚡ Ещё одну", "another", cost)
-    app_url = get_app_url() if private else ""
-    if app_url:
-        b.button(text="📱  Приложение", url=app_url)
-    b.button(
+        _instant_button(builder, user_id, "⚡ Ещё одну", "another", cost)
+
+    if app_url := get_app_url():
+        builder.button(text="📱  Приложение", url=app_url)
+
+    builder.button(
         text="🃏  Коллекция",
-        callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
+        callback_data=CardActionCallback(
+            action="collection",
+            user_id=user_id,
+        ).pack(),
     )
-    b.adjust(1)
-    return b.as_markup()
+
+    builder.adjust(1)
+    return builder.as_markup()
 
 
 def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
@@ -762,7 +766,7 @@ async def get_user_photo(bot: Bot, user_id: int, nickname: str):
 
 
 async def render_profile(
-    bot: Bot, user_id: int, viewer_id: Optional[int] = None, *, private: bool = True
+        bot: Bot, user_id: int, viewer_id: Optional[int] = None, *, private: bool = True
 ):
     # Автосгорание стрика, если с last_claim прошло ≥ 24 ч
     await burn_expired_streak(user_id)
