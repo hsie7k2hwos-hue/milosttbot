@@ -723,11 +723,12 @@ def get_after_card_keyboard(
     cost = instant_cost(COOLDOWN_SECONDS)
     builder = InlineKeyboardBuilder()
 
-    if balance >= cost:
-        _instant_button(builder, user_id, "⚡ Ещё одну", "another", cost)
+    has_instant = balance >= cost
+    app_url = get_app_url()
 
-    if app_url := get_app_url():
-        builder.button(text="📱  Приложение", url=app_url)
+    # Порядок добавления = желаемый визуальный порядок
+    if has_instant:
+        _instant_button(builder, user_id, "⚡ Ещё одну", "another", cost)
 
     builder.button(
         text="🃏  Коллекция",
@@ -737,7 +738,21 @@ def get_after_card_keyboard(
         ).pack(),
     )
 
-    builder.adjust(1)
+    if app_url:
+        builder.button(text="📱  Приложение", url=app_url)
+
+    # Красивая раскладка
+    if has_instant and app_url:
+        # 100% — Ещё одну
+        # 50%  — Коллекция | 50% — Приложение
+        builder.adjust(1, 2)
+    elif app_url:
+        # 50% — Коллекция | 50% — Приложение
+        builder.adjust(2)
+    else:
+        # 100% — Коллекция
+        builder.adjust(1)
+
     return builder.as_markup()
 
 
