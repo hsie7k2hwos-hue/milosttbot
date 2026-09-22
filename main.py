@@ -1040,7 +1040,11 @@ async def burn_expired_streak(user_id: int) -> bool:
         return False
 
 
-async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
+async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int, bool]:
+    """Возвращает (streak, coin_bonus, balance, gem_bonus, streak_updated).
+    streak_updated=True только когда стрик реально обновился в этом вызове
+    (первый раз за календарный день). Именно тогда показываем текст про стрик.
+    """
     try:
         now_ts = int(time.time())
         now = datetime.now()
@@ -1057,7 +1061,7 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
             )
             row = await cur.fetchone()
             if not row:
-                return 0, 0, 0, 0
+                return 0, 0, 0, 0, False
 
             streak = row["streak"] or 0
             last_date = row["last_streak_date"] or 0
@@ -1071,10 +1075,11 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
                         "WHERE user_id = ?",
                         (user_id,),
                     )
-                return 0, 0, balance, 0
+                return 0, 0, balance, 0, False
 
+            # Уже обновляли стрик сегодня — не трогаем и не показываем сообщение снова
             if today_start <= last_date <= today_end:
-                return streak, 0, balance, 0
+                return streak, 0, balance, 0, False
 
             old_streak = streak
             is_consecutive = streak > 0 and yesterday_start <= last_date <= yesterday_end
@@ -1097,10 +1102,10 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
             )
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
             new_balance = (await cur.fetchone())[0]
-            return new_streak, new_bonus, new_balance, gem_bonus
+            return new_streak, new_bonus, new_balance, gem_bonus, True
     except Exception as e:
         logger.error(f"Ошибка обновления стрика: {e}")
-        return 0, 0, 0, 0
+        return 0, 0, 0, 0, False
 
 
 # ================= RATE LIMIT =================
@@ -1626,7 +1631,7 @@ async def get_card_handler(message: Message):
 
         time_passed = now - last_claim
         if time_passed < COOLDOWN_SECONDS:
-            streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
+            streak, bonus, new_balance, gem_bonus, streak_updated = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             h, m = remaining // 3600, (remaining % 3600) // 60
             s = remaining % 60
@@ -1644,7 +1649,7 @@ async def get_card_handler(message: Message):
                 f"Следующая карточка через  <b>{time_str}</b>"
                 f"</blockquote>"
             )
-            text += _streak_text(streak, bonus, new_balance, gem_bonus)
+            text += _streak_text(streak, bonus, new_balance, gem_bonus, streak_updated)
 
             await reply_ephemeral(
                 message,
@@ -1658,10 +1663,10 @@ async def get_card_handler(message: Message):
             await reply_ephemeral(message, "❌ <b>Произошла ошибка. Попробуйте позже.</b>")
             return
 
-        streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
+        streak, bonus, new_balance, gem_bonus, streak_updated = await check_and_update_streak(user_id)
 
         caption = _card_caption(mention, card)
-        caption += _streak_text(streak, bonus, new_balance, gem_bonus)
+        caption += _streak_text(streak, bonus, new_balance, gem_bonus, streak_updated)
 
         is_private = message.chat.type == "private"
         kb = get_after_card_keyboard(user_id, card["balance"], private=is_private)
@@ -1689,13 +1694,19 @@ async def get_card_handler(message: Message):
         await reply_ephemeral(message, "❌ <b>Произошла ошибка. Попробуйте позже.</b>")
 
 
-def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) -> str:
-    """Текст про стрик в сообщении с карточкой / кулдауном.
-    Показываем статус всегда, когда стрик > 0:
-    - день 1 → «Стрик начат!»
-    - день 2+ → текущий стрик + бонусы (если начислились).
+def _streak_text(
+        streak: int,
+        bonus: int,
+        new_balance: int,
+        gem_bonus: int = 0,
+        streak_updated: bool = False,
+) -> str:
+    """Показывать текст про стрик ТОЛЬКО если стрик обновился в этом вызове
+    (один раз за календарный день).
+    - день 1 → «Стрик начат!» (ровно один раз)
+    - день 2+ → текущий стрик + бонусы
     """
-    if streak <= 0:
+    if not streak_updated or streak <= 0:
         return ""
     if streak == 1:
         return (
@@ -1704,7 +1715,6 @@ def _streak_text(streak: int, bonus: int, new_balance: int, gem_bonus: int = 0) 
             "Заходите каждый день — стрик растёт, а с ним и награды."
             "</blockquote>"
         )
-    # streak >= 2
     text = (
         f"\n\n<blockquote expandable>"
         f"🔥  Стрик  ·  <b>{fmt_days(streak)}</b>"
@@ -2639,10 +2649,10 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 await callback.message.answer("❌ <b>Ошибка. Монеты возвращены.</b>")
                 return
 
-            streak, bonus, new_balance, gem_bonus = await check_and_update_streak(user_id)
+            streak, bonus, new_balance, gem_bonus, streak_updated = await check_and_update_streak(user_id)
 
             caption = _card_caption(mention, card)
-            caption += _streak_text(streak, bonus, new_balance, gem_bonus)
+            caption += _streak_text(streak, bonus, new_balance, gem_bonus, streak_updated)
 
             is_private = callback.message.chat.type == "private"
             kb = get_after_card_keyboard(user_id, card["balance"], private=is_private)
