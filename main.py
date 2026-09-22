@@ -76,9 +76,11 @@ STREAK_EXPIRE_SECONDS = 24 * 3600
 
 DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 
-DICE_COOLDOWN_SECONDS = 10 * 60
+DICE_COOLDOWN_SECONDS = 5 * 60
 DICE_MIN_BALANCE = 10
 DICE_SPIN_DELAY = 3
+# Значение кубика Telegram (1–6) → изменение монет
+DICE_VALUE_MAP = {1: -10, 2: -5, 3: 0, 4: 5, 5: 10, 6: 15}
 
 RARITIES = {
     "common": {"icon": "⚪", "name": "Обычная", "weight": 50, "reward": 10},
@@ -183,17 +185,9 @@ def instant_cost(remaining_seconds: int) -> int:
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
 
 
-def roll_dice_coins() -> int:
-    values = list(range(-10, 11))
-    weights = []
-    for v in values:
-        if v > 0:
-            weights.append(4 + v)
-        elif v == 0:
-            weights.append(6)
-        else:
-            weights.append(2)
-    return random.choices(values, weights=weights, k=1)[0]
+def dice_delta_from_value(value: int) -> int:
+    """Преобразует значение кубика Telegram (1–6) в изменение монет."""
+    return DICE_VALUE_MAP.get(value, 0)
 
 
 def role_display(role: str) -> str:
@@ -507,6 +501,8 @@ USER_COMMANDS = [
     BotCommand(command="collection", description="🃏 Моя коллекция"),
     BotCommand(command="market", description="🛒 Маркет"),
     BotCommand(command="top", description="🏆 Топ игроков"),
+    BotCommand(command="dice", description="🎲 Кубик"),
+    BotCommand(command="miniapp", description="🃏 Мини-приложение"),
     BotCommand(command="help", description="❓ Помощь"),
     BotCommand(command="nickname", description="✏️ Сменить ник"),
     BotCommand(command="gender", description="⚧ Выбрать пол"),
@@ -597,9 +593,11 @@ def get_admin_main_kb():
 def get_profile_kb(owner_id: int):
     b = InlineKeyboardBuilder()
     b.button(text="🃏  Моя коллекция", callback_data=MainMenuCallback(user_id=owner_id).pack())
+    if WEBAPP_URL:
+        b.button(text="🃏  Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))
     b.button(text="⚧  Выбрать пол", callback_data=GenderCallback(value="menu", user_id=owner_id).pack())
-    b.button(text=f"✏️  Сменить ник · {NICKNAME_COST} 🪙",
-             callback_data=NicknameCallback(action="change", user_id=owner_id).pack())
+    b.button(text="✏️  Как сменить ник",
+             callback_data=NicknameCallback(action="change").pack())
     b.button(
         text="💎  Купить кристаллы",
         callback_data=MarketExchangeCallback(action="menu", user_id=owner_id).pack(),
@@ -622,20 +620,33 @@ def get_gender_kb(current: str = "none", owner_id: int = 0) -> InlineKeyboardMar
 
 
 def get_main_km(is_staff: bool = False) -> ReplyKeyboardMarkup:
-    """Основная клавиатура. Для админов/суперадминов — с кнопкой «Админ-панель»."""
+    """Компактная основная клавиатура: карточка, меню, мини-приложение."""
     rows = [
-        [KeyboardButton(text="🃏 Получить карточку"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="🛒 Маркет"), KeyboardButton(text="🏆 Топ")],
+        [KeyboardButton(text="🃏 Получить карточку")],
+        [KeyboardButton(text="📋 Меню")],
     ]
-    if is_staff:
-        rows.append([KeyboardButton(text="⚙️ Админ-панель"), KeyboardButton(text="❓ Помощь")])
-    else:
-        rows.append([KeyboardButton(text="❓ Помощь")])
+    if WEBAPP_URL:
+        rows.append([KeyboardButton(text="🃏 Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
         is_persistent=True,
     )
+
+
+def get_menu_inline_kb(is_staff: bool = False) -> InlineKeyboardMarkup:
+    """Инлайн-меню со всеми разделами (открывается по кнопке «Меню»)."""
+    b = InlineKeyboardBuilder()
+    b.button(text="👤  Профиль", callback_data="menu_profile")
+    b.button(text="🃏  Коллекция", callback_data="menu_collection")
+    b.button(text="🛒  Маркет", callback_data="menu_market")
+    b.button(text="🏆  Топ", callback_data="menu_top")
+    b.button(text="🎲  Кубик", callback_data="menu_dice")
+    b.button(text="❓  Помощь", callback_data="menu_help")
+    if is_staff:
+        b.button(text="⚙️  Админ-панель", callback_data="menu_admin")
+    b.adjust(2)
+    return b.as_markup()
 
 
 def _instant_button(b: InlineKeyboardBuilder, user_id: int, label: str,
@@ -668,10 +679,13 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
     b = InlineKeyboardBuilder()
     if balance >= cost:
         _instant_button(b, user_id, "⚡ Ещё одну", "another", cost)
-    b.button(
-        text="🃏  Моя коллекция",
-        callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
-    )
+    if WEBAPP_URL:
+        b.button(text="🃏  Мини-приложение", web_app=WebAppInfo(url=WEBAPP_URL))
+    else:
+        b.button(
+            text="🃏  Моя коллекция",
+            callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
+        )
     b.adjust(1)
     return b.as_markup()
 
@@ -701,6 +715,8 @@ async def get_user_photo(bot: Bot, user_id: int, nickname: str):
 
 
 async def render_profile(bot: Bot, user_id: int, viewer_id: Optional[int] = None):
+    # Автосгорание стрика, если с last_claim прошло ≥ 24 ч
+    await burn_expired_streak(user_id)
     async with get_db() as db:
         cur = await db.execute("""
                                SELECT u.nickname,
@@ -925,6 +941,34 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 
 
 # ================= СТРИК =================
+async def burn_expired_streak(user_id: int) -> bool:
+    """Сжигает стрик, если с последнего получения карточки прошло ≥ 24 ч.
+    Возвращает True, если стрик был сброшен."""
+    try:
+        now_ts = int(time.time())
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT streak, last_claim FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return False
+            streak = row["streak"] or 0
+            last_claim = row["last_claim"] or 0
+            if streak > 0 and last_claim > 0 and (now_ts - last_claim) >= STREAK_EXPIRE_SECONDS:
+                await db.execute(
+                    "UPDATE users SET streak = 0, last_streak_date = 0, streak_bonus = 0 "
+                    "WHERE user_id = ?",
+                    (user_id,),
+                )
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка сгорания стрика: {e}")
+        return False
+
+
 async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, int]:
     try:
         now_ts = int(time.time())
@@ -1107,12 +1151,13 @@ async def cmd_start(message: Message):
 
         welcome = (
             "👋  <b>Привет!</b>\n\n"
-            "Напишите <b>«мряу»</b> или нажмите кнопку ниже —\n"
+            "Напишите <b>«мряу»</b> или нажмите «🃏 Получить карточку» —\n"
             "и получите милую карточку.\n\n"
-            "<i>Бесплатно раз в 4 часа · мгновенно за монеты</i>"
+            "<i>Бесплатно раз в 4 часа · мгновенно за монеты</i>\n\n"
+            "📋 <b>Меню</b> — профиль, коллекция, маркет, топ и другое."
         )
         if is_staff:
-            welcome += f"\n\n{role_display(role)} — доступна кнопка «⚙️ Админ-панель»."
+            welcome += f"\n\n{role_display(role)} — админ-панель в «📋 Меню»."
 
         await message.reply(welcome, reply_markup=get_main_km(is_staff=is_staff))
         if WEBAPP_URL:
@@ -1144,9 +1189,14 @@ HELP_PAGES = [
             f"Мгновенно — от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙 "
             "(цена падает по мере истечения таймера)"
             "</blockquote>\n\n"
+            "<b>📋  Меню</b>\n"
+            "<blockquote>"
+            "Кнопка «📋 Меню» — профиль, коллекция, маркет, топ, кубик, помощь\n"
+            "(у админов также админ-панель)"
+            "</blockquote>\n\n"
             "<b>👤  Профиль</b>\n"
             "<blockquote>"
-            "«мряу профиль» · /profile · «👤 Профиль»\n"
+            "«мряу профиль» · /profile · Меню → Профиль\n"
             "В группе — ответом на сообщение можно открыть чужой профиль"
             "</blockquote>\n\n"
             "<b>🃏  Коллекция</b>\n"
@@ -1156,7 +1206,7 @@ HELP_PAGES = [
             "</blockquote>\n\n"
             "<b>🛒  Маркет</b>\n"
             "<blockquote>"
-            "«🛒 Маркет» · /market · «мряу маркет»\n"
+            "/market · «мряу маркет» · Меню → Маркет\n"
             "<b>Только в личных сообщениях</b>"
             "</blockquote>"
         ),
@@ -1167,7 +1217,8 @@ HELP_PAGES = [
             "<b>🔥  Стрик</b>\n"
             "<blockquote>"
             "Заходите каждый день и получайте карточку — стрик растёт.\n"
-            "Пропуск 24 часов — стрик сбрасывается.\n"
+            "Если не получать карточку 24 часа — стрик <b>автоматически сгорает</b>\n"
+            "(в профиле сразу показывается 0, ждать новую карточку не нужно).\n"
             "За стрик начисляются бонусные монеты."
             "</blockquote>\n\n"
             "<b>💎  Кристаллы за стрик</b>\n"
@@ -1206,28 +1257,35 @@ HELP_PAGES = [
             "</blockquote>\n\n"
             "<b>🎲  Кубик</b>\n"
             f"<blockquote>"
-            f"«мряу кубик» · раз в 10 мин · от {DICE_MIN_BALANCE} 🪙\n"
-            "Выпадает от −10 до +10 монет (шанс выигрыша выше)"
+            f"/dice · «мряу кубик» · раз в 5 мин · от {DICE_MIN_BALANCE} 🪙\n"
+            "Результат зависит от выпавшего числа на кубике Telegram:\n"
+            "1 → −10 · 2 → −5 · 3 → 0 · 4 → +5 · 5 → +10 · 6 → +15 🪙"
             "</blockquote>"
         ),
     },
     {
-        "title": "📖  Профиль и топ",
+        "title": "📖  Профиль, мини-апп и топ",
         "body": (
             "<b>✏️  Смена ника</b>\n"
             f"<blockquote>"
             f"/nickname НовыйНик  ·  {NICKNAME_COST} 🪙\n"
             "/nickname reset  ·  бесплатно\n"
-            "2–32 символа, без ссылок и @упоминаний"
+            "2–32 символа, без ссылок и @упоминаний\n"
+            "Подсказка: кнопка «Как сменить ник» в профиле"
             "</blockquote>\n\n"
             "<b>⚧  Пол</b>\n"
             "<blockquote>"
             "/gender м|ж|др|нет  или кнопка в профиле\n"
             "Необязательное поле"
             "</blockquote>\n\n"
+            "<b>🃏  Мини-приложение</b>\n"
+            "<blockquote>"
+            "/miniapp · кнопка «🃏 Мини-приложение»\n"
+            "Удобный просмотр коллекции и топа"
+            "</blockquote>\n\n"
             "<b>🏆  Топ</b>\n"
             "<blockquote>"
-            "«мряу топ» · /top · «🏆 Топ»\n"
+            "«мряу топ» · /top · Меню → Топ\n"
             "Переключение: монеты / карточки / стрик"
             "</blockquote>\n\n"
             "<b>🃏  Редкости</b>\n"
@@ -1278,6 +1336,160 @@ async def cmd_help(message: Message):
     await message.reply(
         build_help_text(0),
         reply_markup=get_help_keyboard(0),
+    )
+
+
+# ---------- Меню (reply-кнопка) ----------
+@router.message(F.text == "📋 Меню")
+async def show_menu(message: Message):
+    if not await check_not_banned(message):
+        return
+    role = await get_user_role(message.from_user.id)
+    is_staff = role in ("admin", "superadmin")
+    await message.reply(
+        "📋  <b>Меню</b>\n\nВыберите раздел:",
+        reply_markup=get_menu_inline_kb(is_staff=is_staff),
+    )
+
+
+@router.callback_query(F.data == "menu_profile")
+async def menu_profile_cb(callback: CallbackQuery):
+    if not await check_not_banned_cb(callback):
+        return
+    try:
+        await get_or_create_user(
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.full_name,
+        )
+        photo, caption, kb = await render_profile(
+            callback.bot, callback.from_user.id, viewer_id=callback.from_user.id
+        )
+        await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=kb)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"menu_profile: {e}")
+        await callback.answer("⚠️ Ошибка")
+
+
+@router.callback_query(F.data == "menu_collection")
+async def menu_collection_cb(callback: CallbackQuery):
+    if not await check_not_banned_cb(callback):
+        return
+    try:
+        user_id = callback.from_user.id
+        await get_or_create_user(
+            user_id, callback.from_user.username, callback.from_user.full_name
+        )
+        photo, caption, keyboard, total = await render_collection(callback.bot, user_id)
+        if total == 0:
+            await callback.message.answer(caption, reply_markup=keyboard)
+        else:
+            await callback.message.answer_photo(
+                photo=photo, caption=caption, reply_markup=keyboard
+            )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"menu_collection: {e}")
+        await callback.answer("⚠️ Ошибка")
+
+
+@router.callback_query(F.data == "menu_market")
+async def menu_market_cb(callback: CallbackQuery):
+    if not await check_not_banned_cb(callback):
+        return
+    if callback.message.chat.type != "private":
+        await callback.answer("Маркет только в личных сообщениях", show_alert=True)
+        return
+    try:
+        await get_or_create_user(
+            callback.from_user.id,
+            callback.from_user.username,
+            callback.from_user.full_name,
+        )
+        text, kb = await build_market_main(callback.from_user.id)
+        await callback.message.answer(text, reply_markup=kb)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"menu_market: {e}")
+        await callback.answer("⚠️ Ошибка")
+
+
+@router.callback_query(F.data == "menu_top")
+async def menu_top_cb(callback: CallbackQuery):
+    if not await check_not_banned_cb(callback):
+        return
+    try:
+        text = await build_top_text("coins", callback.from_user.id)
+        await callback.message.answer(text, reply_markup=get_top_keyboard("coins"))
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"menu_top: {e}")
+        await callback.answer("⚠️ Ошибка")
+
+
+@router.callback_query(F.data == "menu_dice")
+async def menu_dice_cb(callback: CallbackQuery):
+    if not await check_not_banned_cb(callback):
+        return
+    await callback.answer()
+    # Переиспользуем логику кубика через «фейковое» сообщение невозможно —
+    # подсказываем команду
+    await callback.message.answer(
+        "🎲  Бросьте кубик командой <code>/dice</code> или напишите «мряу кубик».\n"
+        f"Кулдаун: 5 мин · минимум {DICE_MIN_BALANCE} 🪙\n"
+        "1→−10 · 2→−5 · 3→0 · 4→+5 · 5→+10 · 6→+15"
+    )
+
+
+@router.callback_query(F.data == "menu_help")
+async def menu_help_cb(callback: CallbackQuery):
+    if not await check_not_banned_cb(callback):
+        return
+    await callback.message.answer(
+        build_help_text(0),
+        reply_markup=get_help_keyboard(0),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu_admin")
+async def menu_admin_cb(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("⚠️ Нет доступа", show_alert=True)
+        return
+    role = await get_user_role(callback.from_user.id)
+    text = (
+        f"⚙️  <b>Админ-панель</b>\n"
+        f"<code>{'─' * 18}</code>\n\n"
+        f"Ваша роль:  {role_display(role)}\n\n"
+        f"Выберите раздел:"
+    )
+    await callback.message.answer(text, reply_markup=get_admin_main_kb())
+    await callback.answer()
+
+
+# ---------- Мини-приложение ----------
+@router.message(Command("miniapp"))
+async def cmd_miniapp(message: Message):
+    if not await check_not_banned(message):
+        return
+    if not WEBAPP_URL:
+        await message.reply(
+            "🃏  <b>Мини-приложение пока недоступно.</b>\n"
+            "Администратор не задал WEBAPP_URL."
+        )
+        return
+    wa_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="🃏 Открыть мини-приложение",
+            web_app=WebAppInfo(url=WEBAPP_URL),
+        )
+    ]])
+    await message.reply(
+        "🃏  <b>Мини-приложение</b>\n\n"
+        "Удобный просмотр коллекции и топа:",
+        reply_markup=wa_kb,
     )
 
 
@@ -1450,6 +1662,7 @@ async def disabled_transfer_handler(message: Message):
 
 
 # ================= КУБИК =================
+@router.message(Command("dice"))
 @router.message(F.text.regexp(DICE_CMD_RE))
 async def dice_handler(message: Message):
     if not await check_not_banned(message):
@@ -1504,19 +1717,35 @@ async def dice_handler(message: Message):
                 )
                 return
 
-            delta = roll_dice_coins()
-            new_balance = balance + delta
-            if new_balance < 0:
-                new_balance = 0
-                delta = new_balance - balance
-
+            # Фиксируем кулдаун до броска, чтобы не было гонок
             await db.execute(
-                "UPDATE users SET coins = ?, last_dice = ? WHERE user_id = ?",
-                (new_balance, now, user_id),
+                "UPDATE users SET last_dice = ? WHERE user_id = ?",
+                (now, user_id),
             )
 
         spin_msg = await message.reply_dice(emoji="🎲")
         await asyncio.sleep(DICE_SPIN_DELAY)
+
+        # Берём реальное значение кубика от Telegram (1–6)
+        dice_value = 1
+        if spin_msg.dice and spin_msg.dice.value:
+            dice_value = int(spin_msg.dice.value)
+        delta = dice_delta_from_value(dice_value)
+
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT coins FROM users WHERE user_id = ?", (user_id,)
+            )
+            row = await cur.fetchone()
+            balance = (row["coins"] or 0) if row else 0
+            new_balance = balance + delta
+            if new_balance < 0:
+                new_balance = 0
+                delta = new_balance - balance
+            await db.execute(
+                "UPDATE users SET coins = ? WHERE user_id = ?",
+                (new_balance, user_id),
+            )
 
         if delta > 0:
             delta_str = f"+{fmt_num(delta)}"
@@ -1530,8 +1759,9 @@ async def dice_handler(message: Message):
 
         result_caption = (
             f"🎲  <b>{title}</b>\n\n"
-            f"Результат  ·  <b>{delta_str} 🪙</b>\n"
-            f"Баланс     ·  <b>{fmt_num(new_balance)}</b>"
+            f"Выпало    ·  <b>{dice_value}</b>\n"
+            f"Результат ·  <b>{delta_str} 🪙</b>\n"
+            f"Баланс    ·  <b>{fmt_num(new_balance)}</b>"
         )
 
         try:
@@ -1853,7 +2083,10 @@ async def gender_cmd(message: Message, command: Command):
 
 # ---------- Топ ----------
 async def build_top_text(kind: str, current_user_id: int) -> str:
+    # Сжигаем просроченный стрик текущего пользователя (для корректного места в топе)
+    await burn_expired_streak(current_user_id)
     limit = 10
+    now_ts = int(time.time())
     async with get_db() as db:
         if kind == "cards":
             cur = await db.execute(
@@ -1892,18 +2125,27 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             unit = "🃏"
             title = "🃏  Топ по карточкам"
         elif kind == "streak":
+            # Стрик считается 0, если с last_claim прошло ≥ 24 ч (без bulk-UPDATE)
+            effective_streak = (
+                "CASE WHEN last_claim > 0 AND (? - last_claim) >= ? "
+                "THEN 0 ELSE COALESCE(streak, 0) END"
+            )
             cur = await db.execute(
-                "SELECT user_id, nickname, streak AS value FROM users "
+                f"SELECT user_id, nickname, ({effective_streak}) AS value FROM users "
                 "WHERE role != 'banned' "
                 "ORDER BY value DESC, user_id ASC LIMIT ?",
-                (limit,),
+                (now_ts, STREAK_EXPIRE_SECONDS, limit),
             )
             top = await cur.fetchall()
-            cur = await db.execute("SELECT streak AS value FROM users WHERE user_id = ?", (current_user_id,))
+            cur = await db.execute(
+                f"SELECT ({effective_streak}) AS value FROM users WHERE user_id = ?",
+                (now_ts, STREAK_EXPIRE_SECONDS, current_user_id),
+            )
             my_row = await cur.fetchone()
             my_value = my_row["value"] if my_row else 0
             cur = await db.execute(
-                "SELECT COUNT(*) + 1 FROM users WHERE streak > ? AND role != 'banned'", (my_value,)
+                f"SELECT COUNT(*) + 1 FROM users WHERE ({effective_streak}) > ? AND role != 'banned'",
+                (now_ts, STREAK_EXPIRE_SECONDS, my_value),
             )
             my_rank = (await cur.fetchone())[0]
             unit = "🔥"
