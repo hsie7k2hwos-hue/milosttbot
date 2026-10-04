@@ -2,24 +2,27 @@
 Админ-бот карточной игры (отдельный процесс, общая БД).
 
 Запуск:
-  ADMIN_BOT_TOKEN=... DB_NAME=/app/data/cards_game.db python admin_bot.py
+  ADMIN_BOT_TOKEN=... BOT_TOKEN=... DB_NAME=/app/data/cards_game.db python admin_bot.py
 
 Требования:
   - Пользовательский и админ-бот монтируют одну папку данных.
   - SQLite WAL позволяет одновременный доступ.
+  - BOT_TOKEN (пользовательского бота) нужен для кэширования аватарок.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
@@ -34,7 +37,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand,
     BotCommandScopeDefault,
-    BufferedInputFile,
     CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
@@ -44,7 +46,6 @@ from aiogram.types import (
     LinkPreviewOptions,
     Message,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
@@ -84,10 +85,12 @@ load_dotenv()
 ADMIN_BOT_TOKEN = (
     os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or ""
 ).strip()
+USER_BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()  # для кэша аватарок
 
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 ADMIN_LOG_PATH = os.getenv("ADMIN_LOG_PATH", "/app/data/admin_bot.log")
 USER_LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
+AVATARS_DIR = Path(os.getenv("AVATARS_DIR", "/app/data/user_avatars"))
 COOLDOWN_SECONDS = 3 * 3600
 
 RARITIES = {
@@ -108,8 +111,13 @@ ROLES = {
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
 
+PER_PAGE = 5
+AVATAR_BATCH = 25
+AVATAR_DELAY = (3.0, 5.0)  # min, max delay between downloads
+
+
 # ===========================================================================
-# LOGGING (исправлено: гарантированно пишем в файл)
+# LOGGING
 # ===========================================================================
 def _setup_logging() -> logging.Logger:
     log = logging.getLogger("admin_bot")
@@ -118,12 +126,10 @@ def _setup_logging() -> logging.Logger:
 
     fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s")
 
-    # Console
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     log.addHandler(sh)
 
-    # File
     try:
         Path(ADMIN_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(ADMIN_LOG_PATH, encoding="utf-8")
@@ -170,12 +176,54 @@ def display_name(nickname, user_id, fallback: Optional[str] = None) -> str:
 
 
 def bq(text: str) -> str:
-    """Оборачивает текст в blockquote для красивого вывода."""
     return f"<blockquote>{text}</blockquote>"
 
 
 def sep(width: int = 18) -> str:
     return "─" * width
+
+
+# ===========================================================================
+# SAFE EDIT / SEND
+# ===========================================================================
+async def safe_edit(
+    message: Message,
+    *,
+    text: Optional[str] = None,
+    caption: Optional[str] = None,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    media: Optional[Union[str, FSInputFile]] = None,
+) -> Message:
+    """
+    Пытается отредактировать сообщение.
+    При неудаче — удаляет старое и отправляет новое (без спама).
+    Возвращает итоговое сообщение.
+    """
+    try:
+        if media is not None:
+            await message.edit_media(
+                media=InputMediaPhoto(media=media, caption=caption or ""),
+                reply_markup=reply_markup,
+            )
+            return message
+        if caption is not None and message.photo:
+            await message.edit_caption(caption=caption, reply_markup=reply_markup)
+            return message
+        if text is not None:
+            await message.edit_text(text, reply_markup=reply_markup)
+            return message
+        raise TelegramBadRequest("Nothing to edit")
+    except TelegramBadRequest:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        if media is not None:
+            return await message.answer_photo(
+                photo=media, caption=caption or "", reply_markup=reply_markup
+            )
+        return await message.answer(text or caption or "—", reply_markup=reply_markup)
 
 
 # ===========================================================================
@@ -186,16 +234,28 @@ class AdminRarityCallback(CallbackData, prefix="ar"):
     rarity: str
 
 
+class AdminCardFilterCallback(CallbackData, prefix="acf"):
+    """Выбор фильтра редкости перед списком карточек."""
+    rarity: str  # "all" или ключ редкости
+
+
 class AdminCardPageCallback(CallbackData, prefix="acp"):
     page: int
+    rarity: str = "all"
 
 
 class AdminCardManageCallback(CallbackData, prefix="acm"):
     card_id: int
+    rarity: str = "all"  # чтобы вернуться в правильный фильтр
 
 
 class AdminCardEditPhotoCallback(CallbackData, prefix="acep"):
     card_id: int
+
+
+class AdminUserFilterCallback(CallbackData, prefix="auf"):
+    """Выбор фильтра роли перед списком пользователей."""
+    role: str  # "all" или ключ роли
 
 
 class AdminUserPageCallback(CallbackData, prefix="aup"):
@@ -205,6 +265,7 @@ class AdminUserPageCallback(CallbackData, prefix="aup"):
 
 class AdminUserViewCallback(CallbackData, prefix="auv"):
     user_id: int
+    filter_role: str = "all"
 
 
 class AdminUserActionCallback(CallbackData, prefix="aua"):
@@ -214,6 +275,10 @@ class AdminUserActionCallback(CallbackData, prefix="aua"):
 
 class AdminHelpCallback(CallbackData, prefix="ah"):
     page: int = 0
+
+
+class AdminStatsCallback(CallbackData, prefix="ast"):
+    section: str = "overview"
 
 
 class AdminMainCallback(CallbackData, prefix="amain"):
@@ -242,7 +307,6 @@ async def get_db():
 
 
 async def init_db_minimal() -> None:
-    """Таблицы уже создаёт user-бот; на всякий случай — IF NOT EXISTS."""
     async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS cards (
@@ -274,6 +338,15 @@ async def init_db_minimal() -> None:
                 claim_time INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, card_id),
                 FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
+            )
+        """)
+        # Кэш аватарок: путь + хеш содержимого
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_avatars (
+                user_id INTEGER PRIMARY KEY,
+                path TEXT,
+                file_hash TEXT,
+                updated_at INTEGER DEFAULT 0
             )
         """)
         for table, column, definition in (
@@ -316,11 +389,75 @@ async def set_user_role(user_id: int, role: str) -> bool:
     return True
 
 
-async def get_user_nickname(user_id: int) -> str:
-    async with get_db() as db:
-        cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (user_id,))
-        row = await cur.fetchone()
-        return display_name(row["nickname"] if row else None, user_id)
+# ===========================================================================
+# AVATAR CACHE
+# ===========================================================================
+def avatar_path(user_id: int) -> Path:
+    return AVATARS_DIR / f"{user_id}.jpg"
+
+
+async def get_cached_avatar(user_id: int) -> Optional[Union[FSInputFile, str]]:
+    """Возвращает FSInputFile из кэша или None / default."""
+    p = avatar_path(user_id)
+    if p.is_file() and p.stat().st_size > 0:
+        return FSInputFile(p)
+    if DEFAULT_AVATAR_PATH and Path(DEFAULT_AVATAR_PATH).is_file():
+        return FSInputFile(DEFAULT_AVATAR_PATH)
+    if DEFAULT_AVATAR_FILE_ID:
+        return DEFAULT_AVATAR_FILE_ID
+    return None
+
+
+async def cache_user_avatar(user_bot: Bot, user_id: int) -> str:
+    """
+    Скачивает аватарку через user-бота и сохраняет на диск.
+    Возвращает статус: 'new' | 'updated' | 'unchanged' | 'empty' | 'error'
+    """
+    AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = avatar_path(user_id)
+
+    try:
+        photos = await user_bot.get_user_profile_photos(user_id, limit=1)
+        if photos.total_count == 0 or not photos.photos:
+            return "empty"
+
+        file_id = photos.photos[0][-1].file_id
+        tg_file = await user_bot.get_file(file_id)
+        data = await user_bot.download_file(tg_file.file_path)
+        content = data.read()
+
+        new_hash = hashlib.md5(content).hexdigest()
+
+        old_hash = None
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT file_hash FROM user_avatars WHERE user_id = ?", (user_id,)
+            )
+            row = await cur.fetchone()
+            if row:
+                old_hash = row["file_hash"]
+
+        if old_hash == new_hash and dest.is_file():
+            return "unchanged"
+
+        dest.write_bytes(content)
+
+        async with get_db() as db:
+            await db.execute(
+                """INSERT INTO user_avatars (user_id, path, file_hash, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     path=excluded.path,
+                     file_hash=excluded.file_hash,
+                     updated_at=excluded.updated_at""",
+                (user_id, str(dest), new_hash, int(time.time())),
+            )
+        return "updated" if old_hash else "new"
+    except (TelegramForbiddenError, TelegramBadRequest):
+        return "empty"
+    except Exception as e:
+        logger.error("cache_user_avatar %s: %s", user_id, e)
+        return "error"
 
 
 # ===========================================================================
@@ -362,23 +499,17 @@ class EditCardPhotoSG(StatesGroup):
 # ===========================================================================
 # KEYBOARDS
 # ===========================================================================
-def get_main_reply_kb() -> ReplyKeyboardMarkup:
-    """Постоянное reply-меню навигации (т.к. бот выделен отдельно)."""
+def get_main_reply_kb(fsm_active: bool = False) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📜 Карточки")],
+        [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="🏆 Топ"), KeyboardButton(text="📥 Логи")],
+        [KeyboardButton(text="🛠 Справка")],
+    ]
+    if fsm_active:
+        rows.append([KeyboardButton(text="❌ Отмена")])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="➕ Добавить"),
-                KeyboardButton(text="📜 Карточки"),
-            ],
-            [
-                KeyboardButton(text="👥 Пользователи"),
-                KeyboardButton(text="📊 Статистика"),
-            ],
-            [
-                KeyboardButton(text="🛠 Справка"),
-                KeyboardButton(text="📥 Логи"),
-            ],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Выберите раздел…",
@@ -390,13 +521,7 @@ def get_rarity_keyboard(callback_prefix: str = "set_rarity") -> InlineKeyboardMa
     for key, val in RARITIES.items():
         b.button(text=f"{val['icon']} {val['name']}", callback_data=f"{callback_prefix}:{key}")
     b.button(text="✕ Отмена", callback_data="cancel_add_card")
-    b.adjust(1)  # один столбец — не растягивается
-    return b.as_markup()
-
-
-def get_cancel_kb() -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.button(text="✕ Отмена", callback_data="cancel_add_card")
+    b.adjust(1)
     return b.as_markup()
 
 
@@ -406,9 +531,6 @@ def get_cancel_kb() -> InlineKeyboardMarkup:
 router = Router()
 
 
-# ===========================================================================
-# ACCESS HELPER
-# ===========================================================================
 async def _require_admin(event: Message | CallbackQuery) -> bool:
     uid = event.from_user.id
     if await is_admin(uid):
@@ -422,12 +544,11 @@ async def _require_admin(event: Message | CallbackQuery) -> bool:
 
 
 # ===========================================================================
-# PANEL / START
+# START / PANEL
 # ===========================================================================
 @router.message(Command("start"))
-@router.message(Command("admin"))
-@router.message(F.text == "⚙️ Панель")
-async def admin_panel(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     if not await _require_admin(message):
         return
     role = await get_user_role(message.from_user.id)
@@ -452,11 +573,29 @@ async def admin_main_back(call: CallbackQuery):
         f"{line('🎭', 'Ваша роль', role_display(role))}\n\n"
         f"Используйте меню ниже или команды."
     )
-    try:
-        await call.message.edit_text(text)
-    except TelegramBadRequest:
-        await call.message.answer(text, reply_markup=get_main_reply_kb())
+    await safe_edit(call.message, text=text)
     await call.answer()
+
+
+# ===========================================================================
+# CANCEL (FSM + reply button)
+# ===========================================================================
+@router.message(Command("cancel"))
+@router.message(F.text == "❌ Отмена")
+async def cancel_handler(message: Message, state: FSMContext):
+    current = await state.get_state()
+    await state.clear()
+    if current:
+        await message.answer("✅ Операция отменена", reply_markup=get_main_reply_kb())
+    else:
+        await message.answer("Нечего отменять.", reply_markup=get_main_reply_kb())
+
+
+@router.callback_query(F.data == "cancel_add_card")
+async def cancel_add_card_callback(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.answer()
+    await call.message.answer("✅ Отменено", reply_markup=get_main_reply_kb())
 
 
 # ===========================================================================
@@ -468,22 +607,21 @@ async def add_card_start(event: Message | CallbackQuery, state: FSMContext):
     if not await _require_admin(event):
         return
     await state.set_state(AddCardSG.photo)
-    text = "📷 <b>Отправьте фото новой карточки</b>\n\n<code>/cancel</code> — отмена"
+    text = "📷 <b>Отправьте фото новой карточки</b>\n\nИли нажмите «❌ Отмена»."
+    kb = get_main_reply_kb(fsm_active=True)
     if isinstance(event, CallbackQuery):
-        await event.message.answer(text)
+        await event.message.answer(text, reply_markup=kb)
         await event.answer()
     else:
-        await event.answer(text)
+        await event.answer(text, reply_markup=kb)
 
 
 @router.message(Command("addcard"), admin_filter, F.photo)
 async def quick_add_card(message: Message, command: CommandObject):
-    if not message.photo:
-        return
     args = (command.args or "").strip().split()
     if len(args) < 2:
         await message.reply(
-            "✏️ <code>/addcard Название редкость</code> (+ фото)\n"
+            "✏️ /addcard Название редкость (+ фото)\n"
             "Редкости: " + ", ".join(RARITIES.keys())
         )
         return
@@ -515,26 +653,16 @@ async def quick_add_card(message: Message, command: CommandObject):
                 logger.error("sync_card_photo: %s", e)
 
     r = RARITIES[rarity]
+    body = "\n".join([
+        line("🃏", "Название", esc(name)),
+        line(r["icon"], "Редкость", r["name"]),
+        line("🆔", "ID", card_id),
+        line("💾", "Файл", photo_path or "только file_id"),
+    ])
     await message.reply(
-        f"✅ <b>Карточка добавлена</b>\n\n"
-        f"{bq(line('🃏', 'Название', esc(name)) + chr(10) + line(r['icon'], 'Редкость', r['name']) + chr(10) + line('🆔', 'ID', card_id) + chr(10) + line('💾', 'Файл', photo_path or 'только file_id'))}",
+        f"✅ <b>Карточка добавлена</b>\n\n{bq(body)}",
         reply_markup=get_main_reply_kb(),
     )
-
-
-@router.message(Command("cancel"))
-async def cancel_handler(message: Message, state: FSMContext):
-    if await state.get_state() is None:
-        return
-    await state.clear()
-    await message.answer("✅ Операция отменена", reply_markup=get_main_reply_kb())
-
-
-@router.callback_query(F.data == "cancel_add_card")
-async def cancel_add_card_callback(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.answer()
-    await call.message.answer("✅ Отменено", reply_markup=get_main_reply_kb())
 
 
 @router.message(AddCardSG.photo, F.photo)
@@ -544,7 +672,10 @@ async def add_card_photo(message: Message, state: FSMContext):
         return
     await state.update_data(photo_id=message.photo[-1].file_id)
     await state.set_state(AddCardSG.name)
-    await message.answer("✍️ <b>Введите название</b> (до 64 символов)")
+    await message.answer(
+        "✍️ <b>Введите название</b> (до 64 символов)",
+        reply_markup=get_main_reply_kb(fsm_active=True),
+    )
 
 
 @router.message(AddCardSG.name, F.text)
@@ -552,9 +683,14 @@ async def add_card_name(message: Message, state: FSMContext):
     if not await _require_admin(message):
         await state.clear()
         return
+    if message.text.strip() in ("❌ Отмена", "/cancel"):
+        return
     await state.update_data(name=message.text[:64])
     await state.set_state(AddCardSG.rarity)
-    await message.answer("🎲 <b>Выберите редкость</b>", reply_markup=get_rarity_keyboard())
+    await message.answer(
+        "🎲 <b>Выберите редкость</b>",
+        reply_markup=get_rarity_keyboard(),
+    )
 
 
 @router.callback_query(AddCardSG.rarity, F.data.startswith("set_rarity:"))
@@ -585,9 +721,14 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
                 logger.error("sync: %s", e)
 
     r = RARITIES[rarity]
+    body = "\n".join([
+        line("🃏", "Название", esc(data["name"])),
+        line(r["icon"], "Редкость", r["name"]),
+        line("🆔", "ID", card_id),
+        line("💾", "Файл", photo_path or "только file_id"),
+    ])
     await call.message.answer(
-        f"✅ <b>Карточка добавлена</b>\n\n"
-        f"{bq(line('🃏', 'Название', esc(data['name'])) + chr(10) + line(r['icon'], 'Редкость', r['name']) + chr(10) + line('🆔', 'ID', card_id) + chr(10) + line('💾', 'Файл', photo_path or 'только file_id'))}",
+        f"✅ <b>Карточка добавлена</b>\n\n{bq(body)}",
         reply_markup=get_main_reply_kb(),
     )
     await state.clear()
@@ -595,32 +736,76 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
 
 
 # ===========================================================================
-# CARDS LIST & MANAGE
+# CARDS — filter first, then list
 # ===========================================================================
-async def build_admin_cards_page(page: int = 0):
-    per_page = 5
+async def build_card_filter_menu() -> tuple[str, InlineKeyboardMarkup]:
     async with get_db() as db:
+        cur = await db.execute("SELECT rarity, COUNT(*) FROM cards GROUP BY rarity")
+        counts = dict(await cur.fetchall())
         cur = await db.execute("SELECT COUNT(*) FROM cards")
         total = (await cur.fetchone())[0]
 
+    text = (
+        f"📜 <b>Карточки</b>\n"
+        f"{sep()}\n\n"
+        f"Всего в базе: <b>{fmt_num(total)}</b>\n\n"
+        f"Выберите редкость:"
+    )
+    b = InlineKeyboardBuilder()
+    b.button(
+        text=f"📦 Все ({fmt_num(total)})",
+        callback_data=AdminCardFilterCallback(rarity="all").pack(),
+    )
+    for key, info in RARITIES.items():
+        cnt = counts.get(key, 0)
+        b.button(
+            text=f"{info['icon']} {info['name']} ({fmt_num(cnt)})",
+            callback_data=AdminCardFilterCallback(rarity=key).pack(),
+        )
+    b.button(text="‹ В меню", callback_data="admin_main")
+    b.adjust(1)
+    return text, b.as_markup()
+
+
+async def build_admin_cards_page(page: int = 0, rarity: str = "all"):
+    async with get_db() as db:
+        if rarity == "all":
+            cur = await db.execute("SELECT COUNT(*) FROM cards")
+        else:
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM cards WHERE rarity = ?", (rarity,)
+            )
+        total = (await cur.fetchone())[0]
+
         if total == 0:
+            label = RARITIES[rarity]["name"] if rarity != "all" else "все"
             return (
-                "📜 <b>Карточки</b>\n\nБаза пуста. Добавьте через «➕ Добавить».",
+                f"📜 <b>Карточки</b> · {label}\n\nПусто.",
                 InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="‹ В меню", callback_data="admin_main")]
+                    [InlineKeyboardButton(
+                        text="‹ К редкостям",
+                        callback_data="cards_filter_menu",
+                    )],
+                    [InlineKeyboardButton(text="‹ В меню", callback_data="admin_main")],
                 ]),
-                0,
             )
 
-        total_pages = max(1, (total + per_page - 1) // per_page)
+        total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
         page = max(0, min(page, total_pages - 1))
-        offset = page * per_page
+        offset = page * PER_PAGE
 
-        cur = await db.execute(
-            "SELECT id, name, rarity, photo_id, photo_path FROM cards "
-            "ORDER BY id DESC LIMIT ? OFFSET ?",
-            (per_page, offset),
-        )
+        if rarity == "all":
+            cur = await db.execute(
+                "SELECT id, name, rarity, photo_id, photo_path FROM cards "
+                "ORDER BY id DESC LIMIT ? OFFSET ?",
+                (PER_PAGE, offset),
+            )
+        else:
+            cur = await db.execute(
+                "SELECT id, name, rarity, photo_id, photo_path FROM cards "
+                "WHERE rarity = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (rarity, PER_PAGE, offset),
+            )
         cards = await cur.fetchall()
 
         b = InlineKeyboardBuilder()
@@ -638,54 +823,73 @@ async def build_admin_cards_page(page: int = 0):
             )
             b.button(
                 text=f"{r.get('icon', '')} {c['name'][:28]}",
-                callback_data=AdminCardManageCallback(card_id=c["id"]).pack(),
+                callback_data=AdminCardManageCallback(
+                    card_id=c["id"], rarity=rarity
+                ).pack(),
             )
 
+        filter_label = RARITIES[rarity]["name"] if rarity != "all" else "Все"
         text = (
-            f"📜 <b>Карточки</b>\n"
+            f"📜 <b>Карточки</b> · {filter_label}\n"
             f"{sep()}\n"
             f"{line('📄', 'Страница', f'<b>{page + 1}</b> / {total_pages}')}\n"
-            f"{line('📦', 'Всего', f'<b>{fmt_num(total)}</b>')}\n\n"
+            f"{line('📦', 'Найдено', f'<b>{fmt_num(total)}</b>')}\n\n"
             f"{bq(chr(10).join(lines))}"
         )
 
-        # Navigation row
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton(
-                text="‹", callback_data=AdminCardPageCallback(page=page - 1).pack()
+                text="‹",
+                callback_data=AdminCardPageCallback(page=page - 1, rarity=rarity).pack(),
             ))
         nav.append(InlineKeyboardButton(
             text=f"{page + 1}/{total_pages}", callback_data="ignore"
         ))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton(
-                text="›", callback_data=AdminCardPageCallback(page=page + 1).pack()
+                text="›",
+                callback_data=AdminCardPageCallback(page=page + 1, rarity=rarity).pack(),
             ))
 
         b.adjust(1)
         b.row(*nav)
+        b.row(InlineKeyboardButton(
+            text="‹ К редкостям", callback_data="cards_filter_menu"
+        ))
         b.row(InlineKeyboardButton(text="‹ В меню", callback_data="admin_main"))
-        return text, b.as_markup(), page
+        return text, b.as_markup()
 
 
 @router.message(F.text == "📜 Карточки")
-@router.callback_query(AdminCardPageCallback.filter())
-async def admin_cards_page(event: Message | CallbackQuery, callback_data: AdminCardPageCallback = None):
+@router.callback_query(F.data == "cards_filter_menu")
+async def cards_filter_entry(event: Message | CallbackQuery):
     if not await _require_admin(event):
         return
-
-    page = callback_data.page if callback_data else 0
-    text, kb, _ = await build_admin_cards_page(page)
-
+    text, kb = await build_card_filter_menu()
     if isinstance(event, CallbackQuery):
-        try:
-            await event.message.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
-            await event.message.answer(text, reply_markup=kb)
+        await safe_edit(event.message, text=text, reply_markup=kb)
         await event.answer()
     else:
         await event.answer(text, reply_markup=kb)
+
+
+@router.callback_query(AdminCardFilterCallback.filter())
+async def cards_filter_chosen(call: CallbackQuery, callback_data: AdminCardFilterCallback):
+    if not await _require_admin(call):
+        return
+    text, kb = await build_admin_cards_page(0, callback_data.rarity)
+    await safe_edit(call.message, text=text, reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(AdminCardPageCallback.filter())
+async def admin_cards_page(call: CallbackQuery, callback_data: AdminCardPageCallback):
+    if not await _require_admin(call):
+        return
+    text, kb = await build_admin_cards_page(callback_data.page, callback_data.rarity)
+    await safe_edit(call.message, text=text, reply_markup=kb)
+    await call.answer()
 
 
 @router.callback_query(AdminCardManageCallback.filter())
@@ -694,6 +898,8 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
         return
 
     card_id = callback_data.card_id
+    back_rarity = callback_data.rarity
+
     async with get_db() as db:
         cur = await db.execute(
             "SELECT name, rarity, photo_id, photo_path FROM cards WHERE id = ?",
@@ -709,18 +915,23 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
         owners = (await cur.fetchone())[0]
 
     r = RARITIES.get(card["rarity"], {})
-    caption = (
-        f"🃏 <b>{esc(card['name'])}</b>\n"
-        f"{sep(20)}\n\n"
-        f"{bq(line('🆔', 'ID', f'<code>{card_id}</code>') + chr(10) + line(r.get('icon', '•'), 'Редкость', r.get('name', card['rarity'])) + chr(10) + line('👥', 'Владельцев', f'<b>{fmt_num(owners)}</b>') + chr(10) + line('💾', 'Файл', card['photo_path'] or 'нет'))}"
-    )
+    body = "\n".join([
+        line("🆔", "ID", f"<code>{card_id}</code>"),
+        line(r.get("icon", "•"), "Редкость", r.get("name", card["rarity"])),
+        line("👥", "Владельцев", f"<b>{fmt_num(owners)}</b>"),
+        line("💾", "Файл", card["photo_path"] or "нет"),
+    ])
+    caption = f"🃏 <b>{esc(card['name'])}</b>\n{sep(20)}\n\n{bq(body)}"
 
     b = InlineKeyboardBuilder()
     b.button(text="✏️ Название", callback_data=f"edit_name:{card_id}")
     b.button(text="🎲 Редкость", callback_data=f"edit_rarity:{card_id}")
     b.button(text="🖼 Фото", callback_data=AdminCardEditPhotoCallback(card_id=card_id).pack())
     b.button(text="🗑 Удалить", callback_data=f"delete_card:{card_id}")
-    b.button(text="‹ К списку", callback_data=AdminCardPageCallback(page=0).pack())
+    b.button(
+        text="‹ К списку",
+        callback_data=AdminCardPageCallback(page=0, rarity=back_rarity).pack(),
+    )
     b.adjust(1)
 
     photo = None
@@ -729,27 +940,13 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
     if not photo and card["photo_id"]:
         photo = card["photo_id"]
 
-    try:
-        if photo:
-            if call.message.photo:
-                await call.message.edit_media(
-                    media=InputMediaPhoto(media=photo, caption=caption),
-                    reply_markup=b.as_markup(),
-                )
-            else:
-                await call.message.answer_photo(
-                    photo=photo, caption=caption, reply_markup=b.as_markup()
-                )
-        else:
-            if call.message.photo:
-                await call.message.edit_caption(caption=caption, reply_markup=b.as_markup())
-            else:
-                try:
-                    await call.message.edit_text(caption, reply_markup=b.as_markup())
-                except TelegramBadRequest:
-                    await call.message.answer(caption, reply_markup=b.as_markup())
-    except TelegramBadRequest:
-        await call.message.answer(caption, reply_markup=b.as_markup())
+    await safe_edit(
+        call.message,
+        text=caption if not photo else None,
+        caption=caption if photo else None,
+        media=photo,
+        reply_markup=b.as_markup(),
+    )
     await call.answer()
 
 
@@ -761,7 +958,10 @@ async def admin_card_edit_photo_start(
         return
     await state.set_state(EditCardPhotoSG.photo)
     await state.update_data(card_id=callback_data.card_id)
-    await call.message.answer("📷 Отправьте новое фото\n\n<code>/cancel</code>")
+    await call.message.answer(
+        "📷 Отправьте новое фото\n\nИли «❌ Отмена».",
+        reply_markup=get_main_reply_kb(fsm_active=True),
+    )
     await call.answer()
 
 
@@ -821,7 +1021,10 @@ async def edit_card_name_start(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(card_id=int(call.data.split(":")[1]))
     await state.set_state(EditCardSG.new_name)
-    await call.message.answer("✍️ Введите новое название:")
+    await call.message.answer(
+        "✍️ Введите новое название:",
+        reply_markup=get_main_reply_kb(fsm_active=True),
+    )
     await call.answer()
 
 
@@ -829,6 +1032,8 @@ async def edit_card_name_start(call: CallbackQuery, state: FSMContext):
 async def edit_card_name_save(message: Message, state: FSMContext):
     if not await _require_admin(message):
         await state.clear()
+        return
+    if message.text.strip() in ("❌ Отмена", "/cancel"):
         return
     data = await state.get_data()
     new_name = message.text[:64]
@@ -876,10 +1081,38 @@ async def edit_card_rarity_save(call: CallbackQuery, callback_data: AdminRarityC
 
 
 # ===========================================================================
-# USERS
+# USERS — filter first, then list
 # ===========================================================================
+async def build_user_filter_menu() -> tuple[str, InlineKeyboardMarkup]:
+    async with get_db() as db:
+        cur = await db.execute("SELECT role, COUNT(*) FROM users GROUP BY role")
+        counts = dict(await cur.fetchall())
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        total = (await cur.fetchone())[0]
+
+    text = (
+        f"👥 <b>Пользователи</b>\n"
+        f"{sep()}\n\n"
+        f"Всего: <b>{fmt_num(total)}</b>\n\n"
+        f"Выберите роль:"
+    )
+    b = InlineKeyboardBuilder()
+    b.button(
+        text=f"📦 Все ({fmt_num(total)})",
+        callback_data=AdminUserFilterCallback(role="all").pack(),
+    )
+    for key, info in ROLES.items():
+        cnt = counts.get(key, 0)
+        b.button(
+            text=f"{info['icon']} {info['name']} ({fmt_num(cnt)})",
+            callback_data=AdminUserFilterCallback(role=key).pack(),
+        )
+    b.button(text="‹ В меню", callback_data="admin_main")
+    b.adjust(1)
+    return text, b.as_markup()
+
+
 async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
-    per_page = 5
     async with get_db() as db:
         if filter_role == "all":
             cur = await db.execute("SELECT COUNT(*) FROM users")
@@ -893,46 +1126,33 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
             return (
                 f"👥 Нет записей (фильтр: {filter_role}).",
                 InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="‹ В меню", callback_data="admin_main")]
+                    [InlineKeyboardButton(
+                        text="‹ К ролям", callback_data="users_filter_menu"
+                    )],
+                    [InlineKeyboardButton(text="‹ В меню", callback_data="admin_main")],
                 ]),
-                0,
             )
 
-        total_pages = max(1, (total + per_page - 1) // per_page)
+        total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
         page = max(0, min(page, total_pages - 1))
-        offset = page * per_page
+        offset = page * PER_PAGE
 
         if filter_role == "all":
             cur = await db.execute(
                 """SELECT user_id, nickname, coins, streak, role, registration
                    FROM users ORDER BY registration DESC LIMIT ? OFFSET ?""",
-                (per_page, offset),
+                (PER_PAGE, offset),
             )
         else:
             cur = await db.execute(
                 """SELECT user_id, nickname, coins, streak, role, registration
                    FROM users WHERE role = ? ORDER BY registration DESC
                    LIMIT ? OFFSET ?""",
-                (filter_role, per_page, offset),
+                (filter_role, PER_PAGE, offset),
             )
         users = await cur.fetchall()
 
         b = InlineKeyboardBuilder()
-
-        # Фильтры — один столбец
-        filters = [
-            ("all", "Все"),
-            ("user", "👤 Пользователи"),
-            ("admin", "🛡 Админы"),
-            ("banned", "🚫 Забаненные"),
-        ]
-        for fr, label in filters:
-            mark = "●" if fr == filter_role else "○"
-            b.button(
-                text=f"{mark} {label}",
-                callback_data=AdminUserPageCallback(page=0, filter_role=fr).pack(),
-            )
-
         lines = []
         for u in users:
             role_info = ROLES.get(u["role"] or "user", ROLES["user"])
@@ -943,14 +1163,17 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
             )
             b.button(
                 text=f"{role_info['icon']} {nick[:24]}",
-                callback_data=AdminUserViewCallback(user_id=u["user_id"]).pack(),
+                callback_data=AdminUserViewCallback(
+                    user_id=u["user_id"], filter_role=filter_role
+                ).pack(),
             )
 
+        role_label = ROLES[filter_role]["name"] if filter_role != "all" else "Все"
         text = (
-            f"👥 <b>Пользователи</b>\n"
+            f"👥 <b>Пользователи</b> · {role_label}\n"
             f"{sep()}\n"
             f"{line('📄', 'Страница', f'<b>{page + 1}</b> / {total_pages}')}\n"
-            f"{line('📦', 'Всего', f'<b>{fmt_num(total)}</b>')}\n\n"
+            f"{line('📦', 'Найдено', f'<b>{fmt_num(total)}</b>')}\n\n"
             f"{bq(chr(10).join(lines))}"
         )
 
@@ -973,62 +1196,44 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
                 ).pack(),
             ))
 
-        b.adjust(1)  # всё в один столбец
+        b.adjust(1)
         b.row(*nav)
+        b.row(InlineKeyboardButton(
+            text="‹ К ролям", callback_data="users_filter_menu"
+        ))
         b.row(InlineKeyboardButton(text="‹ В меню", callback_data="admin_main"))
-        return text, b.as_markup(), page
+        return text, b.as_markup()
 
 
 @router.message(F.text == "👥 Пользователи")
-@router.callback_query(AdminUserPageCallback.filter())
-async def admin_users_page(
-    event: Message | CallbackQuery, callback_data: AdminUserPageCallback = None
-):
+@router.callback_query(F.data == "users_filter_menu")
+async def users_filter_entry(event: Message | CallbackQuery):
     if not await _require_admin(event):
         return
-
-    page = callback_data.page if callback_data else 0
-    filter_role = callback_data.filter_role if callback_data else "all"
-    text, kb, _ = await build_admin_users_page(page, filter_role)
-
+    text, kb = await build_user_filter_menu()
     if isinstance(event, CallbackQuery):
-        try:
-            await event.message.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
-            await event.message.answer(text, reply_markup=kb)
+        await safe_edit(event.message, text=text, reply_markup=kb)
         await event.answer()
     else:
         await event.answer(text, reply_markup=kb)
 
 
-async def _get_profile_photo(bot: Bot, user_id: int):
-    """Пытается получить фото профиля пользователя. Fallback → default avatar."""
-    try:
-        photos = await bot.get_user_profile_photos(user_id, limit=1)
-        if photos.total_count > 0 and photos.photos:
-            # Берём самое большое доступное фото
-            return photos.photos[0][-1].file_id
-    except (TelegramBadRequest, TelegramForbiddenError, Exception) as e:
-        logger.debug("Не удалось получить фото профиля %s: %s", user_id, e)
+@router.callback_query(AdminUserFilterCallback.filter())
+async def users_filter_chosen(call: CallbackQuery, callback_data: AdminUserFilterCallback):
+    if not await _require_admin(call):
+        return
+    text, kb = await build_admin_users_page(0, callback_data.role)
+    await safe_edit(call.message, text=text, reply_markup=kb)
+    await call.answer()
 
-    # Fallback 1: DEFAULT_AVATAR_PATH / file
-    candidates = []
-    if DEFAULT_AVATAR_PATH:
-        candidates.append(Path(DEFAULT_AVATAR_PATH))
-    candidates.append(Path("/app/data/card_photos/default_avatar.jpg"))
 
-    for p in candidates:
-        try:
-            if p.is_file():
-                return FSInputFile(p)
-        except Exception:
-            continue
-
-    # Fallback 2: заранее известный file_id
-    if DEFAULT_AVATAR_FILE_ID:
-        return DEFAULT_AVATAR_FILE_ID
-
-    return None
+@router.callback_query(AdminUserPageCallback.filter())
+async def admin_users_page(call: CallbackQuery, callback_data: AdminUserPageCallback):
+    if not await _require_admin(call):
+        return
+    text, kb = await build_admin_users_page(callback_data.page, callback_data.filter_role)
+    await safe_edit(call.message, text=text, reply_markup=kb)
+    await call.answer()
 
 
 @router.callback_query(AdminUserViewCallback.filter())
@@ -1037,6 +1242,7 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
         return
 
     user_id = callback_data.user_id
+    back_role = callback_data.filter_role
     viewer_is_super = await is_superadmin(call.from_user.id)
 
     async with get_db() as db:
@@ -1059,24 +1265,15 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
         else "—"
     )
 
-    inner = (
-        line("🆔", "ID", f"<code>{user_id}</code>")
-        + "\n"
-        + line("🎭", "Роль", role_display(role))
-        + "\n"
-        + line("📅", "Регистрация", reg)
-        + "\n"
-        + line("🪙", "Монеты", f"<b>{fmt_num(user['coins'])}</b>")
-        + "\n"
-        + line("🃏", "Карточек", f"<b>{fmt_num(user['cards_count'])}</b>")
-        + "\n"
-        + line("🔥", "Стрик", f"<b>{user['streak'] or 0}</b>")
-    )
-    caption = (
-        f"👤 <b>{esc(nick)}</b>\n"
-        f"{sep(20)}\n\n"
-        f"{bq(inner)}"
-    )
+    body = "\n".join([
+        line("🆔", "ID", f"<code>{user_id}</code>"),
+        line("🎭", "Роль", role_display(role)),
+        line("📅", "Регистрация", reg),
+        line("🪙", "Монеты", f"<b>{fmt_num(user['coins'])}</b>"),
+        line("🃏", "Карточек", f"<b>{fmt_num(user['cards_count'])}</b>"),
+        line("🔥", "Стрик", f"<b>{user['streak'] or 0}</b>"),
+    ])
+    caption = f"👤 <b>{esc(nick)}</b>\n{sep(20)}\n\n{bq(body)}"
 
     b = InlineKeyboardBuilder()
     b.button(text="✏️ Ник", callback_data=AdminUserActionCallback(action="nick", user_id=user_id).pack())
@@ -1098,29 +1295,21 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
         if viewer_is_super and user_id != call.from_user.id:
             b.button(text="❌ Снять", callback_data=AdminUserActionCallback(action="unadmin", user_id=user_id).pack())
 
-    b.button(text="‹ К списку", callback_data=AdminUserPageCallback(page=0, filter_role="all").pack())
+    b.button(
+        text="‹ К списку",
+        callback_data=AdminUserPageCallback(page=0, filter_role=back_role).pack(),
+    )
     b.adjust(1)
 
-    photo = await _get_profile_photo(call.bot, user_id)
+    photo = await get_cached_avatar(user_id)
 
-    try:
-        if photo:
-            if call.message.photo:
-                await call.message.edit_media(
-                    media=InputMediaPhoto(media=photo, caption=caption),
-                    reply_markup=b.as_markup(),
-                )
-            else:
-                await call.message.answer_photo(
-                    photo=photo, caption=caption, reply_markup=b.as_markup()
-                )
-        else:
-            try:
-                await call.message.edit_text(caption, reply_markup=b.as_markup())
-            except TelegramBadRequest:
-                await call.message.answer(caption, reply_markup=b.as_markup())
-    except TelegramBadRequest:
-        await call.message.answer(caption, reply_markup=b.as_markup())
+    await safe_edit(
+        call.message,
+        text=caption if not photo else None,
+        caption=caption if photo else None,
+        media=photo,
+        reply_markup=b.as_markup(),
+    )
     await call.answer()
 
 
@@ -1199,10 +1388,10 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
         return
 
     if action == "nick":
-        await call.message.answer(f"✏️ <code>/setnick {target_id} НовыйНик</code>")
+        await call.message.answer(f"✏️ /setnick {target_id} НовыйНик")
         await call.answer()
     elif action == "coins":
-        await call.message.answer(f"🪙 <code>/setcoins {target_id} 1000</code>")
+        await call.message.answer(f"🪙 /setcoins {target_id} 1000")
         await call.answer()
     elif action == "resetcd":
         async with get_db() as db:
@@ -1225,7 +1414,7 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
 async def admin_setnick(message: Message, command: CommandObject):
     args = (command.args or "").strip().split()
     if len(args) < 2:
-        await message.reply("✏️ <code>/setnick USERID НовыйНик</code>")
+        await message.reply("✏️ /setnick USERID НовыйНик")
         return
     try:
         target_id = int(args[0])
@@ -1257,7 +1446,7 @@ async def admin_setnick(message: Message, command: CommandObject):
 async def set_admin_cmd(message: Message, command: CommandObject):
     arg = (command.args or "").strip()
     if not arg:
-        await message.reply("✏️ <code>/setadmin USERID</code>")
+        await message.reply("✏️ /setadmin USERID")
         return
     try:
         target_id = int(arg)
@@ -1275,7 +1464,7 @@ async def set_admin_cmd(message: Message, command: CommandObject):
 async def unset_admin_cmd(message: Message, command: CommandObject):
     arg = (command.args or "").strip()
     if not arg:
-        await message.reply("✏️ <code>/unsetadmin USERID</code>")
+        await message.reply("✏️ /unsetadmin USERID")
         return
     try:
         target_id = int(arg)
@@ -1296,7 +1485,7 @@ async def unset_admin_cmd(message: Message, command: CommandObject):
 async def ban_cmd(message: Message, command: CommandObject):
     arg = (command.args or "").strip()
     if not arg:
-        await message.reply("✏️ <code>/ban USERID</code>")
+        await message.reply("✏️ /ban USERID")
         return
     try:
         target_id = int(arg)
@@ -1321,7 +1510,7 @@ async def ban_cmd(message: Message, command: CommandObject):
 async def unban_cmd(message: Message, command: CommandObject):
     arg = (command.args or "").strip()
     if not arg:
-        await message.reply("✏️ <code>/unban USERID</code>")
+        await message.reply("✏️ /unban USERID")
         return
     try:
         target_id = int(arg)
@@ -1339,7 +1528,7 @@ async def unban_cmd(message: Message, command: CommandObject):
 async def admin_setcoins(message: Message, command: CommandObject):
     args = (command.args or "").strip().split()
     if not args:
-        await message.reply("✏️ <code>/setcoins [USERID] N</code>")
+        await message.reply("✏️ /setcoins [USERID] N")
         return
 
     target_id = message.from_user.id
@@ -1366,7 +1555,7 @@ async def admin_setcoins(message: Message, command: CommandObject):
 
     async with get_db() as db:
         cur = await db.execute(
-            "SELECT coins, nickname FROM users WHERE user_id = ?", (target_id,)
+            "SELECT coins FROM users WHERE user_id = ?", (target_id,)
         )
         row = await cur.fetchone()
         if not row:
@@ -1377,10 +1566,11 @@ async def admin_setcoins(message: Message, command: CommandObject):
             "UPDATE users SET coins = ? WHERE user_id = ?", (coins, target_id)
         )
 
-    await message.reply(
-        f"✅ Монеты <code>{target_id}</code>\n"
-        f"{bq(line('🪙', 'Было', fmt_num(old)) + chr(10) + line('🪙', 'Стало', f'<b>{fmt_num(coins)}</b>'))}"
-    )
+    body = "\n".join([
+        line("🪙", "Было", fmt_num(old)),
+        line("🪙", "Стало", f"<b>{fmt_num(coins)}</b>"),
+    ])
+    await message.reply(f"✅ Монеты <code>{target_id}</code>\n\n{bq(body)}")
 
 
 @router.message(Command("resetcd"), admin_filter)
@@ -1411,7 +1601,7 @@ async def admin_resetcd(message: Message, command: CommandObject):
 async def admin_delcard(message: Message, command: CommandObject):
     arg = (command.args or "").strip()
     if not arg:
-        await message.reply("✏️ <code>/delcard ID</code>")
+        await message.reply("✏️ /delcard ID")
         return
     try:
         card_id = int(arg)
@@ -1421,7 +1611,7 @@ async def admin_delcard(message: Message, command: CommandObject):
 
     async with get_db() as db:
         cur = await db.execute(
-            "SELECT name, rarity FROM cards WHERE id = ?", (card_id,)
+            "SELECT name FROM cards WHERE id = ?", (card_id,)
         )
         card = await cur.fetchone()
         if not card:
@@ -1433,9 +1623,9 @@ async def admin_delcard(message: Message, command: CommandObject):
 
 
 # ===========================================================================
-# STATS
+# STATS (expanded + navigation)
 # ===========================================================================
-async def _build_stats_text(full: bool = True) -> str:
+async def _stats_overview() -> str:
     async with get_db() as db:
         cur = await db.execute("SELECT COUNT(*) FROM users")
         total_users = (await cur.fetchone())[0]
@@ -1454,23 +1644,135 @@ async def _build_stats_text(full: bool = True) -> str:
         cur = await db.execute("SELECT rarity, COUNT(*) FROM cards GROUP BY rarity")
         by_r = dict(await cur.fetchall())
 
-    if not full:
-        return (
-            f"📊 <b>Краткая статистика</b>\n\n"
-            f"{bq(line('👥', 'Пользователи', fmt_num(total_users)) + chr(10) + line('🃏', 'Карточки', fmt_num(total_cards)) + chr(10) + line('🪙', 'Монеты', fmt_num(total_coins)))}\n\n"
-            f"<i>/stats — полная статистика</i>"
-        )
-
     rarity_lines = "\n".join(
         line(v["icon"], v["name"], fmt_num(by_r.get(k, 0)))
         for k, v in RARITIES.items()
     )
     return (
-        f"📊 <b>Статистика</b>\n{sep(20)}\n\n"
+        f"📊 <b>Обзор</b>\n{sep(20)}\n\n"
         f"{bq(line('👥', 'Пользователей', f'<b>{fmt_num(total_users)}</b>') + chr(10) + line('🛡', 'Админов', f'<b>{fmt_num(staff)}</b>') + chr(10) + line('🚫', 'Забанено', f'<b>{fmt_num(banned)}</b>'))}\n\n"
         f"{bq(line('🃏', 'Карточек', f'<b>{fmt_num(total_cards)}</b>') + chr(10) + rarity_lines)}\n\n"
         f"{bq(line('🪙', 'Монет в игре', f'<b>{fmt_num(total_coins)}</b>') + chr(10) + line('📦', 'В коллекциях', f'<b>{fmt_num(owned)}</b>'))}"
     )
+
+
+async def _stats_today() -> str:
+    now = datetime.now()
+    start = int(datetime(now.year, now.month, now.day).timestamp())
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE registration >= ?", (start,)
+        )
+        new_users = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM inventory WHERE claim_time >= ?", (start,)
+        )
+        claims = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM inventory WHERE claim_time >= ?",
+            (start,),
+        )
+        active = (await cur.fetchone())[0]
+
+    return (
+        f"📅 <b>Сегодня</b>\n{sep(20)}\n\n"
+        f"{bq(line('🆕', 'Новых пользователей', f'<b>{fmt_num(new_users)}</b>') + chr(10) + line('🃏', 'Получено карточек', f'<b>{fmt_num(claims)}</b>') + chr(10) + line('👤', 'Активных игроков', f'<b>{fmt_num(active)}</b>'))}"
+    )
+
+
+async def _stats_recent_claims(limit: int = 10) -> str:
+    async with get_db() as db:
+        cur = await db.execute(
+            """SELECT i.user_id, i.claim_time, c.name, c.rarity, u.nickname
+               FROM inventory i
+               JOIN cards c ON c.id = i.card_id
+               LEFT JOIN users u ON u.user_id = i.user_id
+               ORDER BY i.claim_time DESC LIMIT ?""",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+
+    if not rows:
+        return f"🕐 <b>Последние получения</b>\n{sep(20)}\n\nПока пусто."
+
+    lines = []
+    for r in rows:
+        ts = (
+            datetime.fromtimestamp(r["claim_time"]).strftime("%d.%m %H:%M")
+            if r["claim_time"]
+            else "—"
+        )
+        nick = display_name(r["nickname"], r["user_id"])
+        icon = RARITIES.get(r["rarity"], {}).get("icon", "•")
+        lines.append(f"{ts} · {icon} {esc(r['name'])}\n    → {esc(nick)}")
+
+    return (
+        f"🕐 <b>Последние получения</b>\n{sep(20)}\n\n"
+        f"{bq(chr(10).join(lines))}"
+    )
+
+
+async def _stats_recent_users(limit: int = 10) -> str:
+    async with get_db() as db:
+        cur = await db.execute(
+            """SELECT user_id, nickname, registration, role, coins
+               FROM users ORDER BY registration DESC LIMIT ?""",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+
+    if not rows:
+        return f"🆕 <b>Последние регистрации</b>\n{sep(20)}\n\nПока пусто."
+
+    lines = []
+    for r in rows:
+        ts = (
+            datetime.fromtimestamp(r["registration"]).strftime("%d.%m.%Y %H:%M")
+            if r["registration"]
+            else "—"
+        )
+        nick = display_name(r["nickname"], r["user_id"])
+        role_icon = ROLES.get(r["role"] or "user", ROLES["user"])["icon"]
+        lines.append(
+            f"{ts} · {role_icon} {esc(nick)}\n"
+            f"    <code>{r['user_id']}</code> · 🪙 {fmt_num(r['coins'] or 0)}"
+        )
+
+    return (
+        f"🆕 <b>Последние регистрации</b>\n{sep(20)}\n\n"
+        f"{bq(chr(10).join(lines))}"
+    )
+
+
+def _stats_nav(section: str) -> InlineKeyboardMarkup:
+    sections = [
+        ("overview", "📊 Обзор"),
+        ("today", "📅 Сегодня"),
+        ("claims", "🕐 Получения"),
+        ("regs", "🆕 Регистрации"),
+    ]
+    b = InlineKeyboardBuilder()
+    for key, label in sections:
+        mark = "● " if key == section else ""
+        b.button(
+            text=f"{mark}{label}",
+            callback_data=AdminStatsCallback(section=key).pack(),
+        )
+    b.button(text="‹ В меню", callback_data="admin_main")
+    b.adjust(2, 2, 1)
+    return b.as_markup()
+
+
+async def build_stats(section: str = "overview") -> tuple[str, InlineKeyboardMarkup]:
+    if section == "today":
+        text = await _stats_today()
+    elif section == "claims":
+        text = await _stats_recent_claims()
+    elif section == "regs":
+        text = await _stats_recent_users()
+    else:
+        text = await _stats_overview()
+    return text, _stats_nav(section)
 
 
 @router.message(Command("stats"), admin_filter)
@@ -1479,60 +1781,86 @@ async def admin_stats(message: Message):
     if not await _require_admin(message):
         return
     try:
-        text = await _build_stats_text(full=True)
-        await message.reply(text, reply_markup=get_main_reply_kb())
+        text, kb = await build_stats("overview")
+        await message.reply(text, reply_markup=kb)
     except Exception as e:
         logger.error("stats: %s", e)
         await message.reply("❌ Ошибка при получении статистики")
 
 
-@router.callback_query(F.data == "admin_stats_quick")
-async def admin_stats_quick(call: CallbackQuery):
+@router.callback_query(AdminStatsCallback.filter())
+async def admin_stats_section(call: CallbackQuery, callback_data: AdminStatsCallback):
     if not await _require_admin(call):
         return
-    await call.answer()
     try:
-        text = await _build_stats_text(full=False)
-        b = InlineKeyboardBuilder()
-        b.button(text="‹ В меню", callback_data="admin_main")
-        await call.message.answer(text, reply_markup=b.as_markup())
+        text, kb = await build_stats(callback_data.section)
+        await safe_edit(call.message, text=text, reply_markup=kb)
     except Exception as e:
-        logger.error("stats quick: %s", e)
-
-
-@router.message(Command("getusers"), admin_filter)
-async def admin_getusers(message: Message):
-    async with get_db() as db:
-        cur = await db.execute(
-            """SELECT u.user_id, u.nickname, u.coins, u.streak, u.role, u.registration,
-                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards_count
-               FROM users u ORDER BY u.registration DESC"""
-        )
-        users = await cur.fetchall()
-
-    if not users:
-        await message.reply("Пусто")
-        return
-
-    chunk = f"👥 Всего: {fmt_num(len(users))}\n\n"
-    for u in users:
-        role_info = ROLES.get(u["role"] or "user", ROLES["user"])
-        nick = display_name(u["nickname"], u["user_id"])
-        line_s = (
-            f"{role_info['icon']} <b>{esc(nick)}</b> (<code>{u['user_id']}</code>)\n"
-            f"    🪙 {fmt_num(u['coins'] or 0)} | 🃏 {fmt_num(u['cards_count'])} | 🔥 {u['streak'] or 0}\n"
-        )
-        if len(chunk) + len(line_s) > 3500:
-            await message.reply(chunk)
-            chunk = line_s
-        else:
-            chunk += line_s
-    if chunk:
-        await message.reply(chunk)
+        logger.error("stats section: %s", e)
+        await call.answer("Ошибка", show_alert=True)
+    await call.answer()
 
 
 # ===========================================================================
-# LOGS DOWNLOAD
+# TOP PLAYERS
+# ===========================================================================
+@router.message(Command("top"), admin_filter)
+@router.message(F.text == "🏆 Топ")
+async def admin_top(message: Message):
+    if not await _require_admin(message):
+        return
+
+    async with get_db() as db:
+        cur = await db.execute(
+            """SELECT user_id, nickname, coins, streak,
+                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards
+               FROM users u
+               WHERE role != 'banned'
+               ORDER BY coins DESC LIMIT 10"""
+        )
+        by_coins = await cur.fetchall()
+
+        cur = await db.execute(
+            """SELECT user_id, nickname, coins, streak,
+                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards
+               FROM users u
+               WHERE role != 'banned'
+               ORDER BY cards DESC LIMIT 10"""
+        )
+        by_cards = await cur.fetchall()
+
+        cur = await db.execute(
+            """SELECT user_id, nickname, coins, streak,
+                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards
+               FROM users u
+               WHERE role != 'banned'
+               ORDER BY streak DESC LIMIT 10"""
+        )
+        by_streak = await cur.fetchall()
+
+    def _fmt_top(rows, value_key, value_emoji) -> str:
+        if not rows:
+            return "Пусто"
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, r in enumerate(rows):
+            medal = medals[i] if i < 3 else f"{i + 1}."
+            nick = display_name(r["nickname"], r["user_id"])
+            val = r[value_key] or 0
+            lines.append(f"{medal} {esc(nick)} — {value_emoji} {fmt_num(val)}")
+        return "\n".join(lines)
+
+    text = (
+        f"🏆 <b>Топ игроков</b>\n{sep(20)}\n\n"
+        f"<b>🪙 По монетам</b>\n{bq(_fmt_top(by_coins, 'coins', '🪙'))}\n\n"
+        f"<b>🃏 По карточкам</b>\n{bq(_fmt_top(by_cards, 'cards', '🃏'))}\n\n"
+        f"<b>🔥 По стрику</b>\n{bq(_fmt_top(by_streak, 'streak', '🔥'))}"
+    )
+    await message.reply(text, reply_markup=get_main_reply_kb())
+
+
+# ===========================================================================
+# LOGS
 # ===========================================================================
 @router.message(F.text == "📥 Логи")
 @router.message(Command("logs"), admin_filter)
@@ -1556,7 +1884,6 @@ async def admin_logs(message: Message):
             if size == 0:
                 await message.answer(f"ℹ️ {name} пуст")
                 continue
-            # Ограничение Telegram ~50 МБ, но для логов обычно достаточно
             if size > 45 * 1024 * 1024:
                 await message.answer(f"⚠️ {name} слишком большой ({fmt_num(size)} байт)")
                 continue
@@ -1572,6 +1899,75 @@ async def admin_logs(message: Message):
 
     if sent == 0:
         await message.answer("Нет доступных логов для выгрузки.")
+
+
+# ===========================================================================
+# CACHE AVATARS
+# ===========================================================================
+@router.message(Command("cache_avatars"), admin_filter)
+async def cmd_cache_avatars(message: Message, command: CommandObject):
+    if not await _require_admin(message):
+        return
+    if not USER_BOT_TOKEN:
+        await message.reply(
+            "❌ BOT_TOKEN (пользовательского бота) не задан в окружении.\n"
+            "Без него нельзя получить аватарки других пользователей."
+        )
+        return
+
+    offset = 0
+    args = (command.args or "").strip().split()
+    if args:
+        try:
+            offset = max(0, int(args[0]))
+        except ValueError:
+            await message.reply(
+                "✏️ /cache_avatars [offset]\n"
+                "offset — с какого пользователя начинать (по registration DESC)"
+            )
+            return
+
+    status = await message.reply(
+        f"⏳ Кэширую аватарки (offset={offset}, batch={AVATAR_BATCH})…"
+    )
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id FROM users ORDER BY registration DESC LIMIT ? OFFSET ?",
+            (AVATAR_BATCH, offset),
+        )
+        user_ids = [r[0] for r in await cur.fetchall()]
+
+    if not user_ids:
+        await status.edit_text("Нет пользователей в этом диапазоне.")
+        return
+
+    user_bot = Bot(token=USER_BOT_TOKEN)
+    stats = {"new": 0, "updated": 0, "unchanged": 0, "empty": 0, "error": 0}
+
+    try:
+        for i, uid in enumerate(user_ids):
+            result = await cache_user_avatar(user_bot, uid)
+            stats[result] = stats.get(result, 0) + 1
+            if i < len(user_ids) - 1:
+                delay = AVATAR_DELAY[0] + (AVATAR_DELAY[1] - AVATAR_DELAY[0]) * (i % 3) / 2
+                await asyncio.sleep(delay)
+    finally:
+        await user_bot.session.close()
+
+    body = "\n".join([
+        line("🆕", "Новые", stats["new"]),
+        line("🔄", "Обновлены", stats["updated"]),
+        line("✓", "Без изменений", stats["unchanged"]),
+        line("∅", "Нет аватарки", stats["empty"]),
+        line("✗", "Ошибки", stats["error"]),
+    ])
+    next_offset = offset + len(user_ids)
+    await status.edit_text(
+        f"✅ Кэш аватарок\n\n{bq(body)}\n\n"
+        f"Обработано: {len(user_ids)} (offset {offset}→{next_offset})\n"
+        f"Следующая пачка: /cache_avatars {next_offset}"
+    )
 
 
 # ===========================================================================
@@ -1614,87 +2010,162 @@ async def test_get_file_id(message: Message):
     await message.reply(f"🆔 <code>{esc(file_id)}</code>")
 
 
+@router.message(Command("getusers"), admin_filter)
+async def admin_getusers(message: Message):
+    async with get_db() as db:
+        cur = await db.execute(
+            """SELECT u.user_id, u.nickname, u.coins, u.streak, u.role,
+                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards_count
+               FROM users u ORDER BY u.registration DESC"""
+        )
+        users = await cur.fetchall()
+
+    if not users:
+        await message.reply("Пусто")
+        return
+
+    chunk = f"👥 Всего: {fmt_num(len(users))}\n\n"
+    for u in users:
+        role_info = ROLES.get(u["role"] or "user", ROLES["user"])
+        nick = display_name(u["nickname"], u["user_id"])
+        line_s = (
+            f"{role_info['icon']} <b>{esc(nick)}</b> (<code>{u['user_id']}</code>)\n"
+            f"    🪙 {fmt_num(u['coins'] or 0)} | 🃏 {fmt_num(u['cards_count'])} | 🔥 {u['streak'] or 0}\n"
+        )
+        if len(chunk) + len(line_s) > 3500:
+            await message.reply(chunk)
+            chunk = line_s
+        else:
+            chunk += line_s
+    if chunk:
+        await message.reply(chunk)
+
+
 # ===========================================================================
-# HELP
+# HELP (rewritten)
 # ===========================================================================
-ADMIN_HELP_PAGES = [
+HELP_PAGES = [
     {
-        "title": "🛠 Роли",
+        "title": "Роли и доступ",
         "body": (
-            f"{line('👑', 'Superadmin', 'полный доступ, управление ролями')}\n"
-            f"{line('🛡', 'Admin', 'карточки, пользователи, балансы')}\n"
-            f"{line('🚫', 'Banned', 'блок в user-боте')}\n\n"
-            f"Первый пользователь в user-боте автоматически становится superadmin."
+            "В системе четыре роли:\n\n"
+            f"{line('👑', 'Superadmin', 'полный доступ: назначение/снятие ролей, бан админов')}\n"
+            f"{line('🛡', 'Admin', 'карточки, пользователи, балансы, статистика')}\n"
+            f"{line('👤', 'User', 'обычный игрок (в админ-боте не имеет доступа)')}\n"
+            f"{line('🚫', 'Banned', 'заблокирован в user-боте')}\n\n"
+            "Первый пользователь, зашедший в user-бота, автоматически получает роль superadmin.\n"
+            "Назначать и снимать админов может только superadmin."
         ),
     },
     {
-        "title": "🛠 Команды",
+        "title": "Карточки",
         "body": (
-            f"<code>/setadmin USERID</code>\n"
-            f"<code>/unsetadmin USERID</code>\n"
-            f"<code>/ban USERID</code>\n"
-            f"<code>/unban USERID</code>\n"
-            f"<code>/setcoins [USERID] N</code>\n"
-            f"<code>/setnick USERID Ник</code>\n"
-            f"<code>/resetcd [USERID]</code>\n"
-            f"<code>/delcard ID</code>\n"
-            f"<code>/addcard Имя редкость</code> + фото\n"
-            f"<code>/stats</code> · <code>/getusers</code>\n"
-            f"<code>/logs</code>\n"
-            f"<code>/migrate_photos</code>\n"
-            f"<code>/sync_default_avatar</code>"
+            "Добавление:\n"
+            "• Кнопка «➕ Добавить» — пошагово (фото → название → редкость)\n"
+            "• /addcard Название редкость + прикреплённое фото\n\n"
+            "Список:\n"
+            "• «📜 Карточки» → выбор редкости → список с пагинацией\n"
+            "• В карточке: смена названия, редкости, фото, удаление\n\n"
+            "Дополнительно:\n"
+            "• /delcard ID — удалить по ID\n"
+            "• /migrate_photos — скачать все фото на диск\n"
+            "• /sync_default_avatar — обновить дефолтный аватар"
+        ),
+    },
+    {
+        "title": "Пользователи",
+        "body": (
+            "Список:\n"
+            "• «👥 Пользователи» → выбор роли → список с пагинацией\n"
+            "• В профиле: ник, монеты, сброс кулдауна, бан/разбан, роли\n\n"
+            "Команды:\n"
+            "• /setnick USERID Ник\n"
+            "• /setcoins [USERID] N\n"
+            "• /resetcd [USERID]\n"
+            "• /ban USERID · /unban USERID\n"
+            "• /setadmin USERID · /unsetadmin USERID (только superadmin)\n"
+            "• /getusers — полный список текстом"
+        ),
+    },
+    {
+        "title": "Статистика и топ",
+        "body": (
+            "«📊 Статистика» или /stats открывает разделы:\n"
+            "• Обзор — общие цифры и распределение редкостей\n"
+            "• Сегодня — новые пользователи и получения за сутки\n"
+            "• Получения — последние полученные карточки\n"
+            "• Регистрации — последние зарегистрированные\n\n"
+            "«🏆 Топ» или /top — топ-10 по монетам, карточкам и стрику."
+        ),
+    },
+    {
+        "title": "Аватарки и логи",
+        "body": (
+            "Аватарки кэшируются на диск, потому что file_id одного бота "
+            "нельзя использовать в другом.\n\n"
+            "• /cache_avatars [offset] — скачать пачку (25 шт.) через BOT_TOKEN "
+            "пользовательского бота с задержкой 3–5 сек.\n"
+            "  Повторный запуск с большим offset продолжит с нужного места.\n"
+            "  Если аватарка не изменилась — пропускается.\n\n"
+            "Логи:\n"
+            "• «📥 Логи» или /logs — выгрузка admin_bot.log и bot.log"
+        ),
+    },
+    {
+        "title": "Прочие команды",
+        "body": (
+            "/start — сброс состояния и главное меню\n"
+            "/help — эта справка\n"
+            "/cancel или кнопка «❌ Отмена» — прервать текущую операцию FSM\n"
+            "/getfileid + фото — получить file_id\n\n"
+            "Все команды без параметров кликабельны сами по себе. "
+            "Параметры указываются только когда они обязательны."
         ),
     },
 ]
 
 
-def get_admin_help_keyboard(page: int) -> InlineKeyboardMarkup:
-    total = len(ADMIN_HELP_PAGES)
+def get_help_keyboard(page: int) -> InlineKeyboardMarkup:
+    total = len(HELP_PAGES)
     page = max(0, min(page, total - 1))
     b = InlineKeyboardBuilder()
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(
-            text="‹", callback_data=AdminHelpCallback(page=page - 1).pack()
-        ))
-    nav.append(InlineKeyboardButton(
-        text=f"{page + 1} / {total}", callback_data="ignore"
-    ))
-    if page < total - 1:
-        nav.append(InlineKeyboardButton(
-            text="›", callback_data=AdminHelpCallback(page=page + 1).pack()
-        ))
-    b.row(*nav)
+    for i, p in enumerate(HELP_PAGES):
+        mark = "● " if i == page else ""
+        b.button(
+            text=f"{mark}{p['title'][:18]}",
+            callback_data=AdminHelpCallback(page=i).pack(),
+        )
+    b.adjust(2)
     b.row(InlineKeyboardButton(text="‹ В меню", callback_data="admin_main"))
     return b.as_markup()
 
 
-def build_admin_help_text(page: int) -> str:
-    page = max(0, min(page, len(ADMIN_HELP_PAGES) - 1))
-    p = ADMIN_HELP_PAGES[page]
-    return f"<b>{p['title']}</b>\n{sep(20)}\n\n{p['body']}"
+def build_help_text(page: int) -> str:
+    page = max(0, min(page, len(HELP_PAGES) - 1))
+    p = HELP_PAGES[page]
+    return (
+        f"🛠 <b>{p['title']}</b>\n"
+        f"{sep(20)}\n\n"
+        f"{p['body']}\n\n"
+        f"<i>Раздел {page + 1} из {len(HELP_PAGES)}</i>"
+    )
 
 
-@router.message(Command("adminhelp"), admin_filter)
+@router.message(Command("help"), admin_filter)
 @router.message(F.text == "🛠 Справка")
 async def admin_help(message: Message):
     if not await _require_admin(message):
         return
-    await message.reply(
-        build_admin_help_text(0), reply_markup=get_admin_help_keyboard(0)
-    )
+    await message.reply(build_help_text(0), reply_markup=get_help_keyboard(0))
 
 
 @router.callback_query(AdminHelpCallback.filter())
 async def admin_help_page(callback: CallbackQuery, callback_data: AdminHelpCallback):
     if not await _require_admin(callback):
         return
-    text = build_admin_help_text(callback_data.page)
-    kb = get_admin_help_keyboard(callback_data.page)
-    try:
-        await callback.message.edit_text(text, reply_markup=kb)
-    except TelegramBadRequest:
-        await callback.message.answer(text, reply_markup=kb)
+    text = build_help_text(callback_data.page)
+    kb = get_help_keyboard(callback_data.page)
+    await safe_edit(callback.message, text=text, reply_markup=kb)
     await callback.answer()
 
 
@@ -1707,11 +2178,12 @@ async def ignore_cb(callback: CallbackQuery):
 # STARTUP
 # ===========================================================================
 ADMIN_COMMANDS = [
-    BotCommand(command="start", description="⚙️ Панель"),
-    BotCommand(command="admin", description="⚙️ Панель"),
-    BotCommand(command="adminhelp", description="🛠 Справка"),
+    BotCommand(command="start", description="⚙️ Панель / сброс"),
+    BotCommand(command="help", description="🛠 Справка"),
     BotCommand(command="stats", description="📊 Статистика"),
+    BotCommand(command="top", description="🏆 Топ игроков"),
     BotCommand(command="logs", description="📥 Выгрузить логи"),
+    BotCommand(command="cache_avatars", description="🖼 Кэш аватарок"),
     BotCommand(command="addcard", description="➕ Карточка + фото"),
     BotCommand(command="delcard", description="🗑 Удалить карточку"),
     BotCommand(command="setcoins", description="🪙 Монеты"),
@@ -1728,7 +2200,6 @@ ADMIN_COMMANDS = [
 
 
 async def run_admin_bot(token: Optional[str] = None) -> None:
-    """Запуск polling админ-бота. Можно вызывать из bot.py в том же процессе."""
     tok = (token or ADMIN_BOT_TOKEN or "").strip()
     if not tok:
         logger.warning("ADMIN_BOT_TOKEN не задан — админ-бот не запущен")
@@ -1739,6 +2210,7 @@ async def run_admin_bot(token: Optional[str] = None) -> None:
         Path(ADMIN_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+    AVATARS_DIR.mkdir(parents=True, exist_ok=True)
 
     await init_db_minimal()
     try:
@@ -1757,7 +2229,10 @@ async def run_admin_bot(token: Optional[str] = None) -> None:
     dp.include_router(router)
 
     await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeDefault())
-    logger.info("🛡 Админ-бот запущен (DB=%s, log=%s)", DB_NAME, ADMIN_LOG_PATH)
+    logger.info(
+        "🛡 Админ-бот запущен (DB=%s, log=%s, avatars=%s)",
+        DB_NAME, ADMIN_LOG_PATH, AVATARS_DIR,
+    )
     await dp.start_polling(bot)
 
 
