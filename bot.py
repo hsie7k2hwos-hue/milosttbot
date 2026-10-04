@@ -1014,7 +1014,7 @@ async def cmd_start(message: Message) -> None:
 
         try:
             await message.answer_sticker(
-                sticker="CAACAgIAAxkBAALL7WqWuuWDYuQk4iqY7tNu_-7zLZqyAAJengACoj5pSQH9iX-5QhicPQQ"
+                sticker="CAACAgIAAxkBAAEHZldqwbCMC03fYpuFpEWDPhN5oJrurgACS54AAswowUsJDiXc6vblaz0E"
             )
         except Exception:
             pass
