@@ -1405,10 +1405,11 @@ async def dice_handler(message: Message) -> None:
             delta_str = "±0"
             title = "· Ничья"
 
+        coins_word = plural(new_balance, "монета", "монеты", "монет")
         result = (
             f"🎲 <b>{title}</b>\n\n"
             f"{bq(line('🎲', 'Выпало', f'<b>{dice_value}</b>') + chr(10) + line('🪙', 'Итог', f'<b>{delta_str}</b>'))}\n\n"
-            f"{line('🪙', 'У вас', f'<b>{fmt_num(new_balance)}</b> {plural(new_balance, 'монета', 'монеты', 'монет')}')}"
+            f"{line('🪙', 'У вас', f'<b>{fmt_num(new_balance)}</b> {coins_word}')}"
         )
         try:
             await spin_msg.reply(result)
