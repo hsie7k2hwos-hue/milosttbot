@@ -31,7 +31,6 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeDefault,
     CallbackQuery,
-    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
@@ -88,14 +87,12 @@ DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 
 COOLDOWN_SECONDS = 3 * 3600
-INSTANT_COST = 150
-INSTANT_MIN_COST = 5
 NICKNAME_COST = 300
 
 GROUP_AUTODELETE_SECONDS = 30
 STREAK_EXPIRE_SECONDS = 24 * 3600
 
-DICE_COOLDOWN_SECONDS = 5 * 60
+DICE_COOLDOWN_SECONDS = 10 * 60
 DICE_MIN_BALANCE = 10
 DICE_SPIN_DELAY = 3
 DICE_VALUE_MAP = {1: -10, 2: -5, 3: 0, 4: 5, 5: 10, 6: 15}
@@ -127,10 +124,10 @@ URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
 
 DICE_CMD_RE = re.compile(r"^мряу\s+кубик\s*$", re.IGNORECASE | re.UNICODE)
 PROFILE_CMD_RE = re.compile(r"^мряу\s+профиль\s*$", re.IGNORECASE | re.UNICODE)
-COLLECTION_CMD_RE = re.compile(r"^мряу\s+(коллекция|карточки)\s*$", re.IGNORECASE | re.UNICODE)
 TOP_CMD_RE = re.compile(r"^мряу\s+топ\s*$", re.IGNORECASE | re.UNICODE)
 HELP_CMD_RE = re.compile(r"^мряу\s+помощь\s*$", re.IGNORECASE | re.UNICODE)
 DUEL_CMD_RE = re.compile(r"^мряу\s+дуэль\s+(\d+)\s*$", re.IGNORECASE | re.UNICODE)
+NICK_CMD_RE = re.compile(r"^мряу\s+ник\s+(.+)$", re.IGNORECASE | re.UNICODE)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -194,16 +191,6 @@ def bq(text: str) -> str:
     return f"<blockquote>{text}</blockquote>"
 
 
-def instant_cost(remaining_seconds: int) -> int:
-    if remaining_seconds <= 0:
-        return INSTANT_MIN_COST
-    if remaining_seconds >= COOLDOWN_SECONDS:
-        return INSTANT_COST
-    ratio = remaining_seconds / COOLDOWN_SECONDS
-    cost = INSTANT_MIN_COST + (INSTANT_COST - INSTANT_MIN_COST) * ratio
-    return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
-
-
 def dice_delta(value: int) -> int:
     return DICE_VALUE_MAP.get(value, 0)
 
@@ -244,6 +231,17 @@ def _resolve_card_photo(card: dict) -> Any:
     return card.get("photo_id") or None
 
 
+def fmt_remaining(seconds: int) -> str:
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h} ч {m} мин"
+    if m > 0:
+        return f"{m} мин" if s == 0 else f"{m} мин {s} сек"
+    return f"{s} сек"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # CALLBACK DATA
 # ═══════════════════════════════════════════════════════════════════════════
@@ -258,11 +256,6 @@ class MainMenuCallback(CallbackData, prefix="coll_main"):
 
 
 class BackToProfileCallback(CallbackData, prefix="back_to_profile"):
-    user_id: int = 0
-
-
-class NicknameCallback(CallbackData, prefix="nickname"):
-    action: str
     user_id: int = 0
 
 
@@ -284,7 +277,7 @@ class OkDeleteCallback(CallbackData, prefix="ok_del"):
 
 
 class HelpCallback(CallbackData, prefix="help"):
-    page: int = 0
+    tab: str = "cards"
 
 
 class TopRefreshCallback(CallbackData, prefix="top_refresh"):
@@ -492,9 +485,11 @@ def get_app_kb(is_short: bool = False) -> Optional[InlineKeyboardMarkup]:
 
 def get_profile_kb(owner_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="🃏 Коллекция", callback_data=MainMenuCallback(user_id=owner_id).pack())
-    b.button(text="✏️ Никнейм", callback_data=NicknameCallback(action="change").pack())
-    b.adjust(2)
+    b.button(
+        text="🃏 Мои карточки",
+        callback_data=MainMenuCallback(user_id=owner_id).pack(),
+    )
+    b.adjust(1)
     return b.as_markup()
 
 
@@ -515,44 +510,16 @@ def get_ok_kb() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def get_card_action_keyboard(
-    user_id: int,
-    balance: int = 0,
-    remaining: int = COOLDOWN_SECONDS,
-) -> InlineKeyboardMarkup:
-    cost = instant_cost(remaining)
-    b = InlineKeyboardBuilder()
-    if balance >= cost:
-        b.button(
-            text=f"⚡ Ускорить · {fmt_num(cost)} 🪙",
-            callback_data=CardActionCallback(action="instant", user_id=user_id).pack(),
-        )
-    b.button(text="Понятно", callback_data=OkDeleteCallback().pack())
-    b.adjust(1)
-    return b.as_markup()
-
-
-def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMarkup:
-    cost = instant_cost(COOLDOWN_SECONDS)
+def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    has_instant = balance >= cost
     app_url = get_app_url()
 
-    if has_instant:
-        builder.button(
-            text=f"⚡ Ещё · {fmt_num(cost)} 🪙",
-            callback_data=CardActionCallback(action="another", user_id=user_id).pack(),
-        )
     builder.button(
-        text="🃏 Коллекция",
+        text="🃏 Мои карточки",
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
     )
     if app_url:
         builder.button(text="📱 Мини-приложение", url=app_url)
-
-    if has_instant and app_url:
-        builder.adjust(1, 2)
-    elif app_url:
         builder.adjust(2)
     else:
         builder.adjust(1)
@@ -600,13 +567,14 @@ async def render_profile(
     bot: Bot,
     user_id: int,
     fallback_name: Optional[str] = None,
+    is_own: bool = True,
 ):
     await burn_expired_streak(user_id)
 
     async with get_db() as db:
         cur = await db.execute(
             """
-            SELECT u.nickname, u.coins, u.registration, u.streak, u.streak_bonus, u.role,
+            SELECT u.nickname, u.coins, u.streak,
                    (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards_count
             FROM users u
             WHERE u.user_id = ?
@@ -621,20 +589,24 @@ async def render_profile(
         return None, "❌ Игрок не найден.", None
 
     nickname = display_name(row["nickname"], user_id, fallback_name)
-    reg_date = datetime.fromtimestamp(row["registration"] or time.time()).strftime("%d.%m.%Y")
-    role = row["role"] or "user"
+    cards_count = row["cards_count"] or 0
+    coins = row["coins"] or 0
+    streak = row["streak"] or 0
 
-    cards_str = f"<b>{fmt_num(row['cards_count'])}</b> / {fmt_num(total_cards)}"
-    coins_str = f"<b>{fmt_num(row['coins'])}</b>"
-    streak_str = f"<b>{fmt_days(row['streak'])}</b>"
+    if is_own:
+        cards_line = f"🃏 Вы собрали <b>{fmt_num(cards_count)}</b> из {fmt_num(total_cards)} карточек"
+        coins_line = f"🪙 У вас <b>{fmt_num(coins)}</b> {plural(coins, 'монета', 'монеты', 'монет')}"
+        streak_line = f"🔥 Стрик · <b>{fmt_days(streak)}</b>"
+    else:
+        cards_line = f"🃏 Собрано <b>{fmt_num(cards_count)}</b> из {fmt_num(total_cards)} карточек"
+        coins_line = f"🪙 Монеты · <b>{fmt_num(coins)}</b>"
+        streak_line = f"🔥 Стрик · <b>{fmt_days(streak)}</b>"
 
     caption = (
-        f"👤 <b>{esc(nickname)}</b>\n"
-        f"{line('🆔', 'ID', f'<code>{user_id}</code>')}\n\n"
-        f"{bq(line('🎭', 'Роль', role_display(role)) + chr(10) + line('📅', 'С нами', reg_date))}\n\n"
-        f"{line('🃏', 'Коллекция', cards_str)}\n"
-        f"{line('🪙', 'Баланс', coins_str)}\n"
-        f"{line('🔥', 'Стрик', streak_str)}"
+        f"👤 <b>{esc(nickname)}</b>\n\n"
+        f"{cards_line}\n"
+        f"{coins_line}\n"
+        f"{streak_line}"
     )
     return await get_user_photo(bot, user_id), caption, get_profile_kb(user_id)
 
@@ -648,9 +620,8 @@ async def render_collection(
     nickname = await get_user_display(user_id, fallback_name)
     photo = await get_user_photo(bot, user_id)
     caption = (
-        f"🃏 <b>Коллекция</b>\n\n"
-        f"{line('👤', 'Игрок', esc(nickname))}\n"
-        f"{bq(line('📦', 'Собрано', f'<b>{fmt_num(total)}</b> из {fmt_num(total_in_game)}'))}"
+        f"🃏 <b>Карточки {esc(nickname)}</b>\n\n"
+        f"{bq(f'Собрано <b>{fmt_num(total)}</b> из {fmt_num(total_in_game)}')}"
     )
     return photo, caption, keyboard, total
 
@@ -801,7 +772,7 @@ async def issue_card(
         return None, "error"
 
 
-def _card_caption(name: str, card: dict) -> str:
+def _card_caption(card: dict) -> str:
     r = RARITIES[card["rarity"]]
     name_str = f"<b>{esc(card['name'])}</b>"
     reward_str = f"+<b>{fmt_num(card['coins_earned'])}</b> → {fmt_num(card['balance'])}"
@@ -904,7 +875,7 @@ def _streak_message_text(streak: int, bonus: int, new_balance: int) -> str:
     if streak == 1:
         return (
             "🔥 <b>Стрик начат</b>\n\n"
-            f"{bq('Заходите каждый день — серия будет расти.')}"
+            f"{bq('Получайте карточку каждый день — серия будет расти, а вместе с ней и бонус.')}"
         )
     text = (
         f"🔥 <b>Стрик</b>\n\n"
@@ -1017,14 +988,13 @@ async def check_not_banned_cb(callback: CallbackQuery) -> bool:
 USER_COMMANDS = [
     BotCommand(command="start", description="👋 Начать"),
     BotCommand(command="meow", description="🃏 Получить карточку"),
-    BotCommand(command="miniapp", description="📱 Мини-приложение"),
+    BotCommand(command="profile", description="👤 Профиль"),
     BotCommand(command="top", description="🏆 Топ игроков"),
     BotCommand(command="dice", description="🎲 Кубик"),
     BotCommand(command="duel", description="⚔️ Дуэль (в группах)"),
+    BotCommand(command="nick", description="✏️ Сменить ник"),
     BotCommand(command="help", description="❓ Справка"),
-    BotCommand(command="profile", description="👤 Профиль"),
-    BotCommand(command="collection", description="🃏 Коллекция"),
-    BotCommand(command="nickname", description="✏️ Сменить ник"),
+    BotCommand(command="miniapp", description="📱 Мини-приложение"),
 ]
 
 
@@ -1051,10 +1021,9 @@ async def cmd_start(message: Message) -> None:
 
         welcome = (
             "👋 <b>Добро пожаловать</b>\n\n"
-            f"{bq('Собери коллекцию карточек, копи монеты и соревнуйся в топе.')}\n\n"
+            f"{bq('Собирайте коллекцию карточек, копите монеты и соревнуйтесь в топе.')}\n\n"
             f"{line('🃏', 'Карточка', '«мряу» или кнопка ниже')}\n"
-            f"{line('⏱', 'Бесплатно', 'раз в 3 часа')}\n"
-            f"{line('⚡', 'Ускорение', 'за монеты')}\n"
+            f"{line('⏱', 'Кулдаун', 'раз в 3 часа')}\n"
             f"{line('⚔️', 'Дуэль', '/duel ставка — ответом в группе')}"
         )
         await message.reply(welcome, reply_markup=get_main_km())
@@ -1065,86 +1034,119 @@ async def cmd_start(message: Message) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 # HELP
 # ═══════════════════════════════════════════════════════════════════════════
-HELP_PAGES = [
-    {
-        "title": "📖 Карточки и профиль",
+HELP_TABS = {
+    "cards": {
+        "label": "🃏 Карточки",
+        "title": "🃏 Карточки",
         "body": (
-            f"<b>🃏 Получить карточку</b>\n"
-            f"{line('•', 'Как', '«мряу» · /meow · кнопка')}\n"
-            f"{line('⏱', 'Бесплатно', 'раз в 3 часа')}\n"
-            f"{line('⚡', 'Ускорение', f'от {INSTANT_MIN_COST} до {INSTANT_COST} 🪙')}\n\n"
-            f"<b>👤 Профиль</b>\n"
-            f"{line('•', 'Как', '«мряу профиль» · /profile')}\n\n"
-            f"<b>🃏 Коллекция</b>\n"
-            f"{line('•', 'Как', '«мряу коллекция» · /collection')}"
-        ),
-    },
-    {
-        "title": "📖 Стрик и редкости",
-        "body": (
-            f"<b>🔥 Стрик</b>\n"
-            f"{line('•', 'Правило', 'карточка каждый день')}\n"
-            f"{line('⏱', 'Сгорание', 'если 24 ч без карточки')}\n"
-            f"{line('🪙', 'Бонус', 'монеты за длину серии')}\n\n"
-            f"<b>🃏 Редкости</b>\n"
+            "Карточки — основа игры. Каждая имеет название, редкость и награду в монетах.\n\n"
+            "<b>Как получить</b>\n"
+            "Напишите «мряу», «милость» или /meow — либо нажмите кнопку "
+            "«Получить карточку». Карточка выдаётся бесплатно раз в 3 часа.\n\n"
+            "<b>Редкости и награды</b>\n"
             + "\n".join(
-                line(v["icon"], v["name"], f"{v['reward']} 🪙")
+                f"{v['icon']} <b>{v['name']}</b> — {v['reward']} 🪙"
                 for v in RARITIES.values()
             )
+            + "\n\n"
+            "Чем реже карточка, тем больше монет вы получите. Дубликатов нет: "
+            "каждая карточка выдаётся только один раз.\n\n"
+            "<b>Мои карточки</b>\n"
+            "Откройте профиль и нажмите «Мои карточки», чтобы посмотреть "
+            "собранную коллекцию по редкостям."
         ),
     },
-    {
-        "title": "📖 Кубик и дуэль",
+    "coins": {
+        "label": "🪙 Монеты",
+        "title": "🪙 Монеты",
         "body": (
-            f"<b>🎲 Кубик</b>\n"
-            f"{line('•', 'Как', '/dice · «мряу кубик»')}\n"
-            f"{line('⏱', 'Кулдаун', '5 минут')}\n"
-            f"{line('🪙', 'Минимум', f'{DICE_MIN_BALANCE} 🪙')}\n"
-            f"{line('📊', '1–6', '−10 · −5 · 0 · +5 · +10 · +15')}\n\n"
-            f"<b>⚔️ Дуэль</b>\n"
-            f"{line('•', 'Где', 'только в группах')}\n"
-            f"{line('•', 'Как', '/duel ставка — ответом на сообщение')}\n"
-            f"{line('⏱', 'Заявка', '10 минут')}\n"
-            f"{line('🏆', 'Банк', '100% победителю')}"
+            "Монеты — внутриигровая валюта. Они начисляются за карточки, "
+            "стрик и мини-игры, а тратятся на смену ника и дуэли.\n\n"
+            "<b>Откуда берутся</b>\n"
+            "• Награда за карточку (от 10 до 100 🪙 в зависимости от редкости)\n"
+            "• Ежедневный бонус за стрик\n"
+            "• Выигрыш в кубике или дуэли\n\n"
+            "<b>На что тратятся</b>\n"
+            f"• Смена никнейма — {NICKNAME_COST} 🪙\n"
+            "• Ставка в дуэли\n\n"
+            "Баланс всегда виден в профиле."
         ),
     },
-    {
-        "title": "📖 Ник и топ",
+    "streak": {
+        "label": "🔥 Стрик",
+        "title": "🔥 Стрик",
         "body": (
-            f"<b>✏️ Никнейм</b>\n"
-            f"{line('•', 'Смена', f'/nickname НовыйНик · {NICKNAME_COST} 🪙')}\n"
-            f"{line('•', 'Сброс', '/nickname reset · бесплатно')}\n"
-            f"{line('•', 'Правила', '2–32 символа, без ссылок')}\n\n"
-            f"<b>🏆 Топ</b>\n"
-            f"{line('•', 'Как', '«мряу топ» · /top')}\n"
-            f"{line('•', 'Режимы', 'монеты · карточки · стрик')}"
+            "Стрик — серия дней подряд, в которые вы получили хотя бы одну карточку.\n\n"
+            "<b>Как работает</b>\n"
+            "Получите карточку сегодня — стрик увеличится на 1. "
+            "Если пропустить больше 24 часов без карточки, серия сгорит и обнулится.\n\n"
+            "<b>Бонусы за длину</b>\n"
+            "• 2+ дня — +15 🪙\n"
+            "• 7+ дней — +20 🪙\n"
+            "• 14+ дней — +25 🪙\n"
+            "• 30+ дней — +30 🪙\n"
+            "• дальше — +35 🪙\n\n"
+            "Бонус начисляется один раз в день при обновлении стрика. "
+            "Чем дольше серия, тем выгоднее заходить каждый день."
         ),
     },
-]
+    "games": {
+        "label": "🎲 Игры",
+        "title": "🎲 Игры",
+        "body": (
+            "<b>Кубик</b>\n"
+            "Команда /dice или «мряу кубик». Нужно минимум "
+            f"{DICE_MIN_BALANCE} 🪙 на балансе. Кулдаун — 10 минут.\n\n"
+            "Выпадает число от 1 до 6:\n"
+            "1 → −10 🪙 · 2 → −5 🪙 · 3 → ±0 · 4 → +5 🪙 · 5 → +10 🪙 · 6 → +15 🪙\n\n"
+            "<b>Дуэль</b>\n"
+            "Только в групповых чатах. Ответьте на сообщение игрока командой "
+            f"/duel &lt;ставка&gt; (минимум {DUEL_MIN_STAKE} 🪙).\n\n"
+            "Оба участника должны иметь достаточно монет. Заявка действует 10 минут. "
+            "После принятия каждый бросает кубик — у кого больше, тот забирает банк "
+            "(ставка × 2). При ничьей ставки возвращаются."
+        ),
+    },
+    "profile": {
+        "label": "👤 Профиль",
+        "title": "👤 Профиль",
+        "body": (
+            "Профиль показывает ваши карточки, монеты и стрик.\n\n"
+            "<b>Как открыть</b>\n"
+            "Кнопка «Профиль», команда /profile или «мряу профиль». "
+            "В группе можно ответить на сообщение игрока — откроется его профиль.\n\n"
+            "<b>Мои карточки</b>\n"
+            "Кнопка в профиле открывает коллекцию, сгруппированную по редкостям.\n\n"
+            "<b>Никнейм</b>\n"
+            f"Смена: /nick НовыйНик или «мряу ник НовыйНик» — стоит {NICKNAME_COST} 🪙.\n"
+            "Сброс: /nick reset — бесплатно, вернётся имя из Telegram.\n"
+            "Правила: 2–32 символа, без ссылок и @.\n\n"
+            "<b>Топ</b>\n"
+            "Команда /top или «мряу топ». Три режима: по монетам, по карточкам и по стрику."
+        ),
+    },
+}
+
+HELP_TAB_ORDER = ["cards", "coins", "streak", "games", "profile"]
 
 
-def get_help_keyboard(page: int) -> InlineKeyboardMarkup:
-    total = len(HELP_PAGES)
-    page = max(0, min(page, total - 1))
+def get_help_keyboard(active: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(text="‹", callback_data=HelpCallback(page=page - 1).pack())
+    for key in HELP_TAB_ORDER:
+        label = HELP_TABS[key]["label"]
+        mark = "✓ " if key == active else ""
+        b.button(
+            text=f"{mark}{label}",
+            callback_data=HelpCallback(tab=key).pack(),
         )
-    nav.append(InlineKeyboardButton(text=f"{page + 1} / {total}", callback_data="ignore"))
-    if page < total - 1:
-        nav.append(
-            InlineKeyboardButton(text="›", callback_data=HelpCallback(page=page + 1).pack())
-        )
-    b.row(*nav)
+    b.adjust(2, 2, 1)
     return b.as_markup()
 
 
-def build_help_text(page: int) -> str:
-    total = len(HELP_PAGES)
-    page = max(0, min(page, total - 1))
-    p = HELP_PAGES[page]
+def build_help_text(tab: str) -> str:
+    if tab not in HELP_TABS:
+        tab = "cards"
+    p = HELP_TABS[tab]
     return f"<b>{p['title']}</b>\n{'─' * 20}\n\n{p['body']}"
 
 
@@ -1153,19 +1155,23 @@ def build_help_text(page: int) -> str:
 async def cmd_help(message: Message) -> None:
     if not await check_not_banned(message):
         return
-    await message.reply(build_help_text(0), reply_markup=get_help_keyboard(0))
+    await message.reply(build_help_text("cards"), reply_markup=get_help_keyboard("cards"))
 
 
 @router.callback_query(HelpCallback.filter())
-async def help_page_callback(callback: CallbackQuery, callback_data: HelpCallback) -> None:
+async def help_tab_callback(callback: CallbackQuery, callback_data: HelpCallback) -> None:
     if not await check_not_banned_cb(callback):
         return
     try:
-        text = build_help_text(callback_data.page)
-        kb = get_help_keyboard(callback_data.page)
+        tab = callback_data.tab if callback_data.tab in HELP_TABS else "cards"
+        text = build_help_text(tab)
+        kb = get_help_keyboard(tab)
         try:
             await callback.message.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                await callback.answer()
+                return
             await callback.message.answer(text, reply_markup=kb)
         await callback.answer()
     except Exception as e:
@@ -1219,38 +1225,25 @@ async def get_card_handler(message: Message) -> None:
         await get_or_create_user(
             user_id, message.from_user.username, message.from_user.full_name
         )
-        nickname = await get_user_display(user_id, message.from_user.full_name)
 
         async with get_db() as db:
             cur = await db.execute(
-                "SELECT last_claim, coins FROM users WHERE user_id = ?", (user_id,)
+                "SELECT last_claim FROM users WHERE user_id = ?", (user_id,)
             )
             row = await cur.fetchone()
             last_claim = row["last_claim"] if row else 0
-            balance = row["coins"] if row else 0
 
         time_passed = now - last_claim
         if time_passed < COOLDOWN_SECONDS:
             streak, bonus, new_balance, streak_updated = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
-            h, m = remaining // 3600, (remaining % 3600) // 60
-            s = remaining % 60
-            if h > 0:
-                time_str = f"{h} ч {m} мин"
-            elif m > 0:
-                time_str = f"{m} мин"
-            else:
-                time_str = f"{s} сек"
+            time_str = fmt_remaining(remaining)
 
             text = (
-                f"⏳ <b>{esc(nickname)}</b>\n\n"
-                f"{bq(line('⏱', 'Следующая бесплатная', f'<b>{time_str}</b>'))}"
+                "⏳ <b>Подождите немного</b>\n\n"
+                f"{bq(f'Следующую карточку можно получить через <b>{time_str}</b>.')}"
             )
-            await reply_ephemeral(
-                message,
-                text,
-                reply_markup=get_card_action_keyboard(user_id, balance, remaining=remaining),
-            )
+            await reply_ephemeral(message, text)
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
             return
 
@@ -1283,8 +1276,8 @@ async def get_card_handler(message: Message) -> None:
             )
             return
 
-        caption = _card_caption(nickname, card)
-        kb = get_after_card_keyboard(user_id, card["balance"])
+        caption = _card_caption(card)
+        kb = get_after_card_keyboard(user_id)
         photo = _resolve_card_photo(card)
 
         effect = None
@@ -1318,10 +1311,10 @@ async def get_card_handler(message: Message) -> None:
     except Exception as e:
         logger.error("get_card_handler: %s", e)
         await reply_ephemeral(
-                message,
-                "❌ <b>Что-то пошло не так</b>\n\n"
-                f"{bq('Попробуйте ещё раз чуть позже.')}",
-            )
+            message,
+            "❌ <b>Что-то пошло не так</b>\n\n"
+            f"{bq('Попробуйте ещё раз чуть позже.')}",
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1350,7 +1343,6 @@ async def dice_handler(message: Message) -> None:
         await get_or_create_user(
             user_id, message.from_user.username, message.from_user.full_name
         )
-        nickname = await get_user_display(user_id, message.from_user.full_name)
         now = int(time.time())
 
         async with get_db() as db:
@@ -1372,12 +1364,11 @@ async def dice_handler(message: Message) -> None:
             time_passed = now - last_dice
             if last_dice > 0 and time_passed < DICE_COOLDOWN_SECONDS:
                 remaining = DICE_COOLDOWN_SECONDS - time_passed
-                m, s = remaining // 60, remaining % 60
-                time_str = f"{m} мин {s} сек" if m else f"{s} сек"
+                time_str = fmt_remaining(remaining)
                 await reply_ephemeral(
                     message,
-                    f"⏳ <b>{esc(nickname)}</b>\n\n"
-                    f"{bq(line('⏱', 'Кубик снова через', f'<b>{time_str}</b>'))}",
+                    "⏳ <b>Кубик пока недоступен</b>\n\n"
+                    f"{bq(f'Следующий бросок через <b>{time_str}</b>.')}",
                 )
                 return
 
@@ -1417,7 +1408,7 @@ async def dice_handler(message: Message) -> None:
         result = (
             f"🎲 <b>{title}</b>\n\n"
             f"{bq(line('🎲', 'Выпало', f'<b>{dice_value}</b>') + chr(10) + line('🪙', 'Итог', f'<b>{delta_str}</b>'))}\n\n"
-            f"{line('🪙', 'Баланс', f'<b>{fmt_num(new_balance)}</b>')}"
+            f"{line('🪙', 'У вас', f'<b>{fmt_num(new_balance)}</b> {plural(new_balance, 'монета', 'монеты', 'монет')}')}"
         )
         try:
             await spin_msg.reply(result)
@@ -1775,8 +1766,9 @@ async def show_profile(message: Message) -> None:
                 message.from_user.full_name,
             )
 
+        is_own = target.id == message.from_user.id
         photo, caption, kb = await render_profile(
-            message.bot, target.id, fallback_name=target.full_name
+            message.bot, target.id, fallback_name=target.full_name, is_own=is_own
         )
         if photo is None and "не найден" in (caption or "").lower():
             await message.reply(caption)
@@ -1807,10 +1799,12 @@ async def process_back_to_profile(
 
     try:
         target_id = callback_data.user_id or callback.from_user.id
+        is_own = target_id == callback.from_user.id
         photo, caption, kb = await render_profile(
             callback.message.bot,
             target_id,
             fallback_name=callback.from_user.full_name,
+            is_own=is_own,
         )
         await show_or_edit_photo(callback.message, photo, caption, kb)
         await callback.answer()
@@ -1820,13 +1814,14 @@ async def process_back_to_profile(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# NICKNAME
+# NICKNAME  (/nick  ·  мряу ник)
 # ═══════════════════════════════════════════════════════════════════════════
-@router.message(Command("nickname"))
+@router.message(Command("nick"))
+@router.message(F.text.regexp(NICK_CMD_RE))
 async def nickname_cmd(
     message: Message,
-    command: CommandObject,
-    state: FSMContext,
+    command: CommandObject = None,
+    state: FSMContext = None,
 ) -> None:
     if not await check_not_banned(message):
         return
@@ -1835,7 +1830,14 @@ async def nickname_cmd(
     await get_or_create_user(
         user_id, message.from_user.username, message.from_user.full_name
     )
-    arg = (command.args or "").strip()
+
+    arg = ""
+    if command and command.args:
+        arg = command.args.strip()
+    elif message.text:
+        m = NICK_CMD_RE.match(message.text.strip())
+        if m:
+            arg = m.group(1).strip()
 
     if arg.lower() == "reset":
         b = InlineKeyboardBuilder()
@@ -1846,7 +1848,7 @@ async def nickname_cmd(
         await state.update_data(pending_nick=None, pending_action="reset")
         await message.reply(
             "♻️ <b>Сбросить никнейм?</b>\n\n"
-            f"{bq(line('ℹ️', 'Результат', 'имя из Telegram или ID') + chr(10) + line('🪙', 'Стоимость', 'бесплатно'))}",
+            f"{bq(line('ℹ️', 'Результат', 'имя из Telegram') + chr(10) + line('🪙', 'Стоимость', 'бесплатно'))}",
             reply_markup=b.as_markup(),
         )
         return
@@ -1854,8 +1856,8 @@ async def nickname_cmd(
     if not arg:
         await message.reply(
             "✏️ <b>Смена никнейма</b>\n\n"
-            f"{bq(f'<code>/nickname НовыйНик</code> · {NICKNAME_COST} 🪙')}\n\n"
-            f"{line('♻️', 'Сброс', '/nickname reset · бесплатно')}"
+            f"{bq(f'<code>/nick НовыйНик</code> · {NICKNAME_COST} 🪙')}\n\n"
+            f"{line('♻️', 'Сброс', '/nick reset · бесплатно')}"
         )
         return
 
@@ -1885,7 +1887,7 @@ async def nickname_cmd(
     await message.reply(
         "✏️ <b>Сменить никнейм?</b>\n\n"
         f"{bq(line('👤', 'Новый ник', f'<b>{esc(new_nick)}</b>') + chr(10) + line('🪙', 'Стоимость', f'<b>{NICKNAME_COST}</b>'))}\n\n"
-        f"{line('🪙', 'Баланс', fmt_num(balance))}",
+        f"{line('🪙', 'У вас', fmt_num(balance))}",
         reply_markup=b.as_markup(),
     )
 
@@ -1962,17 +1964,6 @@ async def nickname_confirm(
         return
 
     await callback.answer()
-
-
-@router.callback_query(NicknameCallback.filter(F.action == "change"))
-async def change_nickname_hint(
-    callback: CallbackQuery,
-    callback_data: NicknameCallback,
-) -> None:
-    await callback.answer(
-        f"/nickname НовыйНик ({NICKNAME_COST} 🪙) или /nickname reset",
-        show_alert=True,
-    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2155,7 +2146,7 @@ async def refresh_top(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# COLLECTION
+# COLLECTION (только через callback из профиля)
 # ═══════════════════════════════════════════════════════════════════════════
 async def get_collection_main_keyboard(user_id: int):
     async with get_db() as db:
@@ -2200,29 +2191,6 @@ async def get_collection_main_keyboard(user_id: int):
             )
         ])
         return InlineKeyboardMarkup(inline_keyboard=rows), total_cards, total_in_game
-
-
-@router.message(Command("collection"))
-@router.message(F.text.regexp(COLLECTION_CMD_RE))
-async def show_collection(message: Message) -> None:
-    if not await check_not_banned(message):
-        return
-
-    user_id = message.from_user.id
-    try:
-        await get_or_create_user(
-            user_id, message.from_user.username, message.from_user.full_name
-        )
-        photo, caption, keyboard, total = await render_collection(
-            message.bot, user_id, message.from_user.full_name
-        )
-        if total == 0:
-            await message.answer(caption, reply_markup=keyboard)
-            return
-        await show_or_edit_photo(message, photo, caption, keyboard)
-    except Exception as e:
-        logger.error("collection: %s", e)
-        await message.reply("❌ Ошибка")
 
 
 @router.callback_query(RaritySelectCallback.filter())
@@ -2352,7 +2320,7 @@ async def ok_delete_callback(callback: CallbackQuery) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# INSTANT CARD
+# CARD ACTION (только «Мои карточки» после получения)
 # ═══════════════════════════════════════════════════════════════════════════
 @router.callback_query(CardActionCallback.filter())
 async def handle_card_action(
@@ -2374,101 +2342,6 @@ async def handle_card_action(
         return
 
     try:
-        nickname = await get_user_display(user_id, callback.from_user.full_name)
-
-        if action in ("instant", "another"):
-            now = int(time.time())
-            async with get_db() as db:
-                cur = await db.execute(
-                    "SELECT coins, last_claim FROM users WHERE user_id = ?", (user_id,)
-                )
-                row = await cur.fetchone()
-            balance = row["coins"] if row else 0
-            last_claim = row["last_claim"] if row else 0
-            time_passed = now - last_claim
-
-            if time_passed >= COOLDOWN_SECONDS:
-                await callback.answer("⏳ Кулдаун прошёл — получайте бесплатно!")
-                return
-
-            remaining = int(COOLDOWN_SECONDS - time_passed)
-            cost = instant_cost(remaining)
-            if balance < cost:
-                await callback.answer(f"⚠️ Нужно {cost} 🪙, у вас {balance}")
-                return
-
-            await callback.answer(f"⏳ Карточка за {cost} 🪙...")
-
-            async with get_db() as db:
-                await db.execute(
-                    "UPDATE users SET coins = coins - ?, last_claim = ? WHERE user_id = ?",
-                    (cost, now, user_id),
-                )
-
-            card, status = await issue_card(user_id, check_cooldown=False)
-            streak, bonus, new_balance, streak_updated = await check_and_update_streak(
-                user_id
-            )
-
-            if status in ("no_cards", "all_collected"):
-                async with get_db() as db:
-                    await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                        (cost, user_id),
-                    )
-                msg = (
-                    "В базе нет карточек."
-                    if status == "no_cards"
-                    else "Все карточки уже собраны."
-                )
-                await callback.message.answer(f"❌ {msg} Монеты возвращены.")
-                await send_streak_notice(
-                    callback.message, streak, bonus, new_balance, streak_updated
-                )
-                return
-
-            if status != "success" or card is None:
-                async with get_db() as db:
-                    await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-                        (cost, user_id),
-                    )
-                await callback.message.answer("❌ Ошибка. Монеты возвращены.")
-                return
-
-            caption = _card_caption(nickname, card)
-            kb = get_after_card_keyboard(user_id, card["balance"])
-            photo = _resolve_card_photo(card)
-            effect = None
-            if (
-                card["rarity"] in ("mythical", "legendary")
-                and callback.message.chat.type == "private"
-            ):
-                effect = EFFECT_PARTY
-
-            try:
-                kwargs: dict[str, Any] = {"caption": caption, "reply_markup": kb}
-                if effect:
-                    kwargs["message_effect_id"] = effect
-                if photo:
-                    await callback.message.answer_photo(photo=photo, **kwargs)
-                else:
-                    await callback.message.answer(caption, reply_markup=kb)
-            except TypeError:
-                if photo:
-                    await callback.message.answer_photo(
-                        photo=photo, caption=caption, reply_markup=kb
-                    )
-                else:
-                    await callback.message.answer(caption, reply_markup=kb)
-            except TelegramBadRequest:
-                await callback.message.answer(caption, reply_markup=kb)
-
-            await send_streak_notice(
-                callback.message, streak, bonus, new_balance, streak_updated
-            )
-            return
-
         if action == "collection":
             photo, caption, keyboard, total = await render_collection(
                 callback.message.bot, user_id, callback.from_user.full_name
