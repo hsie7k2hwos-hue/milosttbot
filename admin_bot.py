@@ -61,12 +61,7 @@ except ImportError:
 
 load_dotenv()
 
-ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN")
-if not ADMIN_BOT_TOKEN:
-    raise SystemExit(
-        "ADMIN_BOT_TOKEN не задан. Укажите токен админ-бота в .env "
-        "(отдельный бот от пользовательского)."
-    )
+ADMIN_BOT_TOKEN = (os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or "").strip()
 
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 LOG_PATH = os.getenv("ADMIN_LOG_PATH", os.getenv("LOG_PATH", "/app/data/admin_bot.log"))
@@ -90,10 +85,16 @@ ROLES = {
 NICKNAME_RE = __import__("re").compile(r"^[\w\-. ]{2,32}$", __import__("re").UNICODE)
 URL_RE = __import__("re").compile(r"(https?://|t\.me/|@\w+)", __import__("re").IGNORECASE)
 
+_log_handlers = [logging.StreamHandler()]
+try:
+    os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+    _log_handlers.insert(0, logging.FileHandler(LOG_PATH))
+except Exception:
+    pass
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(LOG_PATH), logging.StreamHandler()],
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("admin_bot")
 
@@ -1381,10 +1382,19 @@ ADMIN_COMMANDS = [
 ]
 
 
-async def main():
+async def run_admin_bot(token=None):
+    """Запуск polling админ-бота. Можно вызывать из bot.py в том же процессе."""
+    tok = (token or ADMIN_BOT_TOKEN or "").strip()
+    if not tok:
+        logger.warning("ADMIN_BOT_TOKEN не задан — админ-бот не запущен")
+        return
+
     os.makedirs(os.path.dirname(DB_NAME) or ".", exist_ok=True)
     if LOG_PATH:
-        os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+        except Exception:
+            pass
     await init_db_minimal()
     try:
         ensure_photo_dir()
@@ -1392,7 +1402,7 @@ async def main():
         pass
 
     bot = Bot(
-        token=ADMIN_BOT_TOKEN,
+        token=tok,
         default=DefaultBotProperties(
             parse_mode=ParseMode.HTML,
             link_preview=LinkPreviewOptions(is_disabled=True),
@@ -1403,6 +1413,15 @@ async def main():
     await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeDefault())
     logger.info("🛡 Админ-бот запущен (DB=%s)", DB_NAME)
     await dp.start_polling(bot)
+
+
+async def main():
+    if not ADMIN_BOT_TOKEN:
+        raise SystemExit(
+            "ADMIN_BOT_TOKEN не задан. Укажите токен админ-бота в .env "
+            "(отдельный бот от пользовательского)."
+        )
+    await run_admin_bot(ADMIN_BOT_TOKEN)
 
 
 if __name__ == "__main__":

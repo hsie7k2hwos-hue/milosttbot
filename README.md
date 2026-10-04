@@ -1,13 +1,14 @@
 # Карточный бот (user + admin)
 
-Два процесса, **одна SQLite-база** (WAL).
+Одна точка входа (`bot.py`), **одна SQLite-база** (WAL).  
+Админ-бот поднимается в том же процессе, если задан `ADMIN_BOT_TOKEN`.
 
 ## Файлы
 
 | Файл | Назначение |
 |------|------------|
-| `bot.py` | Пользовательский бот |
-| `admin_bot.py` | Админ-бот (отдельный токен) |
+| `bot.py` | Точка входа: user-бот (+ admin параллельно) |
+| `admin_bot.py` | Логика админ-бота (импортируется из bot.py) |
 | `card_photos.py` | Скачивание фото на диск |
 
 ## .env
@@ -18,10 +19,10 @@ BOT_TOKEN=123:AAA
 BOT_USERNAME=milosttbot
 WEBAPP_URL=https://your-miniapp.example.com
 
-# Админ-бот (другой бот в @BotFather)
+# Админ-бот (другой бот в @BotFather) — тот же процесс
 ADMIN_BOT_TOKEN=456:BBB
 
-# Общая БД и фото (один volume на оба процесса)
+# Общая БД и фото
 DB_NAME=/app/data/cards_game.db
 CARD_PHOTOS_DIR=/app/data/card_photos
 LOG_PATH=/app/data/bot.log
@@ -31,17 +32,11 @@ ADMIN_LOG_PATH=/app/data/admin_bot.log
 ## Запуск
 
 ```bash
-# оба процесса должны видеть одну папку /app/data
-python bot.py &
-python admin_bot.py &
+# единственная команда на хостинге
+python bot.py
 ```
 
-Docker: два сервиса, общий volume:
-
-```yaml
-volumes:
-  - bot_data:/app/data
-```
+Нужны оба файла рядом: `bot.py` и `admin_bot.py` (+ `card_photos.py`).
 
 ## Что изменилось
 

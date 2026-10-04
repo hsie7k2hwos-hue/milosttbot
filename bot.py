@@ -1,6 +1,8 @@
 """
-Основной пользовательский бот карточек (без админки).
-Админка — отдельный процесс: admin_bot.py (тот же DB_NAME).
+Пользовательский бот карточек.
+
+Точка входа одна (bot.py). Если задан ADMIN_BOT_TOKEN — в том же процессе
+параллельно поднимается админ-бот из admin_bot.py (общая БД).
 """
 import asyncio
 import html
@@ -2244,7 +2246,6 @@ async def main():
                 link_preview=LinkPreviewOptions(is_disabled=True),
             ),
         )
-        # попытаться скачать дефолтный аватар при старте
         if ensure_default_avatar:
             try:
                 await ensure_default_avatar(bot)
@@ -2256,13 +2257,30 @@ async def main():
         await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
         logger.info("🤖 Пользовательский бот запущен")
 
+        tasks = [dp.start_polling(bot)]
+
+        # Админ-бот в том же процессе (одна точка входа на хостинге)
+        admin_token = (os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or "").strip()
+        if admin_token:
+            try:
+                from admin_bot import run_admin_bot
+                tasks.append(run_admin_bot(admin_token))
+                logger.info("🛡 Админ-бот будет запущен параллельно")
+            except Exception as e:
+                logger.error("Не удалось подключить admin_bot: %s", e)
+        else:
+            logger.warning(
+                "ADMIN_BOT_TOKEN не задан — админ-бот не запущен. "
+                "Добавьте второй токен в .env для админ-панели."
+            )
+
         start_api = os.getenv("START_API", os.getenv("ENABLE_WEBAPP_API", "0")).strip().lower() in (
             "1", "true", "yes", "on",
         )
         if start_api:
-            await asyncio.gather(dp.start_polling(bot), _run_api_server())
-        else:
-            await dp.start_polling(bot)
+            tasks.append(_run_api_server())
+
+        await asyncio.gather(*tasks)
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
         raise
