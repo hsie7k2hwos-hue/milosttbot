@@ -116,7 +116,7 @@ def line(emoji: str, label: str, value) -> str:
 
 def role_display(role: str) -> str:
     info = ROLES.get(role, ROLES["user"])
-    return f"{info['icon']} {info['name']}"
+    return f"{info["icon"]} {info["name"]}"
 
 
 def display_name(nickname, user_id, fallback=None) -> str:
@@ -576,12 +576,12 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
 
     r = RARITIES.get(card["rarity"], {})
     caption = (
-        f"🃏 <b>{esc(card['name'])}</b>\n"
+        f"🃏 <b>{esc(card["name"])}</b>\n"
         f"{'─' * 20}\n\n"
         f"{line('🆔', 'ID', f'<code>{card_id}</code>')}\n"
-        f"{line(r.get('icon', '•'), 'Редкость', r.get('name', card['rarity']))}\n"
+        f"{line(r.get('icon', '•'), 'Редкость', r.get('name', card["rarity"]))}\n"
         f"{line('👥', 'Владельцев', f'<b>{fmt_num(owners)}</b>')}\n"
-        f"{line('💾', 'Файл', card['photo_path'] or 'нет')}"
+        f"{line('💾', 'Файл', card["photo_path"] or 'нет')}"
     )
     b = InlineKeyboardBuilder()
     b.button(text="✏️ Название", callback_data=f"edit_name:{card_id}")
@@ -848,9 +848,9 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
         f"{line('🆔', 'ID', f'<code>{user_id}</code>')}\n"
         f"{line('🎭', 'Роль', role_display(role))}\n"
         f"{line('📅', 'Регистрация', reg)}\n\n"
-        f"{line('🪙', 'Монеты', f'<b>{fmt_num(user['coins'])}</b>')}\n"
-        f"{line('🃏', 'Карточек', f'<b>{fmt_num(user['cards_count'])}</b>')}\n"
-        f"{line('🔥', 'Стрик', f'<b>{user['streak'] or 0}</b>')}"
+        f"{line('🪙', 'Монеты', f'<b>{fmt_num(user["coins"])}</b>')}\n"
+        f"{line('🃏', 'Карточек', f'<b>{fmt_num(user["cards_count"])}</b>')}\n"
+        f"{line('🔥', 'Стрик', f'<b>{user["streak"] or 0}</b>')}"
     )
 
     b = InlineKeyboardBuilder()
@@ -1142,7 +1142,7 @@ async def admin_delcard(message: Message, command: CommandObject):
             return
         await db.execute("DELETE FROM inventory WHERE card_id = ?", (card_id,))
         await db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-    await message.reply(f"🗑 Удалена: {esc(card['name'])} (#{card_id})")
+    await message.reply(f"🗑 Удалена: {esc(card["name"])} (#{card_id})")
 
 
 @router.message(Command("stats"), admin_filter)

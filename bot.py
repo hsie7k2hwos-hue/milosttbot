@@ -187,7 +187,7 @@ def dice_delta_from_value(value: int) -> int:
 
 def role_display(role: str) -> str:
     info = ROLES.get(role, ROLES["user"])
-    return f"{info['icon']} {info['name']}"
+    return f"{info["icon"]} {info["name"]}"
 
 
 def display_name(nickname: Optional[str], user_id: int, fallback_name: Optional[str] = None) -> str:
@@ -559,9 +559,9 @@ async def render_profile(bot: Bot, user_id: int, fallback_name: Optional[str] = 
         f"{line('🆔', 'ID', f'<code>{user_id}</code>')}\n\n"
         f"{line('🎭', 'Роль', role_display(role))}\n"
         f"{line('📅', 'С', reg_date)}\n\n"
-        f"{line('🃏', 'Карточки', f'<b>{fmt_num(row['cards_count'])}</b> / {fmt_num(total_cards)}')}\n"
-        f"{line('🪙', 'Монеты', f'<b>{fmt_num(row['coins'])}</b>')}\n"
-        f"{line('🔥', 'Стрик', f'<b>{fmt_days(row['streak'])}</b>')}"
+        f"{line('🃏', 'Карточки', f'<b>{fmt_num(row["cards_count"])}</b> / {fmt_num(total_cards)}')}\n"
+        f"{line('🪙', 'Монеты', f'<b>{fmt_num(row["coins"])}</b>')}\n"
+        f"{line('🔥', 'Стрик', f'<b>{fmt_days(row["streak"])}</b>')}"
     )
     kb = get_profile_kb(user_id)
     photo = await get_user_photo(bot, user_id)
@@ -1058,9 +1058,9 @@ def _card_caption(name: str, card: dict) -> str:
     r = RARITIES[card["rarity"]]
     return (
         f"✨ <b>Новая карточка</b>\n\n"
-        f"{line('🃏', 'Название', f'<b>{esc(card['name'])}</b>')}\n"
+        f"{line('🃏', 'Название', f'<b>{esc(card["name"])}</b>')}\n"
         f"{line(r['icon'], 'Редкость', r['name'])}\n"
-        f"{line('🪙', 'Награда', f'+<b>{fmt_num(card['coins_earned'])}</b> → {fmt_num(card['balance'])}')}"
+        f"{line('🪙', 'Награда', f'+<b>{fmt_num(card["coins_earned"])}</b> → {fmt_num(card["balance"])}')}"
     )
 
 
@@ -1856,7 +1856,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
     for i, row in enumerate(top, 1):
         medal = medals[i - 1] if i <= 3 else f"{i}."
         nick = display_name(row["nickname"], row["user_id"])
-        text += f"{medal} {esc(nick)} · <b>{fmt_num(row['value'])}</b> {unit}\n"
+        text += f"{medal} {esc(nick)} · <b>{fmt_num(row["value"])}</b> {unit}\n"
 
     text += (
         f"\n{line('📌', 'Ваше место', f'<b>#{fmt_num(my_rank)}</b>')}\n"
@@ -2014,9 +2014,9 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         card = cards[page]
         info = RARITIES.get(rarity, {})
         caption = (
-            f"{line('🃏', 'Название', f'<b>{esc(card['name'])}</b>')}\n"
-            f"{line(info.get('icon', '•'), 'Редкость', info.get('name', rarity))}\n"
-            f"{line('🪙', 'Награда', f'+{fmt_num(info.get('reward', 0))}')}"
+            f"{line('🃏', 'Название', f'<b>{esc(card["name"])}</b>')}\n"
+            f"{line(info.get("icon", '•'), 'Редкость', info.get("name", rarity))}\n"
+            f"{line('🪙', 'Награда', f'+{fmt_num(info.get("reward", 0))}')}"
         )
 
         nav = []
