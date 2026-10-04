@@ -187,7 +187,7 @@ def dice_delta_from_value(value: int) -> int:
 
 def role_display(role: str) -> str:
     info = ROLES.get(role, ROLES["user"])
-    return f"{info["icon"]} {info["name"]}"
+    return f"{info['icon']} {info['name']}"
 
 
 def display_name(nickname: Optional[str], user_id: int, fallback_name: Optional[str] = None) -> str:
@@ -559,9 +559,9 @@ async def render_profile(bot: Bot, user_id: int, fallback_name: Optional[str] = 
         f"{line('🆔', 'ID', f'<code>{user_id}</code>')}\n\n"
         f"{line('🎭', 'Роль', role_display(role))}\n"
         f"{line('📅', 'С', reg_date)}\n\n"
-        f"{line('🃏', 'Карточки', f'<b>{fmt_num(row["cards_count"])}</b> / {fmt_num(total_cards)}')}\n"
-        f"{line('🪙', 'Монеты', f'<b>{fmt_num(row["coins"])}</b>')}\n"
-        f"{line('🔥', 'Стрик', f'<b>{fmt_days(row["streak"])}</b>')}"
+        f"{line('🃏', 'Карточки', '<b>{}</b> / {}'.format(fmt_num(row['cards_count']), fmt_num(total_cards)))}\n"
+        f"{line('🪙', 'Монеты', '<b>{}</b>'.format(fmt_num(row['coins'])))}\n"
+        f"{line('🔥', 'Стрик', '<b>{}</b>'.format(fmt_days(row['streak'])))}"
     )
     kb = get_profile_kb(user_id)
     photo = await get_user_photo(bot, user_id)
@@ -791,7 +791,7 @@ def _streak_message_text(streak: int, bonus: int, new_balance: int) -> str:
             "🔥 <b>Стрик начат!</b>\n\n"
             f"{line('💡', 'Подсказка', 'Заходите каждый день — стрик растёт.')}"
         )
-    text = f"🔥 <b>Стрик</b>\n\n{line('📅', 'Дней', f'<b>{fmt_days(streak)}</b>')}"
+    text = f"🔥 <b>Стрик</b>\n\n{line('📅', 'Дней', '<b>{}</b>'.format(fmt_days(streak)))}"
     if bonus > 0:
         text += f"\n{line('🪙', 'Бонус', f'<b>+{fmt_num(bonus)}</b> → {fmt_num(new_balance)}')}"
     text += f"\n{line('💡', 'Подсказка', 'Заходите ежедневно, чтобы не потерять стрик.')}"
@@ -944,7 +944,7 @@ HELP_PAGES = [
             f"{line('🪙', 'Бонус', 'монеты за дни стрика')}\n\n"
             f"<b>🃏 Редкости</b>\n"
             + "\n".join(
-                line(v["icon"], v["name"], f"{v['reward']} 🪙")
+                line(v['icon'], v['name'], f"{v['reward']} 🪙")
                 for v in RARITIES.values()
             )
         ),
@@ -1058,9 +1058,9 @@ def _card_caption(name: str, card: dict) -> str:
     r = RARITIES[card["rarity"]]
     return (
         f"✨ <b>Новая карточка</b>\n\n"
-        f"{line('🃏', 'Название', f'<b>{esc(card["name"])}</b>')}\n"
+        f"{line('🃏', 'Название', '<b>{}</b>'.format(esc(card['name'])))}\n"
         f"{line(r['icon'], 'Редкость', r['name'])}\n"
-        f"{line('🪙', 'Награда', f'+<b>{fmt_num(card["coins_earned"])}</b> → {fmt_num(card["balance"])}')}"
+        f"{line('🪙', 'Награда', '+<b>{}</b> → {}'.format(fmt_num(card['coins_earned']), fmt_num(card['balance'])))}"
     )
 
 
@@ -1108,7 +1108,7 @@ async def get_card_handler(message: Message):
 
             text = (
                 f"⏳ <b>{esc(nickname)}</b>\n\n"
-                f"{line('⏱', 'Следующая карточка', f'<b>{time_str}</b>')}"
+                f"{line('⏱', 'Следующая карточка', '<b>{}</b>'.format(time_str))}"
             )
             await reply_ephemeral(
                 message, text,
@@ -1214,8 +1214,8 @@ async def dice_handler(message: Message):
                 await reply_ephemeral(
                     message,
                     f"⚠️ <b>Недостаточно монет</b>\n\n"
-                    f"{line('🪙', 'Нужно', f'<b>{fmt_num(DICE_MIN_BALANCE)}</b>')}\n"
-                    f"{line('🪙', 'У вас', f'<b>{fmt_num(balance)}</b>')}",
+                    f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(DICE_MIN_BALANCE)))}\n"
+                    f"{line('🪙', 'У вас', '<b>{}</b>'.format(fmt_num(balance)))}",
                 )
                 return
 
@@ -1227,7 +1227,7 @@ async def dice_handler(message: Message):
                 await reply_ephemeral(
                     message,
                     f"⏳ <b>{esc(nickname)}</b>\n\n"
-                    f"{line('⏱', 'Кубик через', f'<b>{time_str}</b>')}",
+                    f"{line('⏱', 'Кубик через', '<b>{}</b>'.format(time_str))}",
                 )
                 return
 
@@ -1266,9 +1266,9 @@ async def dice_handler(message: Message):
 
         result = (
             f"🎲 <b>{title}</b>\n\n"
-            f"{line('🎲', 'Выпало', f'<b>{dice_value}</b>')}\n"
-            f"{line('🪙', 'Результат', f'<b>{delta_str}</b>')}\n"
-            f"{line('🪙', 'Баланс', f'<b>{fmt_num(new_balance)}</b>')}"
+            f"{line('🎲', 'Выпало', '<b>{}</b>'.format(dice_value))}\n"
+            f"{line('🪙', 'Результат', '<b>{}</b>'.format(delta_str))}\n"
+            f"{line('🪙', 'Баланс', '<b>{}</b>'.format(fmt_num(new_balance)))}"
         )
         try:
             await spin_msg.reply(result)
@@ -1361,16 +1361,16 @@ async def duel_create(message: Message, command: CommandObject = None):
             await reply_ephemeral(
                 message,
                 f"⚠️ Недостаточно монет у вас.\n"
-                f"{line('🪙', 'Нужно', f'<b>{fmt_num(stake)}</b>')}\n"
-                f"{line('🪙', 'У вас', f'<b>{fmt_num(ch_coins)}</b>')}",
+                f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(stake)))}\n"
+                f"{line('🪙', 'У вас', '<b>{}</b>'.format(fmt_num(ch_coins)))}",
             )
             return
         if op_coins < stake:
             await reply_ephemeral(
                 message,
                 f"⚠️ У соперника недостаточно монет.\n"
-                f"{line('🪙', 'Нужно', f'<b>{fmt_num(stake)}</b>')}\n"
-                f"{line('🪙', 'У соперника', f'<b>{fmt_num(op_coins)}</b>')}",
+                f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(stake)))}\n"
+                f"{line('🪙', 'У соперника', '<b>{}</b>'.format(fmt_num(op_coins)))}",
             )
             return
 
@@ -1407,8 +1407,8 @@ async def duel_create(message: Message, command: CommandObject = None):
         f"⚔️ <b>Вызов на дуэль</b>\n\n"
         f"{line('👤', 'Вызывающий', esc(ch_name))}\n"
         f"{line('👤', 'Соперник', esc(op_name))}\n"
-        f"{line('🪙', 'Ставка', f'<b>{fmt_num(stake)}</b>')}\n"
-        f"{line('🏦', 'Банк', f'<b>{fmt_num(bank)}</b>')}\n"
+        f"{line('🪙', 'Ставка', '<b>{}</b>'.format(fmt_num(stake)))}\n"
+        f"{line('🏦', 'Банк', '<b>{}</b>'.format(fmt_num(bank)))}\n"
         f"{line('⏱', 'Истекает', 'через 10 мин')}"
     )
     sent = await message.reply(text, reply_markup=b.as_markup())
@@ -1548,8 +1548,8 @@ async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback
             new_bal = (await cur.fetchone())["coins"]
             text = (
                 f"⚔️ <b>{result_title}</b>\n\n"
-                f"{line('🎲', ch_name, f'<b>{v1}</b>')}\n"
-                f"{line('🎲', op_name, f'<b>{v2}</b>')}\n"
+                f"{line('🎲', ch_name, '<b>{}</b>'.format(v1))}\n"
+                f"{line('🎲', op_name, '<b>{}</b>'.format(v2))}\n"
                 f"{line('🏆', 'Победитель', esc(winner_name))}\n"
                 f"{line('🪙', 'Банк', f'<b>+{fmt_num(bank)}</b> → {fmt_num(new_bal)}')}"
             )
@@ -1560,8 +1560,8 @@ async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback
             await db.execute("UPDATE duels SET status = 'completed' WHERE id = ?", (duel_id,))
             text = (
                 f"⚔️ <b>{result_title}</b>\n\n"
-                f"{line('🎲', ch_name, f'<b>{v1}</b>')}\n"
-                f"{line('🎲', op_name, f'<b>{v2}</b>')}\n"
+                f"{line('🎲', ch_name, '<b>{}</b>'.format(v1))}\n"
+                f"{line('🎲', op_name, '<b>{}</b>'.format(v2))}\n"
                 f"{line('🪙', 'Ставки', 'возвращены')}"
             )
 
@@ -1682,8 +1682,8 @@ async def nickname_cmd(message: Message, command: CommandObject, state: FSMConte
     if balance < NICKNAME_COST:
         await message.reply(
             f"⚠️ Недостаточно монет.\n"
-            f"{line('🪙', 'Нужно', f'<b>{fmt_num(NICKNAME_COST)}</b>')}\n"
-            f"{line('🪙', 'У вас', f'<b>{fmt_num(balance)}</b>')}"
+            f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(NICKNAME_COST)))}\n"
+            f"{line('🪙', 'У вас', '<b>{}</b>'.format(fmt_num(balance)))}"
         )
         return
 
@@ -1695,8 +1695,8 @@ async def nickname_cmd(message: Message, command: CommandObject, state: FSMConte
     await state.update_data(pending_nick=new_nick, pending_action="apply")
     await message.reply(
         f"✏️ <b>Сменить ник?</b>\n\n"
-        f"{line('👤', 'Новый ник', f'<b>{esc(new_nick)}</b>')}\n"
-        f"{line('🪙', 'Стоимость', f'<b>{NICKNAME_COST}</b>')}\n"
+        f"{line('👤', 'Новый ник', '<b>{}</b>'.format(esc(new_nick)))}\n"
+        f"{line('🪙', 'Стоимость', '<b>{}</b>'.format(NICKNAME_COST))}\n"
         f"{line('🪙', 'Баланс', fmt_num(balance))}",
         reply_markup=b.as_markup(),
     )
@@ -1856,7 +1856,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
     for i, row in enumerate(top, 1):
         medal = medals[i - 1] if i <= 3 else f"{i}."
         nick = display_name(row["nickname"], row["user_id"])
-        text += f"{medal} {esc(nick)} · <b>{fmt_num(row["value"])}</b> {unit}\n"
+        text += f"{medal} {esc(nick)} · <b>{fmt_num(row['value'])}</b> {unit}\n"
 
     text += (
         f"\n{line('📌', 'Ваше место', f'<b>#{fmt_num(my_rank)}</b>')}\n"
@@ -2014,9 +2014,9 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         card = cards[page]
         info = RARITIES.get(rarity, {})
         caption = (
-            f"{line('🃏', 'Название', f'<b>{esc(card["name"])}</b>')}\n"
-            f"{line(info.get("icon", '•'), 'Редкость', info.get("name", rarity))}\n"
-            f"{line('🪙', 'Награда', f'+{fmt_num(info.get("reward", 0))}')}"
+            f"{line('🃏', 'Название', '<b>{}</b>'.format(esc(card['name'])))}\n"
+            f"{line(info.get('icon', '•'), 'Редкость', info.get('name', rarity))}\n"
+            f"{line('🪙', 'Награда', '+{}'.format(fmt_num(info.get('reward', 0))))}"
         )
 
         nav = []

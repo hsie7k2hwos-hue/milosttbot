@@ -116,7 +116,7 @@ def line(emoji: str, label: str, value) -> str:
 
 def role_display(role: str) -> str:
     info = ROLES.get(role, ROLES["user"])
-    return f"{info["icon"]} {info["name"]}"
+    return f"{info['icon']} {info['name']}"
 
 
 def display_name(nickname, user_id, fallback=None) -> str:
@@ -511,7 +511,7 @@ async def build_admin_cards_page(page: int = 0):
             f"📜 <b>Карточки</b>\n"
             f"{'─' * 18}\n"
             f"{line('📄', 'Стр.', f'<b>{page + 1}</b> / {total_pages}')}\n"
-            f"{line('📦', 'Всего', f'<b>{fmt_num(total)}</b>')}\n\n"
+            f"{line('📦', 'Всего', '<b>{}</b>'.format(fmt_num(total)))}\n\n"
         )
         for c in cards:
             r = RARITIES.get(c["rarity"], {})
@@ -576,12 +576,12 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
 
     r = RARITIES.get(card["rarity"], {})
     caption = (
-        f"🃏 <b>{esc(card["name"])}</b>\n"
+        f"🃏 <b>{esc(card['name'])}</b>\n"
         f"{'─' * 20}\n\n"
         f"{line('🆔', 'ID', f'<code>{card_id}</code>')}\n"
-        f"{line(r.get('icon', '•'), 'Редкость', r.get('name', card["rarity"]))}\n"
-        f"{line('👥', 'Владельцев', f'<b>{fmt_num(owners)}</b>')}\n"
-        f"{line('💾', 'Файл', card["photo_path"] or 'нет')}"
+        f"{line(r.get('icon', '•'), 'Редкость', r.get('name', card['rarity']))}\n"
+        f"{line('👥', 'Владельцев', '<b>{}</b>'.format(fmt_num(owners)))}\n"
+        f"{line('💾', 'Файл', card['photo_path'] or 'нет')}"
     )
     b = InlineKeyboardBuilder()
     b.button(text="✏️ Название", callback_data=f"edit_name:{card_id}")
@@ -771,7 +771,7 @@ async def build_admin_users_page(page: int = 0, filter_role: str = "all"):
             f"👥 <b>Пользователи</b>\n"
             f"{'─' * 18}\n"
             f"{line('📄', 'Стр.', f'<b>{page + 1}</b> / {total_pages}')}\n"
-            f"{line('📦', 'Всего', f'<b>{fmt_num(total)}</b>')}\n\n"
+            f"{line('📦', 'Всего', '<b>{}</b>'.format(fmt_num(total)))}\n\n"
         )
         for u in users:
             role_info = ROLES.get(u["role"] or "user", ROLES["user"])
@@ -848,9 +848,9 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
         f"{line('🆔', 'ID', f'<code>{user_id}</code>')}\n"
         f"{line('🎭', 'Роль', role_display(role))}\n"
         f"{line('📅', 'Регистрация', reg)}\n\n"
-        f"{line('🪙', 'Монеты', f'<b>{fmt_num(user["coins"])}</b>')}\n"
-        f"{line('🃏', 'Карточек', f'<b>{fmt_num(user["cards_count"])}</b>')}\n"
-        f"{line('🔥', 'Стрик', f'<b>{user["streak"] or 0}</b>')}"
+        f"{line('🪙', 'Монеты', '<b>{}</b>'.format(fmt_num(user['coins'])))}\n"
+        f"{line('🃏', 'Карточек', '<b>{}</b>'.format(fmt_num(user['cards_count'])))}\n"
+        f"{line('🔥', 'Стрик', '<b>{}</b>'.format(user['streak'] or 0))}"
     )
 
     b = InlineKeyboardBuilder()
@@ -1100,7 +1100,7 @@ async def admin_setcoins(message: Message, command: CommandObject):
     await message.reply(
         f"✅ Монеты <code>{target_id}</code>\n"
         f"{line('🪙', 'Было', fmt_num(old))}\n"
-        f"{line('🪙', 'Стало', f'<b>{fmt_num(coins)}</b>')}"
+        f"{line('🪙', 'Стало', '<b>{}</b>'.format(fmt_num(coins)))}"
     )
 
 
@@ -1142,7 +1142,7 @@ async def admin_delcard(message: Message, command: CommandObject):
             return
         await db.execute("DELETE FROM inventory WHERE card_id = ?", (card_id,))
         await db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-    await message.reply(f"🗑 Удалена: {esc(card["name"])} (#{card_id})")
+    await message.reply(f"🗑 Удалена: {esc(card['name'])} (#{card_id})")
 
 
 @router.message(Command("stats"), admin_filter)
@@ -1170,13 +1170,13 @@ async def admin_stats(message: Message):
         )
         text = (
             f"📊 <b>Статистика</b>\n{'─' * 20}\n\n"
-            f"{line('👥', 'Пользователей', f'<b>{fmt_num(total_users)}</b>')}\n"
-            f"{line('🛡', 'Админов', f'<b>{fmt_num(staff)}</b>')}\n"
-            f"{line('🚫', 'Забанено', f'<b>{fmt_num(banned)}</b>')}\n\n"
-            f"{line('🃏', 'Карточек', f'<b>{fmt_num(total_cards)}</b>')}\n"
+            f"{line('👥', 'Пользователей', '<b>{}</b>'.format(fmt_num(total_users)))}\n"
+            f"{line('🛡', 'Админов', '<b>{}</b>'.format(fmt_num(staff)))}\n"
+            f"{line('🚫', 'Забанено', '<b>{}</b>'.format(fmt_num(banned)))}\n\n"
+            f"{line('🃏', 'Карточек', '<b>{}</b>'.format(fmt_num(total_cards)))}\n"
             f"{rarity_lines}\n\n"
-            f"{line('🪙', 'Монет в игре', f'<b>{fmt_num(total_coins)}</b>')}\n"
-            f"{line('📦', 'В коллекциях', f'<b>{fmt_num(owned)}</b>')}"
+            f"{line('🪙', 'Монет в игре', '<b>{}</b>'.format(fmt_num(total_coins)))}\n"
+            f"{line('📦', 'В коллекциях', '<b>{}</b>'.format(fmt_num(owned)))}"
         )
         await message.reply(text)
     except Exception as e:
