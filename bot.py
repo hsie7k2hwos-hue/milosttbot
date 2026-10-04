@@ -1,9 +1,11 @@
 """
 Пользовательский бот карточек.
 
-Точка входа одна (bot.py). Если задан ADMIN_BOT_TOKEN — в том же процессе
-параллельно поднимается админ-бот из admin_bot.py (общая БД).
+Одна точка входа. Если задан ADMIN_BOT_TOKEN — параллельно поднимается
+админ-бот (общая БД). Опционально — API мини-приложения.
 """
+from __future__ import annotations
+
 import asyncio
 import html
 import logging
@@ -13,37 +15,45 @@ import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, List
+from typing import Any, Optional
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart, CommandObject
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    BotCommand, BotCommandScopeDefault,
-    CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, Message,
-    ReplyKeyboardMarkup, LinkPreviewOptions, FSInputFile,
+    BotCommand,
+    BotCommandScopeDefault,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    KeyboardButton,
+    LinkPreviewOptions,
+    Message,
+    ReplyKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
+# ── optional photo helpers ──────────────────────────────────────────────────
 try:
     from card_photos import (
-        sync_card_photo,
-        migrate_all_card_photos,
+        DEFAULT_AVATAR_FILE_ID,
+        DEFAULT_AVATAR_PATH,
+        ensure_default_avatar,
         ensure_photo_dir,
         get_card_photo_input,
         get_default_avatar_input,
-        ensure_default_avatar,
-        DEFAULT_AVATAR_PATH,
-        DEFAULT_AVATAR_FILE_ID,
+        migrate_all_card_photos,
+        sync_card_photo,
     )
 except ImportError:
     sync_card_photo = None
@@ -52,13 +62,19 @@ except ImportError:
     get_default_avatar_input = None
     ensure_default_avatar = None
     DEFAULT_AVATAR_PATH = None
-    DEFAULT_AVATAR_FILE_ID = "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
+    DEFAULT_AVATAR_FILE_ID = (
+        "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
+    )
 
-    def ensure_photo_dir():
+    def ensure_photo_dir() -> None:
         pass
 
-# ================= КОНФИГУРАЦИЯ =================
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════════════════
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN не задан. Укажите его в .env или окружении.")
@@ -68,16 +84,10 @@ BOT_USERNAME = (os.getenv("BOT_USERNAME", "milosttbot") or "milosttbot").lstrip(
 BOT_URL = f"https://t.me/{BOT_USERNAME}"
 OPEN_APP_URL = f"{BOT_URL}?startapp"
 
-
-def get_app_url() -> str:
-    if not WEBAPP_URL or not BOT_USERNAME:
-        return ""
-    return OPEN_APP_URL
-
-
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
-COOLDOWN_SECONDS = 3 * 3600  # 3 часа
+
+COOLDOWN_SECONDS = 3 * 3600
 INSTANT_COST = 150
 INSTANT_MIN_COST = 5
 NICKNAME_COST = 300
@@ -93,22 +103,21 @@ DICE_VALUE_MAP = {1: -10, 2: -5, 3: 0, 4: 5, 5: 10, 6: 15}
 DUEL_EXPIRE_SECONDS = 10 * 60
 DUEL_MIN_STAKE = 1
 
-# 🎉 message effect (private chats)
 EFFECT_PARTY = "5046509860389126442"
 
 RARITIES = {
-    "common": {"icon": "⚪", "name": "Обычная", "weight": 50, "reward": 10},
-    "rare": {"icon": "🔵", "name": "Редкая", "weight": 20, "reward": 25},
-    "epic": {"icon": "🟣", "name": "Эпическая", "weight": 15, "reward": 50},
-    "mythical": {"icon": "🔴", "name": "Мифическая", "weight": 10, "reward": 75},
-    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5, "reward": 100},
+    "common":    {"icon": "⚪", "name": "Обычная",     "weight": 50, "reward": 10},
+    "rare":      {"icon": "🔵", "name": "Редкая",      "weight": 20, "reward": 25},
+    "epic":      {"icon": "🟣", "name": "Эпическая",   "weight": 15, "reward": 50},
+    "mythical":  {"icon": "🔴", "name": "Мифическая",  "weight": 10, "reward": 75},
+    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5,  "reward": 100},
 }
 
 ROLES = {
-    "user": {"icon": "👤", "name": "Пользователь"},
-    "admin": {"icon": "🛡", "name": "Администратор"},
+    "user":       {"icon": "👤", "name": "Пользователь"},
+    "admin":      {"icon": "🛡", "name": "Администратор"},
     "superadmin": {"icon": "👑", "name": "Главный администратор"},
-    "banned": {"icon": "🚫", "name": "Заблокирован"},
+    "banned":     {"icon": "🚫", "name": "Заблокирован"},
 }
 
 STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
@@ -131,12 +140,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ================= ХЕЛПЕРЫ =================
-def esc(text) -> str:
+# ═══════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+def get_app_url() -> str:
+    if not WEBAPP_URL or not BOT_USERNAME:
+        return ""
+    return OPEN_APP_URL
+
+
+def esc(text: Any) -> str:
     return html.escape(str(text), quote=False)
 
 
-def fmt_num(n) -> str:
+def fmt_num(n: Any) -> str:
     try:
         n = int(n)
     except (TypeError, ValueError):
@@ -168,8 +185,7 @@ def fmt_coins(n: int) -> str:
     return f"{fmt_num(n)} {plural(n, 'монета', 'монеты', 'монет')}"
 
 
-def line(emoji: str, label: str, value) -> str:
-    """Единый формат: {emoji} {label}: {value}"""
+def line(emoji: str, label: str, value: Any) -> str:
     return f"{emoji} {label}: {value}"
 
 
@@ -183,7 +199,7 @@ def instant_cost(remaining_seconds: int) -> int:
     return max(INSTANT_MIN_COST, min(INSTANT_COST, round(cost)))
 
 
-def dice_delta_from_value(value: int) -> int:
+def dice_delta(value: int) -> int:
     return DICE_VALUE_MAP.get(value, 0)
 
 
@@ -192,15 +208,40 @@ def role_display(role: str) -> str:
     return f"{info['icon']} {info['name']}"
 
 
-def display_name(nickname: Optional[str], user_id: int, fallback_name: Optional[str] = None) -> str:
+def display_name(
+    nickname: Optional[str],
+    user_id: int,
+    fallback: Optional[str] = None,
+) -> str:
     if nickname and str(nickname).strip():
         return str(nickname).strip()
-    if fallback_name and str(fallback_name).strip():
-        return str(fallback_name).strip()[:32]
+    if fallback and str(fallback).strip():
+        return str(fallback).strip()[:32]
     return str(user_id)
 
 
-# ================= CALLBACK DATA =================
+def validate_nickname(raw: str) -> Optional[str]:
+    raw = raw.strip()
+    if not (2 <= len(raw) <= 32):
+        return None
+    if URL_RE.search(raw):
+        return None
+    if not NICKNAME_RE.match(raw):
+        return None
+    return raw
+
+
+def _resolve_card_photo(card: dict) -> Any:
+    if get_card_photo_input:
+        local = get_card_photo_input(card["id"], card.get("photo_path"))
+        if local:
+            return local
+    return card.get("photo_id") or None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CALLBACK DATA
+# ═══════════════════════════════════════════════════════════════════════════
 class RaritySelectCallback(CallbackData, prefix="coll_rarity"):
     rarity: str
     page: int = 0
@@ -253,7 +294,9 @@ class DuelCancelCallback(CallbackData, prefix="duel_can"):
     duel_id: int
 
 
-# ================= БАЗА ДАННЫХ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# DATABASE
+# ═══════════════════════════════════════════════════════════════════════════
 @asynccontextmanager
 async def get_db():
     db = await aiosqlite.connect(DB_NAME)
@@ -266,13 +309,13 @@ async def get_db():
         await db.commit()
     except Exception as e:
         await db.rollback()
-        logger.error(f"Ошибка БД: {e}")
+        logger.error("Ошибка БД: %s", e)
         raise
     finally:
         await db.close()
 
 
-async def init_db():
+async def init_db() -> None:
     async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS cards (
@@ -331,7 +374,6 @@ async def init_db():
         ):
             await db.execute(sql)
 
-        # Миграции: добавить недостающие колонки, убрать устаревшие данные
         for table, column, definition in [
             ("users", "registration", "INTEGER DEFAULT 0"),
             ("users", "streak", "INTEGER DEFAULT 0"),
@@ -347,11 +389,10 @@ async def init_db():
             except aiosqlite.OperationalError:
                 pass
 
-        # Удаляем amount из inventory если осталась (SQLite не DROP COLUMN легко — игнорируем)
-        # gender / gems больше не используем
 
-
-# ================= РОЛИ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# USER HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
 async def get_user_role(user_id: int) -> str:
     try:
         async with get_db() as db:
@@ -362,7 +403,7 @@ async def get_user_role(user_id: int) -> str:
             role = row[0] or "user"
             return role if role in ROLES else "user"
     except Exception as e:
-        logger.error(f"get_user_role: {e}")
+        logger.error("get_user_role: %s", e)
         return "user"
 
 
@@ -370,37 +411,43 @@ async def is_banned(user_id: int) -> bool:
     return (await get_user_role(user_id)) == "banned"
 
 
-async def get_or_create_user(user_id: int, username: Optional[str] = None, full_name: Optional[str] = None):
+async def get_or_create_user(
+    user_id: int,
+    username: Optional[str] = None,
+    full_name: Optional[str] = None,
+):
     async with get_db() as db:
         cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         user = await cur.fetchone()
-        if not user:
-            now = int(time.time())
-            cur = await db.execute("SELECT COUNT(*) FROM users")
-            total = (await cur.fetchone())[0]
-            role = "superadmin" if total == 0 else "user"
-            # nickname = NULL по умолчанию
-            await db.execute(
-                "INSERT INTO users (user_id, nickname, registration, streak, last_streak_date, role) "
-                "VALUES (?, NULL, ?, 0, 0, ?)",
-                (user_id, now, role),
-            )
-            if role == "superadmin":
-                logger.info(f"Первый пользователь {user_id} → superadmin")
-            cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-            user = await cur.fetchone()
-        return user
+        if user:
+            return user
+
+        now = int(time.time())
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        total = (await cur.fetchone())[0]
+        role = "superadmin" if total == 0 else "user"
+
+        await db.execute(
+            "INSERT INTO users (user_id, nickname, registration, streak, last_streak_date, role) "
+            "VALUES (?, NULL, ?, 0, 0, ?)",
+            (user_id, now, role),
+        )
+        if role == "superadmin":
+            logger.info("Первый пользователь %s → superadmin", user_id)
+
+        cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        return await cur.fetchone()
 
 
-async def get_user_display(user_id: int, fallback_name: Optional[str] = None) -> str:
+async def get_user_display(user_id: int, fallback: Optional[str] = None) -> str:
     try:
         async with get_db() as db:
             cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (user_id,))
             row = await cur.fetchone()
             nick = row["nickname"] if row else None
-            return display_name(nick, user_id, fallback_name)
+            return display_name(nick, user_id, fallback)
     except Exception:
-        return display_name(None, user_id, fallback_name)
+        return display_name(None, user_id, fallback)
 
 
 async def get_user_row(user_id: int):
@@ -415,7 +462,9 @@ def _owner_check(callback: CallbackQuery, target_user_id: int) -> bool:
     return True
 
 
-# ================= FSM =================
+# ═══════════════════════════════════════════════════════════════════════════
+# FSM
+# ═══════════════════════════════════════════════════════════════════════════
 class NicknameSG(StatesGroup):
     pending = State()
 
@@ -423,8 +472,10 @@ class NicknameSG(StatesGroup):
 router = Router()
 
 
-# ================= КЛАВИАТУРЫ =================
-def get_app_kb(is_short=False):
+# ═══════════════════════════════════════════════════════════════════════════
+# KEYBOARDS
+# ═══════════════════════════════════════════════════════════════════════════
+def get_app_kb(is_short: bool = False) -> Optional[InlineKeyboardMarkup]:
     app_url = get_app_url()
     if not app_url:
         return None
@@ -443,19 +494,11 @@ def get_profile_kb(owner_id: int) -> InlineKeyboardMarkup:
 
 
 def get_main_km() -> ReplyKeyboardMarkup:
-    """2×2: карточка, профиль, топ, мини-приложение."""
-    rows = [
-        [
-            KeyboardButton(text="🃏 Получить карточку"),
-            KeyboardButton(text="👤 Мой профиль"),
-        ],
-        [
-            KeyboardButton(text="🏆 Топ игроков"),
-            KeyboardButton(text="📱 Мини-приложение"),
-        ],
-    ]
     return ReplyKeyboardMarkup(
-        keyboard=rows,
+        keyboard=[
+            [KeyboardButton(text="🃏 Получить карточку"), KeyboardButton(text="👤 Мой профиль")],
+            [KeyboardButton(text="🏆 Топ игроков"), KeyboardButton(text="📱 Мини-приложение")],
+        ],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -467,8 +510,11 @@ def get_ok_kb() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def get_card_action_keyboard(user_id: int, balance: int = 0,
-                             remaining: int = COOLDOWN_SECONDS) -> InlineKeyboardMarkup:
+def get_card_action_keyboard(
+    user_id: int,
+    balance: int = 0,
+    remaining: int = COOLDOWN_SECONDS,
+) -> InlineKeyboardMarkup:
     cost = instant_cost(remaining)
     b = InlineKeyboardBuilder()
     if balance >= cost:
@@ -510,41 +556,58 @@ def get_after_card_keyboard(user_id: int, balance: int = 0) -> InlineKeyboardMar
 
 def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text=("● " if kind == "coins" else "○ ") + "🪙",
-             callback_data=TopCallback(kind="coins").pack())
-    b.button(text=("● " if kind == "cards" else "○ ") + "🃏",
-             callback_data=TopCallback(kind="cards").pack())
-    b.button(text=("● " if kind == "streak" else "○ ") + "🔥",
-             callback_data=TopCallback(kind="streak").pack())
+    b.button(
+        text=("● " if kind == "coins" else "○ ") + "🪙",
+        callback_data=TopCallback(kind="coins").pack(),
+    )
+    b.button(
+        text=("● " if kind == "cards" else "○ ") + "🃏",
+        callback_data=TopCallback(kind="cards").pack(),
+    )
+    b.button(
+        text=("● " if kind == "streak" else "○ ") + "🔥",
+        callback_data=TopCallback(kind="streak").pack(),
+    )
     b.button(text="↻ Обновить", callback_data=TopRefreshCallback(kind=kind).pack())
     b.adjust(3, 1)
     return b.as_markup()
 
 
-# ================= ОТОБРАЖЕНИЕ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# RENDER
+# ═══════════════════════════════════════════════════════════════════════════
 async def get_user_photo(bot: Bot, user_id: int):
     try:
         photos = await bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count > 0:
             return photos.photos[0][-1].file_id
     except Exception as e:
-        logger.debug(f"profile photo: {e}")
-    # локальный дефолт
-    local = get_default_avatar_input() if get_default_avatar_input else None
-    if local:
-        return local
+        logger.debug("profile photo: %s", e)
+
+    if get_default_avatar_input:
+        local = get_default_avatar_input()
+        if local:
+            return local
     return None
 
 
-async def render_profile(bot: Bot, user_id: int, fallback_name: Optional[str] = None):
+async def render_profile(
+    bot: Bot,
+    user_id: int,
+    fallback_name: Optional[str] = None,
+):
     await burn_expired_streak(user_id)
+
     async with get_db() as db:
-        cur = await db.execute("""
+        cur = await db.execute(
+            """
             SELECT u.nickname, u.coins, u.registration, u.streak, u.streak_bonus, u.role,
                    (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards_count
             FROM users u
             WHERE u.user_id = ?
-        """, (user_id,))
+            """,
+            (user_id,),
+        )
         row = await cur.fetchone()
         cur = await db.execute("SELECT COUNT(*) FROM cards")
         total_cards = (await cur.fetchone())[0]
@@ -556,21 +619,27 @@ async def render_profile(bot: Bot, user_id: int, fallback_name: Optional[str] = 
     reg_date = datetime.fromtimestamp(row["registration"] or time.time()).strftime("%d.%m.%Y")
     role = row["role"] or "user"
 
+    cards_str = f"<b>{fmt_num(row['cards_count'])}</b> / {fmt_num(total_cards)}"
+    coins_str = f"<b>{fmt_num(row['coins'])}</b>"
+    streak_str = f"<b>{fmt_days(row['streak'])}</b>"
+
     caption = (
         f"👤 <b>{esc(nickname)}</b>\n"
         f"{line('🆔', 'ID', f'<code>{user_id}</code>')}\n\n"
         f"{line('🎭', 'Роль', role_display(role))}\n"
         f"{line('📅', 'С', reg_date)}\n\n"
-        f"{line('🃏', 'Карточки', '<b>{}</b> / {}'.format(fmt_num(row['cards_count']), fmt_num(total_cards)))}\n"
-        f"{line('🪙', 'Монеты', '<b>{}</b>'.format(fmt_num(row['coins'])))}\n"
-        f"{line('🔥', 'Стрик', '<b>{}</b>'.format(fmt_days(row['streak'])))}"
+        f"{line('🃏', 'Карточки', cards_str)}\n"
+        f"{line('🪙', 'Монеты', coins_str)}\n"
+        f"{line('🔥', 'Стрик', streak_str)}"
     )
-    kb = get_profile_kb(user_id)
-    photo = await get_user_photo(bot, user_id)
-    return photo, caption, kb
+    return await get_user_photo(bot, user_id), caption, get_profile_kb(user_id)
 
 
-async def render_collection(bot: Bot, user_id: int, fallback_name: Optional[str] = None):
+async def render_collection(
+    bot: Bot,
+    user_id: int,
+    fallback_name: Optional[str] = None,
+):
     keyboard, total, total_in_game = await get_collection_main_keyboard(user_id)
     nickname = await get_user_display(user_id, fallback_name)
     photo = await get_user_photo(bot, user_id)
@@ -582,13 +651,19 @@ async def render_collection(bot: Bot, user_id: int, fallback_name: Optional[str]
     return photo, caption, keyboard, total
 
 
-async def show_or_edit_photo(message: Message, photo, caption: str, keyboard=None):
+async def show_or_edit_photo(
+    message: Message,
+    photo,
+    caption: str,
+    keyboard=None,
+) -> None:
     if photo is None:
         try:
             await message.answer(caption, reply_markup=keyboard)
         except Exception:
             pass
         return
+
     if message.photo:
         try:
             await message.edit_media(
@@ -599,19 +674,25 @@ async def show_or_edit_photo(message: Message, photo, caption: str, keyboard=Non
         except TelegramBadRequest:
             pass
         except Exception as e:
-            logger.error(f"edit_media: {e}")
+            logger.error("edit_media: %s", e)
+
     try:
         await message.answer_photo(photo=photo, caption=caption, reply_markup=keyboard)
     except TelegramBadRequest as e:
-        logger.error(f"answer_photo: {e}")
+        logger.error("answer_photo: %s", e)
         try:
             await message.answer(caption, reply_markup=keyboard)
         except Exception:
             pass
 
 
-# ================= ВЫДАЧА КАРТОЧКИ (без дубликатов) =================
-async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optional[dict], str]:
+# ═══════════════════════════════════════════════════════════════════════════
+# CARD ISSUE (no duplicates)
+# ═══════════════════════════════════════════════════════════════════════════
+async def issue_card(
+    user_id: int,
+    check_cooldown: bool = True,
+) -> tuple[Optional[dict], str]:
     """Выдаёт только новую (не имеющуюся) карточку. Дубликатов нет."""
     try:
         async with get_db() as db:
@@ -635,11 +716,13 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
             for _ in range(12):
                 selected_rarity = random.choices(rarities_list, weights=weights, k=1)[0]
                 cur = await db.execute(
-                    """SELECT id, name, photo_id, photo_path, rarity
-                       FROM cards
-                       WHERE rarity = ?
-                         AND id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
-                       ORDER BY RANDOM() LIMIT 1""",
+                    """
+                    SELECT id, name, photo_id, photo_path, rarity
+                    FROM cards
+                    WHERE rarity = ?
+                      AND id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
+                    ORDER BY RANDOM() LIMIT 1
+                    """,
                     (selected_rarity, user_id),
                 )
                 card = await cur.fetchone()
@@ -648,10 +731,12 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 
             if not card:
                 cur = await db.execute(
-                    """SELECT id, name, photo_id, photo_path, rarity
-                       FROM cards
-                       WHERE id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
-                       ORDER BY RANDOM() LIMIT 1""",
+                    """
+                    SELECT id, name, photo_id, photo_path, rarity
+                    FROM cards
+                    WHERE id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
+                    ORDER BY RANDOM() LIMIT 1
+                    """,
                     (user_id,),
                 )
                 card = await cur.fetchone()
@@ -671,10 +756,13 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
 
             if check_cooldown:
                 await db.execute(
-                    """INSERT INTO users (user_id, last_claim, coins)
-                       VALUES (?, ?, ?)
-                       ON CONFLICT(user_id) DO UPDATE SET last_claim = ?,
-                                                          coins = coins + ?""",
+                    """
+                    INSERT INTO users (user_id, last_claim, coins)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        last_claim = ?,
+                        coins = coins + ?
+                    """,
                     (user_id, now, coins_earned, now, coins_earned),
                 )
             else:
@@ -684,9 +772,11 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                 )
 
             await db.execute(
-                """INSERT INTO inventory (user_id, card_id, claim_time)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(user_id, card_id) DO UPDATE SET claim_time = ?""",
+                """
+                INSERT INTO inventory (user_id, card_id, claim_time)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, card_id) DO UPDATE SET claim_time = ?
+                """,
                 (user_id, card_id, now, now),
             )
 
@@ -703,11 +793,25 @@ async def issue_card(user_id: int, check_cooldown: bool = True) -> Tuple[Optiona
                 "balance": balance,
             }, "success"
     except Exception as e:
-        logger.error(f"issue_card: {e}")
+        logger.error("issue_card: %s", e)
         return None, "error"
 
 
-# ================= СТРИК =================
+def _card_caption(name: str, card: dict) -> str:
+    r = RARITIES[card["rarity"]]
+    name_str = f"<b>{esc(card['name'])}</b>"
+    reward_str = f"+<b>{fmt_num(card['coins_earned'])}</b> → {fmt_num(card['balance'])}"
+    return (
+        f"✨ <b>Новая карточка</b>\n\n"
+        f"{line('🃏', 'Название', name_str)}\n"
+        f"{line(r['icon'], 'Редкость', r['name'])}\n"
+        f"{line('🪙', 'Награда', reward_str)}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STREAK
+# ═══════════════════════════════════════════════════════════════════════════
 async def burn_expired_streak(user_id: int) -> bool:
     try:
         now_ts = int(time.time())
@@ -722,29 +826,33 @@ async def burn_expired_streak(user_id: int) -> bool:
             last_claim = row["last_claim"] or 0
             if streak > 0 and last_claim > 0 and (now_ts - last_claim) >= STREAK_EXPIRE_SECONDS:
                 await db.execute(
-                    "UPDATE users SET streak = 0, last_streak_date = 0, streak_bonus = 0 WHERE user_id = ?",
+                    "UPDATE users SET streak = 0, last_streak_date = 0, streak_bonus = 0 "
+                    "WHERE user_id = ?",
                     (user_id,),
                 )
                 return True
         return False
     except Exception as e:
-        logger.error(f"burn_streak: {e}")
+        logger.error("burn_streak: %s", e)
         return False
 
 
-async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, bool]:
+async def check_and_update_streak(user_id: int) -> tuple[int, int, int, bool]:
     """(streak, coin_bonus, balance, streak_updated)"""
     try:
         now_ts = int(time.time())
         now = datetime.now()
         today_start = int(datetime(now.year, now.month, now.day).timestamp())
         today_end = today_start + 86400 - 1
-        yesterday_start = int((now - timedelta(days=1)).replace(hour=0, minute=0, second=0).timestamp())
+        yesterday_start = int(
+            (now - timedelta(days=1)).replace(hour=0, minute=0, second=0).timestamp()
+        )
         yesterday_end = yesterday_start + 86400 - 1
 
         async with get_db() as db:
             cur = await db.execute(
-                "SELECT streak, last_streak_date, streak_bonus, coins, last_claim FROM users WHERE user_id = ?",
+                "SELECT streak, last_streak_date, streak_bonus, coins, last_claim "
+                "FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cur.fetchone()
@@ -759,7 +867,8 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, bool]:
             if last_claim > 0 and (now_ts - last_claim) >= STREAK_EXPIRE_SECONDS:
                 if streak > 0:
                     await db.execute(
-                        "UPDATE users SET streak = 0, last_streak_date = 0, streak_bonus = 0 WHERE user_id = ?",
+                        "UPDATE users SET streak = 0, last_streak_date = 0, streak_bonus = 0 "
+                        "WHERE user_id = ?",
                         (user_id,),
                     )
                 return 0, 0, balance, False
@@ -774,14 +883,15 @@ async def check_and_update_streak(user_id: int) -> Tuple[int, int, int, bool]:
             )
 
             await db.execute(
-                "UPDATE users SET streak = ?, last_streak_date = ?, streak_bonus = ?, coins = coins + ? WHERE user_id = ?",
+                "UPDATE users SET streak = ?, last_streak_date = ?, streak_bonus = ?, "
+                "coins = coins + ? WHERE user_id = ?",
                 (new_streak, now_ts, new_bonus, new_bonus, user_id),
             )
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
             new_balance = (await cur.fetchone())[0]
             return new_streak, new_bonus, new_balance, True
     except Exception as e:
-        logger.error(f"update_streak: {e}")
+        logger.error("update_streak: %s", e)
         return 0, 0, 0, False
 
 
@@ -793,14 +903,23 @@ def _streak_message_text(streak: int, bonus: int, new_balance: int) -> str:
             "🔥 <b>Стрик начат!</b>\n\n"
             f"{line('💡', 'Подсказка', 'Заходите каждый день — стрик растёт.')}"
         )
-    text = f"🔥 <b>Стрик</b>\n\n{line('📅', 'Дней', '<b>{}</b>'.format(fmt_days(streak)))}"
+    text = (
+        f"🔥 <b>Стрик</b>\n\n"
+        f"{line('📅', 'Дней', f'<b>{fmt_days(streak)}</b>')}"
+    )
     if bonus > 0:
         text += f"\n{line('🪙', 'Бонус', f'<b>+{fmt_num(bonus)}</b> → {fmt_num(new_balance)}')}"
     text += f"\n{line('💡', 'Подсказка', 'Заходите ежедневно, чтобы не потерять стрик.')}"
     return text
 
 
-async def send_streak_notice(message: Message, streak: int, bonus: int, new_balance: int, streak_updated: bool):
+async def send_streak_notice(
+    message: Message,
+    streak: int,
+    bonus: int,
+    new_balance: int,
+    streak_updated: bool,
+) -> None:
     if not streak_updated or streak <= 0:
         return
     text = _streak_message_text(streak, bonus, new_balance)
@@ -811,11 +930,13 @@ async def send_streak_notice(message: Message, streak: int, bonus: int, new_bala
         if message.chat.type != "private":
             asyncio.create_task(_auto_delete_pair(sent, None, GROUP_AUTODELETE_SECONDS))
     except Exception as e:
-        logger.debug(f"streak notice: {e}")
+        logger.debug("streak notice: %s", e)
 
 
-# ================= RATE LIMIT =================
-_rate_bucket: dict = {}
+# ═══════════════════════════════════════════════════════════════════════════
+# RATE LIMIT
+# ═══════════════════════════════════════════════════════════════════════════
+_rate_bucket: dict[str, list[float]] = {}
 _RATE_BUCKET_MAX_KEYS = 10_000
 
 
@@ -833,8 +954,10 @@ def rate_limited(key: str, limit: int, window: float) -> bool:
     return False
 
 
-# ================= АВТО-УДАЛЕНИЕ =================
-async def _try_delete(msg: Optional[Message]):
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTO-DELETE
+# ═══════════════════════════════════════════════════════════════════════════
+async def _try_delete(msg: Optional[Message]) -> None:
     if msg is None:
         return
     try:
@@ -842,10 +965,14 @@ async def _try_delete(msg: Optional[Message]):
     except TelegramBadRequest:
         pass
     except Exception as e:
-        logger.debug(f"try_delete: {e}")
+        logger.debug("try_delete: %s", e)
 
 
-async def _auto_delete_pair(bot_msg: Message, user_msg: Optional[Message], delay: int):
+async def _auto_delete_pair(
+    bot_msg: Message,
+    user_msg: Optional[Message],
+    delay: int,
+) -> None:
     await asyncio.sleep(delay)
     await _try_delete(bot_msg)
     await _try_delete(user_msg)
@@ -860,7 +987,9 @@ async def reply_ephemeral(message: Message, text: str, **kwargs):
     return sent
 
 
-# ================= БАН =================
+# ═══════════════════════════════════════════════════════════════════════════
+# BAN CHECKS
+# ═══════════════════════════════════════════════════════════════════════════
 async def check_not_banned(message: Message) -> bool:
     if await is_banned(message.from_user.id):
         await reply_ephemeral(
@@ -879,7 +1008,9 @@ async def check_not_banned_cb(callback: CallbackQuery) -> bool:
     return True
 
 
-# ================= СТАРТ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# COMMANDS LIST
+# ═══════════════════════════════════════════════════════════════════════════
 USER_COMMANDS = [
     BotCommand(command="start", description="👋 Запуск бота"),
     BotCommand(command="meow", description="🃏 Получить карточку"),
@@ -894,11 +1025,16 @@ USER_COMMANDS = [
 ]
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# START
+# ═══════════════════════════════════════════════════════════════════════════
 @router.message(CommandStart(), F.chat.type == "private")
-async def cmd_start(message: Message):
+async def cmd_start(message: Message) -> None:
     try:
         await get_or_create_user(
-            message.from_user.id, message.from_user.username, message.from_user.full_name
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.full_name,
         )
         if not await check_not_banned(message):
             return
@@ -919,10 +1055,12 @@ async def cmd_start(message: Message):
         )
         await message.reply(welcome, reply_markup=get_main_km())
     except Exception as e:
-        logger.error(f"cmd_start: {e}")
+        logger.error("cmd_start: %s", e)
 
 
-# ================= ПОМОЩЬ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# HELP
+# ═══════════════════════════════════════════════════════════════════════════
 HELP_PAGES = [
     {
         "title": "📖 Команды",
@@ -946,7 +1084,7 @@ HELP_PAGES = [
             f"{line('🪙', 'Бонус', 'монеты за дни стрика')}\n\n"
             f"<b>🃏 Редкости</b>\n"
             + "\n".join(
-                line(v['icon'], v['name'], f"{v['reward']} 🪙")
+                line(v["icon"], v["name"], f"{v['reward']} 🪙")
                 for v in RARITIES.values()
             )
         ),
@@ -987,10 +1125,14 @@ def get_help_keyboard(page: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="‹", callback_data=HelpCallback(page=page - 1).pack()))
+        nav.append(
+            InlineKeyboardButton(text="‹", callback_data=HelpCallback(page=page - 1).pack())
+        )
     nav.append(InlineKeyboardButton(text=f"{page + 1} / {total}", callback_data="ignore"))
     if page < total - 1:
-        nav.append(InlineKeyboardButton(text="›", callback_data=HelpCallback(page=page + 1).pack()))
+        nav.append(
+            InlineKeyboardButton(text="›", callback_data=HelpCallback(page=page + 1).pack())
+        )
     b.row(*nav)
     return b.as_markup()
 
@@ -1004,14 +1146,14 @@ def build_help_text(page: int) -> str:
 
 @router.message(Command("help"))
 @router.message(F.text.regexp(HELP_CMD_RE))
-async def cmd_help(message: Message):
+async def cmd_help(message: Message) -> None:
     if not await check_not_banned(message):
         return
     await message.reply(build_help_text(0), reply_markup=get_help_keyboard(0))
 
 
 @router.callback_query(HelpCallback.filter())
-async def help_page_callback(callback: CallbackQuery, callback_data: HelpCallback):
+async def help_page_callback(callback: CallbackQuery, callback_data: HelpCallback) -> None:
     if not await check_not_banned_cb(callback):
         return
     try:
@@ -1023,14 +1165,16 @@ async def help_page_callback(callback: CallbackQuery, callback_data: HelpCallbac
             await callback.message.answer(text, reply_markup=kb)
         await callback.answer()
     except Exception as e:
-        logger.error(f"help: {e}")
+        logger.error("help: %s", e)
         await callback.answer("⚠️ Ошибка")
 
 
-# ================= МИНИ-ПРИЛОЖЕНИЕ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# MINI-APP
+# ═══════════════════════════════════════════════════════════════════════════
 @router.message(F.text == "📱 Мини-приложение")
 @router.message(Command("miniapp"))
-async def cmd_miniapp(message: Message):
+async def cmd_miniapp(message: Message) -> None:
     if not await check_not_banned(message):
         return
     app_kb = get_app_kb(is_short=True)
@@ -1044,35 +1188,17 @@ async def cmd_miniapp(message: Message):
     )
 
 
-# ================= ПОЛУЧЕНИЕ КАРТОЧКИ =================
-def _resolve_card_photo(card: dict):
-    if get_card_photo_input:
-        local = get_card_photo_input(card["id"], card.get("photo_path"))
-        if local:
-            return local
-    # fallback file_id если локального нет
-    if card.get("photo_id"):
-        return card["photo_id"]
-    return None
-
-
-def _card_caption(name: str, card: dict) -> str:
-    r = RARITIES[card["rarity"]]
-    return (
-        f"✨ <b>Новая карточка</b>\n\n"
-        f"{line('🃏', 'Название', '<b>{}</b>'.format(esc(card['name'])))}\n"
-        f"{line(r['icon'], 'Редкость', r['name'])}\n"
-        f"{line('🪙', 'Награда', '+<b>{}</b> → {}'.format(fmt_num(card['coins_earned']), fmt_num(card['balance'])))}"
-    )
-
-
+# ═══════════════════════════════════════════════════════════════════════════
+# GET CARD
+# ═══════════════════════════════════════════════════════════════════════════
 @router.message(F.text == "🃏 Получить карточку")
 @router.message(F.text.lower().strip() == "мряу")
 @router.message(F.text.lower().strip() == "милость")
 @router.message(Command("meow"))
-async def get_card_handler(message: Message):
+async def get_card_handler(message: Message) -> None:
     if not await check_not_banned(message):
         return
+
     user_id = message.from_user.id
     now = int(time.time())
 
@@ -1083,7 +1209,9 @@ async def get_card_handler(message: Message):
         return
 
     try:
-        await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
+        await get_or_create_user(
+            user_id, message.from_user.username, message.from_user.full_name
+        )
         nickname = await get_user_display(user_id, message.from_user.full_name)
 
         async with get_db() as db:
@@ -1096,7 +1224,6 @@ async def get_card_handler(message: Message):
 
         time_passed = now - last_claim
         if time_passed < COOLDOWN_SECONDS:
-            # Стрик обновляем даже на кулдауне (раз в день)
             streak, bonus, new_balance, streak_updated = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             h, m = remaining // 3600, (remaining % 3600) // 60
@@ -1110,18 +1237,17 @@ async def get_card_handler(message: Message):
 
             text = (
                 f"⏳ <b>{esc(nickname)}</b>\n\n"
-                f"{line('⏱', 'Следующая карточка', '<b>{}</b>'.format(time_str))}"
+                f"{line('⏱', 'Следующая карточка', f'<b>{time_str}</b>')}"
             )
             await reply_ephemeral(
-                message, text,
+                message,
+                text,
                 reply_markup=get_card_action_keyboard(user_id, balance, remaining=remaining),
             )
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
             return
 
         card, status = await issue_card(user_id, check_cooldown=True)
-
-        # Стрик капает даже если карточек нет / всё собрано
         streak, bonus, new_balance, streak_updated = await check_and_update_streak(user_id)
 
         if status == "no_cards":
@@ -1155,7 +1281,7 @@ async def get_card_handler(message: Message):
             effect = EFFECT_PARTY
 
         try:
-            kwargs = {"caption": caption, "reply_markup": kb}
+            kwargs: dict[str, Any] = {"caption": caption, "reply_markup": kb}
             if effect:
                 kwargs["message_effect_id"] = effect
             if photo:
@@ -1163,13 +1289,12 @@ async def get_card_handler(message: Message):
             else:
                 await message.reply(caption, reply_markup=kb)
         except TypeError:
-            # старый aiogram без message_effect_id
             if photo:
                 await message.reply_photo(photo=photo, caption=caption, reply_markup=kb)
             else:
                 await message.reply(caption, reply_markup=kb)
         except TelegramBadRequest as e:
-            logger.error(f"reply card: {e}")
+            logger.error("reply card: %s", e)
             try:
                 if photo:
                     await message.reply_photo(photo=photo, caption=caption, reply_markup=kb)
@@ -1180,16 +1305,19 @@ async def get_card_handler(message: Message):
 
         await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
     except Exception as e:
-        logger.error(f"get_card_handler: {e}")
+        logger.error("get_card_handler: %s", e)
         await reply_ephemeral(message, "❌ Произошла ошибка. Попробуйте позже.")
 
 
-# ================= КУБИК =================
+# ═══════════════════════════════════════════════════════════════════════════
+# DICE
+# ═══════════════════════════════════════════════════════════════════════════
 @router.message(Command("dice"))
 @router.message(F.text.regexp(DICE_CMD_RE))
-async def dice_handler(message: Message):
+async def dice_handler(message: Message) -> None:
     if not await check_not_banned(message):
         return
+
     user_id = message.from_user.id
 
     if rate_limited(f"dice:{user_id}", limit=6, window=15):
@@ -1200,7 +1328,9 @@ async def dice_handler(message: Message):
             return
 
     try:
-        await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
+        await get_or_create_user(
+            user_id, message.from_user.username, message.from_user.full_name
+        )
         nickname = await get_user_display(user_id, message.from_user.full_name)
         now = int(time.time())
 
@@ -1216,8 +1346,8 @@ async def dice_handler(message: Message):
                 await reply_ephemeral(
                     message,
                     f"⚠️ <b>Недостаточно монет</b>\n\n"
-                    f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(DICE_MIN_BALANCE)))}\n"
-                    f"{line('🪙', 'У вас', '<b>{}</b>'.format(fmt_num(balance)))}",
+                    f"{line('🪙', 'Нужно', f'<b>{fmt_num(DICE_MIN_BALANCE)}</b>')}\n"
+                    f"{line('🪙', 'У вас', f'<b>{fmt_num(balance)}</b>')}",
                 )
                 return
 
@@ -1229,7 +1359,7 @@ async def dice_handler(message: Message):
                 await reply_ephemeral(
                     message,
                     f"⏳ <b>{esc(nickname)}</b>\n\n"
-                    f"{line('⏱', 'Кубик через', '<b>{}</b>'.format(time_str))}",
+                    f"{line('⏱', 'Кубик через', f'<b>{time_str}</b>')}",
                 )
                 return
 
@@ -1243,7 +1373,7 @@ async def dice_handler(message: Message):
         dice_value = 1
         if spin_msg.dice and spin_msg.dice.value:
             dice_value = int(spin_msg.dice.value)
-        delta = dice_delta_from_value(dice_value)
+        delta = dice_delta(dice_value)
 
         async with get_db() as db:
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
@@ -1268,21 +1398,23 @@ async def dice_handler(message: Message):
 
         result = (
             f"🎲 <b>{title}</b>\n\n"
-            f"{line('🎲', 'Выпало', '<b>{}</b>'.format(dice_value))}\n"
-            f"{line('🪙', 'Результат', '<b>{}</b>'.format(delta_str))}\n"
-            f"{line('🪙', 'Баланс', '<b>{}</b>'.format(fmt_num(new_balance)))}"
+            f"{line('🎲', 'Выпало', f'<b>{dice_value}</b>')}\n"
+            f"{line('🪙', 'Результат', f'<b>{delta_str}</b>')}\n"
+            f"{line('🪙', 'Баланс', f'<b>{fmt_num(new_balance)}</b>')}"
         )
         try:
             await spin_msg.reply(result)
         except TelegramBadRequest:
             await message.reply(result)
     except Exception as e:
-        logger.error(f"dice: {e}")
+        logger.error("dice: %s", e)
         await reply_ephemeral(message, "❌ Произошла ошибка.")
 
 
-# ================= ДУЭЛИ =================
-async def expire_old_duels():
+# ═══════════════════════════════════════════════════════════════════════════
+# DUELS
+# ═══════════════════════════════════════════════════════════════════════════
+async def expire_old_duels() -> None:
     now = int(time.time())
     async with get_db() as db:
         await db.execute(
@@ -1294,7 +1426,7 @@ async def expire_old_duels():
 
 @router.message(Command("duel"))
 @router.message(F.text.regexp(DUEL_CMD_RE))
-async def duel_create(message: Message, command: CommandObject = None):
+async def duel_create(message: Message, command: CommandObject = None) -> None:
     if not await check_not_banned(message):
         return
 
@@ -1302,13 +1434,13 @@ async def duel_create(message: Message, command: CommandObject = None):
         await reply_ephemeral(message, "⚠️ Дуэли работают только в группах.")
         return
 
-    # ставка
     stake = None
     if command and command.args:
         try:
             stake = int(command.args.strip().split()[0])
         except (ValueError, IndexError):
             pass
+
     if stake is None and message.text:
         m = DUEL_CMD_RE.match(message.text.strip())
         if m:
@@ -1363,25 +1495,26 @@ async def duel_create(message: Message, command: CommandObject = None):
             await reply_ephemeral(
                 message,
                 f"⚠️ Недостаточно монет у вас.\n"
-                f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(stake)))}\n"
-                f"{line('🪙', 'У вас', '<b>{}</b>'.format(fmt_num(ch_coins)))}",
+                f"{line('🪙', 'Нужно', f'<b>{fmt_num(stake)}</b>')}\n"
+                f"{line('🪙', 'У вас', f'<b>{fmt_num(ch_coins)}</b>')}",
             )
             return
         if op_coins < stake:
             await reply_ephemeral(
                 message,
                 f"⚠️ У соперника недостаточно монет.\n"
-                f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(stake)))}\n"
-                f"{line('🪙', 'У соперника', '<b>{}</b>'.format(fmt_num(op_coins)))}",
+                f"{line('🪙', 'Нужно', f'<b>{fmt_num(stake)}</b>')}\n"
+                f"{line('🪙', 'У соперника', f'<b>{fmt_num(op_coins)}</b>')}",
             )
             return
 
-        # уже есть pending дуэль между ними?
         cur = await db.execute(
-            """SELECT id FROM duels
-               WHERE status = 'pending'
-                 AND ((challenger_id = ? AND opponent_id = ?)
-                   OR (challenger_id = ? AND opponent_id = ?))""",
+            """
+            SELECT id FROM duels
+            WHERE status = 'pending'
+              AND ((challenger_id = ? AND opponent_id = ?)
+                OR (challenger_id = ? AND opponent_id = ?))
+            """,
             (challenger.id, opponent.id, opponent.id, challenger.id),
         )
         if await cur.fetchone():
@@ -1390,8 +1523,10 @@ async def duel_create(message: Message, command: CommandObject = None):
 
         now = int(time.time())
         cur = await db.execute(
-            """INSERT INTO duels (challenger_id, opponent_id, stake, status, created_at, chat_id)
-               VALUES (?, ?, ?, 'pending', ?, ?)""",
+            """
+            INSERT INTO duels (challenger_id, opponent_id, stake, status, created_at, chat_id)
+            VALUES (?, ?, ?, 'pending', ?, ?)
+            """,
             (challenger.id, opponent.id, stake, now, message.chat.id),
         )
         duel_id = cur.lastrowid
@@ -1409,8 +1544,8 @@ async def duel_create(message: Message, command: CommandObject = None):
         f"⚔️ <b>Вызов на дуэль</b>\n\n"
         f"{line('👤', 'Вызывающий', esc(ch_name))}\n"
         f"{line('👤', 'Соперник', esc(op_name))}\n"
-        f"{line('🪙', 'Ставка', '<b>{}</b>'.format(fmt_num(stake)))}\n"
-        f"{line('🏦', 'Банк', '<b>{}</b>'.format(fmt_num(bank)))}\n"
+        f"{line('🪙', 'Ставка', f'<b>{fmt_num(stake)}</b>')}\n"
+        f"{line('🏦', 'Банк', f'<b>{fmt_num(bank)}</b>')}\n"
         f"{line('⏱', 'Истекает', 'через 10 мин')}"
     )
     sent = await message.reply(text, reply_markup=b.as_markup())
@@ -1421,9 +1556,10 @@ async def duel_create(message: Message, command: CommandObject = None):
 
 
 @router.callback_query(DuelCancelCallback.filter())
-async def duel_cancel(callback: CallbackQuery, callback_data: DuelCancelCallback):
+async def duel_cancel(callback: CallbackQuery, callback_data: DuelCancelCallback) -> None:
     if not await check_not_banned_cb(callback):
         return
+
     duel_id = callback_data.duel_id
     user_id = callback.from_user.id
 
@@ -1439,9 +1575,7 @@ async def duel_cancel(callback: CallbackQuery, callback_data: DuelCancelCallback
         if user_id not in (duel["challenger_id"], duel["opponent_id"]):
             await callback.answer("Это не ваша дуэль", show_alert=True)
             return
-        await db.execute(
-            "UPDATE duels SET status = 'cancelled' WHERE id = ?", (duel_id,)
-        )
+        await db.execute("UPDATE duels SET status = 'cancelled' WHERE id = ?", (duel_id,))
 
     try:
         await callback.message.edit_text(
@@ -1453,9 +1587,10 @@ async def duel_cancel(callback: CallbackQuery, callback_data: DuelCancelCallback
 
 
 @router.callback_query(DuelAcceptCallback.filter())
-async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback):
+async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback) -> None:
     if not await check_not_banned_cb(callback):
         return
+
     duel_id = callback_data.duel_id
     user_id = callback.from_user.id
     await expire_old_duels()
@@ -1494,7 +1629,6 @@ async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback
                 pass
             return
 
-        # списываем ставки
         await db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (stake, ch_id))
         await db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (stake, op_id))
         await db.execute("UPDATE duels SET status = 'accepted' WHERE id = ?", (duel_id,))
@@ -1508,7 +1642,6 @@ async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback
     chat_id = callback.message.chat.id
     bot = callback.bot
 
-    # два кубика
     try:
         d1 = await bot.send_dice(chat_id=chat_id, emoji="🎲")
         await asyncio.sleep(DICE_SPIN_DELAY)
@@ -1517,8 +1650,7 @@ async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback
         v1 = int(d1.dice.value) if d1.dice else 1
         v2 = int(d2.dice.value) if d2.dice else 1
     except Exception as e:
-        logger.error(f"duel dice: {e}")
-        # возврат ставок
+        logger.error("duel dice: %s", e)
         async with get_db() as db:
             await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, ch_id))
             await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, op_id))
@@ -1531,10 +1663,10 @@ async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback
     op_name = await get_user_display(op_id)
 
     if v1 > v2:
-        winner_id, winner_name, loser_name = ch_id, ch_name, op_name
+        winner_id, winner_name = ch_id, ch_name
         result_title = "🏆 Победа"
     elif v2 > v1:
-        winner_id, winner_name, loser_name = op_id, op_name, ch_name
+        winner_id, winner_name = op_id, op_name
         result_title = "🏆 Победа"
     else:
         winner_id = None
@@ -1550,34 +1682,36 @@ async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback
             new_bal = (await cur.fetchone())["coins"]
             text = (
                 f"⚔️ <b>{result_title}</b>\n\n"
-                f"{line('🎲', ch_name, '<b>{}</b>'.format(v1))}\n"
-                f"{line('🎲', op_name, '<b>{}</b>'.format(v2))}\n"
+                f"{line('🎲', ch_name, f'<b>{v1}</b>')}\n"
+                f"{line('🎲', op_name, f'<b>{v2}</b>')}\n"
                 f"{line('🏆', 'Победитель', esc(winner_name))}\n"
                 f"{line('🪙', 'Банк', f'<b>+{fmt_num(bank)}</b> → {fmt_num(new_bal)}')}"
             )
         else:
-            # ничья — возврат
             await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, ch_id))
             await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, op_id))
             await db.execute("UPDATE duels SET status = 'completed' WHERE id = ?", (duel_id,))
             text = (
                 f"⚔️ <b>{result_title}</b>\n\n"
-                f"{line('🎲', ch_name, '<b>{}</b>'.format(v1))}\n"
-                f"{line('🎲', op_name, '<b>{}</b>'.format(v2))}\n"
+                f"{line('🎲', ch_name, f'<b>{v1}</b>')}\n"
+                f"{line('🎲', op_name, f'<b>{v2}</b>')}\n"
                 f"{line('🪙', 'Ставки', 'возвращены')}"
             )
 
     await callback.message.answer(text)
 
 
-# ================= ПРОФИЛЬ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# PROFILE
+# ═══════════════════════════════════════════════════════════════════════════
 @router.message(F.text == "👤 Мой профиль")
 @router.message(F.text == "👤 Профиль")
 @router.message(Command("profile"))
 @router.message(F.text.regexp(PROFILE_CMD_RE))
-async def show_profile(message: Message):
+async def show_profile(message: Message) -> None:
     if not await check_not_banned(message):
         return
+
     try:
         target = message.from_user
         if (
@@ -1591,7 +1725,9 @@ async def show_profile(message: Message):
         await get_or_create_user(target.id, target.username, target.full_name)
         if target.id != message.from_user.id:
             await get_or_create_user(
-                message.from_user.id, message.from_user.username, message.from_user.full_name
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.full_name,
             )
 
         photo, caption, kb = await render_profile(
@@ -1600,6 +1736,7 @@ async def show_profile(message: Message):
         if photo is None and "не найден" in (caption or "").lower():
             await message.reply(caption)
             return
+
         try:
             if photo:
                 await message.reply_photo(photo=photo, caption=caption, reply_markup=kb)
@@ -1608,47 +1745,51 @@ async def show_profile(message: Message):
         except TelegramBadRequest:
             await message.reply(caption, reply_markup=kb)
     except Exception as e:
-        logger.error(f"profile: {e}")
+        logger.error("profile: %s", e)
         await message.reply("❌ Ошибка профиля.")
 
 
 @router.callback_query(BackToProfileCallback.filter())
-async def process_back_to_profile(callback: CallbackQuery, callback_data: BackToProfileCallback):
+async def process_back_to_profile(
+    callback: CallbackQuery,
+    callback_data: BackToProfileCallback,
+) -> None:
     if not await check_not_banned_cb(callback):
         return
     if not _owner_check(callback, callback_data.user_id):
         await callback.answer("⚠️ Не ваша кнопка")
         return
+
     try:
         target_id = callback_data.user_id or callback.from_user.id
         photo, caption, kb = await render_profile(
-            callback.message.bot, target_id, fallback_name=callback.from_user.full_name
+            callback.message.bot,
+            target_id,
+            fallback_name=callback.from_user.full_name,
         )
         await show_or_edit_photo(callback.message, photo, caption, kb)
         await callback.answer()
     except Exception as e:
-        logger.error(f"back profile: {e}")
+        logger.error("back profile: %s", e)
         await callback.answer("⚠️ Ошибка")
 
 
-# ================= НИК =================
-def validate_nickname(raw: str) -> Optional[str]:
-    raw = raw.strip()
-    if not (2 <= len(raw) <= 32):
-        return None
-    if URL_RE.search(raw):
-        return None
-    if not NICKNAME_RE.match(raw):
-        return None
-    return raw
-
-
+# ═══════════════════════════════════════════════════════════════════════════
+# NICKNAME
+# ═══════════════════════════════════════════════════════════════════════════
 @router.message(Command("nickname"))
-async def nickname_cmd(message: Message, command: CommandObject, state: FSMContext):
+async def nickname_cmd(
+    message: Message,
+    command: CommandObject,
+    state: FSMContext,
+) -> None:
     if not await check_not_banned(message):
         return
+
     user_id = message.from_user.id
-    await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
+    await get_or_create_user(
+        user_id, message.from_user.username, message.from_user.full_name
+    )
     arg = (command.args or "").strip()
 
     if arg.lower() == "reset":
@@ -1684,8 +1825,8 @@ async def nickname_cmd(message: Message, command: CommandObject, state: FSMConte
     if balance < NICKNAME_COST:
         await message.reply(
             f"⚠️ Недостаточно монет.\n"
-            f"{line('🪙', 'Нужно', '<b>{}</b>'.format(fmt_num(NICKNAME_COST)))}\n"
-            f"{line('🪙', 'У вас', '<b>{}</b>'.format(fmt_num(balance)))}"
+            f"{line('🪙', 'Нужно', f'<b>{fmt_num(NICKNAME_COST)}</b>')}\n"
+            f"{line('🪙', 'У вас', f'<b>{fmt_num(balance)}</b>')}"
         )
         return
 
@@ -1697,17 +1838,22 @@ async def nickname_cmd(message: Message, command: CommandObject, state: FSMConte
     await state.update_data(pending_nick=new_nick, pending_action="apply")
     await message.reply(
         f"✏️ <b>Сменить ник?</b>\n\n"
-        f"{line('👤', 'Новый ник', '<b>{}</b>'.format(esc(new_nick)))}\n"
-        f"{line('🪙', 'Стоимость', '<b>{}</b>'.format(NICKNAME_COST))}\n"
+        f"{line('👤', 'Новый ник', f'<b>{esc(new_nick)}</b>')}\n"
+        f"{line('🪙', 'Стоимость', f'<b>{NICKNAME_COST}</b>')}\n"
         f"{line('🪙', 'Баланс', fmt_num(balance))}",
         reply_markup=b.as_markup(),
     )
 
 
 @router.callback_query(NickConfirmCallback.filter())
-async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCallback, state: FSMContext):
+async def nickname_confirm(
+    callback: CallbackQuery,
+    callback_data: NickConfirmCallback,
+    state: FSMContext,
+) -> None:
     if not await check_not_banned_cb(callback):
         return
+
     user_id = callback.from_user.id
 
     if callback_data.action == "cancel":
@@ -1743,6 +1889,7 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
             await callback.message.edit_text("❌ Неверный ник")
             await callback.answer()
             return
+
         async with get_db() as db:
             cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
             row = await cur.fetchone()
@@ -1758,6 +1905,7 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
                 "UPDATE users SET nickname = ?, coins = coins - ? WHERE user_id = ?",
                 (new_nick, NICKNAME_COST, user_id),
             )
+
         await state.clear()
         await callback.message.edit_text(
             f"✓ <b>Ник изменён</b>\n\n"
@@ -1767,30 +1915,39 @@ async def nickname_confirm(callback: CallbackQuery, callback_data: NickConfirmCa
         )
         await callback.answer()
         return
+
     await callback.answer()
 
 
 @router.callback_query(NicknameCallback.filter(F.action == "change"))
-async def change_nickname_hint(callback: CallbackQuery, callback_data: NicknameCallback):
+async def change_nickname_hint(
+    callback: CallbackQuery,
+    callback_data: NicknameCallback,
+) -> None:
     await callback.answer(
         f"/nickname НовыйНик ({NICKNAME_COST} 🪙) или /nickname reset",
         show_alert=True,
     )
 
 
-# ================= ТОП =================
+# ═══════════════════════════════════════════════════════════════════════════
+# TOP
+# ═══════════════════════════════════════════════════════════════════════════
 async def build_top_text(kind: str, current_user_id: int) -> str:
     await burn_expired_streak(current_user_id)
     limit = 10
     now_ts = int(time.time())
+
     async with get_db() as db:
         if kind == "cards":
             cur = await db.execute(
-                """SELECT u.user_id, u.nickname,
-                          (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS value
-                   FROM users u
-                   WHERE u.role != 'banned'
-                   ORDER BY value DESC, u.user_id ASC LIMIT ?""",
+                """
+                SELECT u.user_id, u.nickname,
+                       (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS value
+                FROM users u
+                WHERE u.role != 'banned'
+                ORDER BY value DESC, u.user_id ASC LIMIT ?
+                """,
                 (limit,),
             )
             top = await cur.fetchall()
@@ -1800,15 +1957,18 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             )
             my_value = (await cur.fetchone())["value"] or 0
             cur = await db.execute(
-                """SELECT COUNT(*) + 1 FROM (
-                       SELECT u.user_id,
-                              (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS value
-                       FROM users u WHERE u.role != 'banned'
-                   ) WHERE value > ?""",
+                """
+                SELECT COUNT(*) + 1 FROM (
+                    SELECT u.user_id,
+                           (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS value
+                    FROM users u WHERE u.role != 'banned'
+                ) WHERE value > ?
+                """,
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
             unit, title = "🃏", "🃏 Топ по карточкам"
+
         elif kind == "streak":
             effective = (
                 "CASE WHEN last_claim > 0 AND (? - last_claim) >= ? "
@@ -1831,6 +1991,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
             )
             my_rank = (await cur.fetchone())[0]
             unit, title = "🔥", "🔥 Топ по стрику"
+
         else:
             cur = await db.execute(
                 "SELECT user_id, nickname, coins AS value FROM users "
@@ -1838,16 +1999,21 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
                 (limit,),
             )
             top = await cur.fetchall()
-            cur = await db.execute("SELECT coins AS value FROM users WHERE user_id = ?", (current_user_id,))
+            cur = await db.execute(
+                "SELECT coins AS value FROM users WHERE user_id = ?", (current_user_id,)
+            )
             my_row = await cur.fetchone()
             my_value = my_row["value"] if my_row else 0
             cur = await db.execute(
-                "SELECT COUNT(*) + 1 FROM users WHERE coins > ? AND role != 'banned'", (my_value,)
+                "SELECT COUNT(*) + 1 FROM users WHERE coins > ? AND role != 'banned'",
+                (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
             unit, title = "🪙", "🪙 Топ по монетам"
 
-        cur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (current_user_id,))
+        cur = await db.execute(
+            "SELECT nickname FROM users WHERE user_id = ?", (current_user_id,)
+        )
         my_row2 = await cur.fetchone()
         my_nick = display_name(
             my_row2["nickname"] if my_row2 else None, current_user_id
@@ -1871,7 +2037,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
 @router.message(F.text == "🏆 Топ")
 @router.message(Command("top"))
 @router.message(F.text.regexp(TOP_CMD_RE))
-async def show_top_players(message: Message):
+async def show_top_players(message: Message) -> None:
     if not await check_not_banned(message):
         return
     if rate_limited(f"top:{message.from_user.id}", limit=6, window=5):
@@ -1880,12 +2046,12 @@ async def show_top_players(message: Message):
         text = await build_top_text("coins", message.from_user.id)
         await message.reply(text, reply_markup=get_top_keyboard("coins"))
     except Exception as e:
-        logger.error(f"top: {e}")
+        logger.error("top: %s", e)
         await message.reply("❌ Ошибка топа")
 
 
 @router.callback_query(TopCallback.filter())
-async def switch_top(callback: CallbackQuery, callback_data: TopCallback):
+async def switch_top(callback: CallbackQuery, callback_data: TopCallback) -> None:
     if not await check_not_banned_cb(callback):
         return
     if rate_limited(f"top:{callback.from_user.id}", limit=5, window=5):
@@ -1894,21 +2060,28 @@ async def switch_top(callback: CallbackQuery, callback_data: TopCallback):
     try:
         text = await build_top_text(callback_data.kind, callback.from_user.id)
         try:
-            await callback.message.edit_text(text, reply_markup=get_top_keyboard(callback_data.kind))
+            await callback.message.edit_text(
+                text, reply_markup=get_top_keyboard(callback_data.kind)
+            )
             await callback.answer()
         except TelegramBadRequest as e:
             if "message is not modified" in str(e).lower():
                 await callback.answer("Данные не изменились")
             else:
-                await callback.message.answer(text, reply_markup=get_top_keyboard(callback_data.kind))
+                await callback.message.answer(
+                    text, reply_markup=get_top_keyboard(callback_data.kind)
+                )
                 await callback.answer()
     except Exception as e:
-        logger.error(f"switch top: {e}")
+        logger.error("switch top: %s", e)
         await callback.answer("⚠️ Ошибка")
 
 
 @router.callback_query(TopRefreshCallback.filter())
-async def refresh_top(callback: CallbackQuery, callback_data: TopRefreshCallback):
+async def refresh_top(
+    callback: CallbackQuery,
+    callback_data: TopRefreshCallback,
+) -> None:
     if not await check_not_banned_cb(callback):
         return
     if rate_limited(f"top:{callback.from_user.id}", limit=5, window=5):
@@ -1917,27 +2090,35 @@ async def refresh_top(callback: CallbackQuery, callback_data: TopRefreshCallback
     try:
         text = await build_top_text(callback_data.kind, callback.from_user.id)
         try:
-            await callback.message.edit_text(text, reply_markup=get_top_keyboard(callback_data.kind))
+            await callback.message.edit_text(
+                text, reply_markup=get_top_keyboard(callback_data.kind)
+            )
             await callback.answer("Обновлено")
         except TelegramBadRequest as e:
             if "message is not modified" in str(e).lower():
                 await callback.answer("Данные не изменились")
             else:
-                await callback.message.answer(text, reply_markup=get_top_keyboard(callback_data.kind))
+                await callback.message.answer(
+                    text, reply_markup=get_top_keyboard(callback_data.kind)
+                )
                 await callback.answer()
     except Exception as e:
-        logger.error(f"refresh top: {e}")
+        logger.error("refresh top: %s", e)
         await callback.answer("⚠️ Ошибка")
 
 
-# ================= КОЛЛЕКЦИЯ =================
+# ═══════════════════════════════════════════════════════════════════════════
+# COLLECTION
+# ═══════════════════════════════════════════════════════════════════════════
 async def get_collection_main_keyboard(user_id: int):
     async with get_db() as db:
         cur = await db.execute(
-            """SELECT c.rarity, COUNT(*)
-               FROM inventory i JOIN cards c ON i.card_id = c.id
-               WHERE i.user_id = ?
-               GROUP BY c.rarity""",
+            """
+            SELECT c.rarity, COUNT(*)
+            FROM inventory i JOIN cards c ON i.card_id = c.id
+            WHERE i.user_id = ?
+            GROUP BY c.rarity
+            """,
             (user_id,),
         )
         stats = dict(await cur.fetchall())
@@ -1950,12 +2131,19 @@ async def get_collection_main_keyboard(user_id: int):
             user_amount = stats.get(r_key, 0)
             if user_amount == 0:
                 continue
-            cur = await db.execute("SELECT COUNT(*) FROM cards WHERE rarity = ?", (r_key,))
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM cards WHERE rarity = ?", (r_key,)
+            )
             total_of_rarity = (await cur.fetchone())[0]
             rows.append([
                 InlineKeyboardButton(
-                    text=f"{r_info['icon']} {r_info['name']} · {fmt_num(user_amount)}/{fmt_num(total_of_rarity)}",
-                    callback_data=RaritySelectCallback(rarity=r_key, page=0, user_id=user_id).pack(),
+                    text=(
+                        f"{r_info['icon']} {r_info['name']} · "
+                        f"{fmt_num(user_amount)}/{fmt_num(total_of_rarity)}"
+                    ),
+                    callback_data=RaritySelectCallback(
+                        rarity=r_key, page=0, user_id=user_id
+                    ).pack(),
                 )
             ])
         rows.append([
@@ -1969,12 +2157,15 @@ async def get_collection_main_keyboard(user_id: int):
 
 @router.message(Command("collection"))
 @router.message(F.text.regexp(COLLECTION_CMD_RE))
-async def show_collection(message: Message):
+async def show_collection(message: Message) -> None:
     if not await check_not_banned(message):
         return
+
     user_id = message.from_user.id
     try:
-        await get_or_create_user(user_id, message.from_user.username, message.from_user.full_name)
+        await get_or_create_user(
+            user_id, message.from_user.username, message.from_user.full_name
+        )
         photo, caption, keyboard, total = await render_collection(
             message.bot, user_id, message.from_user.full_name
         )
@@ -1983,26 +2174,33 @@ async def show_collection(message: Message):
             return
         await show_or_edit_photo(message, photo, caption, keyboard)
     except Exception as e:
-        logger.error(f"collection: {e}")
+        logger.error("collection: %s", e)
         await message.reply("❌ Ошибка")
 
 
 @router.callback_query(RaritySelectCallback.filter())
-async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySelectCallback):
+async def process_rarity_view(
+    callback: CallbackQuery,
+    callback_data: RaritySelectCallback,
+) -> None:
     if not await check_not_banned_cb(callback):
         return
     if not _owner_check(callback, callback_data.user_id):
         await callback.answer("⚠️ Не ваша кнопка")
         return
+
     user_id = callback_data.user_id or callback.from_user.id
     rarity, page = callback_data.rarity, callback_data.page
+
     try:
         async with get_db() as db:
             cur = await db.execute(
-                """SELECT c.name, c.photo_id, c.photo_path, i.claim_time, c.id
-                   FROM inventory i JOIN cards c ON i.card_id = c.id
-                   WHERE i.user_id = ? AND c.rarity = ?
-                   ORDER BY i.claim_time DESC""",
+                """
+                SELECT c.name, c.photo_id, c.photo_path, i.claim_time, c.id
+                FROM inventory i JOIN cards c ON i.card_id = c.id
+                WHERE i.user_id = ? AND c.rarity = ?
+                ORDER BY i.claim_time DESC
+                """,
                 (user_id, rarity),
             )
             cards = await cur.fetchall()
@@ -2015,51 +2213,76 @@ async def process_rarity_view(callback: CallbackQuery, callback_data: RaritySele
         page = max(0, min(page, total_pages - 1))
         card = cards[page]
         info = RARITIES.get(rarity, {})
+        name_str = f"<b>{esc(card['name'])}</b>"
+        reward_str = f"+{fmt_num(info.get('reward', 0))}"
         caption = (
-            f"{line('🃏', 'Название', '<b>{}</b>'.format(esc(card['name'])))}\n"
+            f"{line('🃏', 'Название', name_str)}\n"
             f"{line(info.get('icon', '•'), 'Редкость', info.get('name', rarity))}\n"
-            f"{line('🪙', 'Награда', '+{}'.format(fmt_num(info.get('reward', 0))))}"
+            f"{line('🪙', 'Награда', reward_str)}"
         )
 
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="‹",
-                callback_data=RaritySelectCallback(rarity=rarity, page=page - 1, user_id=user_id).pack(),
-            ))
-        nav.append(InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="ignore"))
+            nav.append(
+                InlineKeyboardButton(
+                    text="‹",
+                    callback_data=RaritySelectCallback(
+                        rarity=rarity, page=page - 1, user_id=user_id
+                    ).pack(),
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(text=f"{page + 1} / {total_pages}", callback_data="ignore")
+        )
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                text="›",
-                callback_data=RaritySelectCallback(rarity=rarity, page=page + 1, user_id=user_id).pack(),
-            ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="›",
+                    callback_data=RaritySelectCallback(
+                        rarity=rarity, page=page + 1, user_id=user_id
+                    ).pack(),
+                )
+            )
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            nav,
-            [InlineKeyboardButton(
-                text="‹ К редкостям",
-                callback_data=MainMenuCallback(user_id=user_id).pack(),
-            )],
-        ])
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                nav,
+                [
+                    InlineKeyboardButton(
+                        text="‹ К редкостям",
+                        callback_data=MainMenuCallback(user_id=user_id).pack(),
+                    )
+                ],
+            ]
+        )
+
         photo = None
         if get_card_photo_input:
-            photo = get_card_photo_input(card["id"], card["photo_path"] if "photo_path" in card.keys() else None)
+            photo = get_card_photo_input(
+                card["id"],
+                card["photo_path"] if "photo_path" in card.keys() else None,
+            )
         if not photo and card["photo_id"]:
             photo = card["photo_id"]
+
         await show_or_edit_photo(callback.message, photo, caption, keyboard)
         await callback.answer()
     except Exception as e:
-        logger.error(f"rarity view: {e}")
+        logger.error("rarity view: %s", e)
         await callback.answer("⚠️ Ошибка")
 
 
 @router.callback_query(MainMenuCallback.filter())
-async def process_back_to_main(callback: CallbackQuery, callback_data: MainMenuCallback):
+async def process_back_to_main(
+    callback: CallbackQuery,
+    callback_data: MainMenuCallback,
+) -> None:
     if not await check_not_banned_cb(callback):
         return
     if not _owner_check(callback, callback_data.user_id):
         await callback.answer("⚠️ Не ваша кнопка")
         return
+
     target_id = callback_data.user_id or callback.from_user.id
     photo, caption, keyboard, _ = await render_collection(
         callback.message.bot, target_id, callback.from_user.full_name
@@ -2069,12 +2292,12 @@ async def process_back_to_main(callback: CallbackQuery, callback_data: MainMenuC
 
 
 @router.callback_query(F.data == "ignore")
-async def ignore_callback(callback: CallbackQuery):
+async def ignore_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
 @router.callback_query(OkDeleteCallback.filter())
-async def ok_delete_callback(callback: CallbackQuery):
+async def ok_delete_callback(callback: CallbackQuery) -> None:
     await callback.answer()
     bot_msg = callback.message
     user_msg = bot_msg.reply_to_message if bot_msg else None
@@ -2082,11 +2305,17 @@ async def ok_delete_callback(callback: CallbackQuery):
     await _try_delete(user_msg)
 
 
-# ================= МГНОВЕННАЯ КАРТОЧКА =================
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTANT CARD
+# ═══════════════════════════════════════════════════════════════════════════
 @router.callback_query(CardActionCallback.filter())
-async def handle_card_action(callback: CallbackQuery, callback_data: CardActionCallback):
+async def handle_card_action(
+    callback: CallbackQuery,
+    callback_data: CardActionCallback,
+) -> None:
     if not await check_not_banned_cb(callback):
         return
+
     user_id = callback.from_user.id
     action = callback_data.action
     target = callback_data.user_id or user_id
@@ -2131,22 +2360,32 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                 )
 
             card, status = await issue_card(user_id, check_cooldown=False)
-            streak, bonus, new_balance, streak_updated = await check_and_update_streak(user_id)
+            streak, bonus, new_balance, streak_updated = await check_and_update_streak(
+                user_id
+            )
 
             if status in ("no_cards", "all_collected"):
                 async with get_db() as db:
                     await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?", (cost, user_id)
+                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                        (cost, user_id),
                     )
-                msg = "В базе нет карточек." if status == "no_cards" else "Все карточки уже собраны."
+                msg = (
+                    "В базе нет карточек."
+                    if status == "no_cards"
+                    else "Все карточки уже собраны."
+                )
                 await callback.message.answer(f"❌ {msg} Монеты возвращены.")
-                await send_streak_notice(callback.message, streak, bonus, new_balance, streak_updated)
+                await send_streak_notice(
+                    callback.message, streak, bonus, new_balance, streak_updated
+                )
                 return
 
             if status != "success" or card is None:
                 async with get_db() as db:
                     await db.execute(
-                        "UPDATE users SET coins = coins + ? WHERE user_id = ?", (cost, user_id)
+                        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
+                        (cost, user_id),
                     )
                 await callback.message.answer("❌ Ошибка. Монеты возвращены.")
                 return
@@ -2155,11 +2394,14 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             kb = get_after_card_keyboard(user_id, card["balance"])
             photo = _resolve_card_photo(card)
             effect = None
-            if card["rarity"] in ("mythical", "legendary") and callback.message.chat.type == "private":
+            if (
+                card["rarity"] in ("mythical", "legendary")
+                and callback.message.chat.type == "private"
+            ):
                 effect = EFFECT_PARTY
 
             try:
-                kwargs = {"caption": caption, "reply_markup": kb}
+                kwargs: dict[str, Any] = {"caption": caption, "reply_markup": kb}
                 if effect:
                     kwargs["message_effect_id"] = effect
                 if photo:
@@ -2168,13 +2410,17 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
                     await callback.message.answer(caption, reply_markup=kb)
             except TypeError:
                 if photo:
-                    await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=kb)
+                    await callback.message.answer_photo(
+                        photo=photo, caption=caption, reply_markup=kb
+                    )
                 else:
                     await callback.message.answer(caption, reply_markup=kb)
             except TelegramBadRequest:
                 await callback.message.answer(caption, reply_markup=kb)
 
-            await send_streak_notice(callback.message, streak, bonus, new_balance, streak_updated)
+            await send_streak_notice(
+                callback.message, streak, bonus, new_balance, streak_updated
+            )
             return
 
         if action == "collection":
@@ -2186,21 +2432,25 @@ async def handle_card_action(callback: CallbackQuery, callback_data: CardActionC
             else:
                 try:
                     if photo:
-                        await callback.message.answer_photo(photo=photo, caption=caption, reply_markup=keyboard)
+                        await callback.message.answer_photo(
+                            photo=photo, caption=caption, reply_markup=keyboard
+                        )
                     else:
                         await callback.message.answer(caption, reply_markup=keyboard)
                 except TelegramBadRequest:
                     await callback.message.answer(caption, reply_markup=keyboard)
             await callback.answer()
     except Exception as e:
-        logger.error(f"card action: {e}")
+        logger.error("card action: %s", e)
         await callback.answer("⚠️ Ошибка")
 
 
-# ================= ТЕСТОВЫЕ (фото) — доступны всем, но безопасны =================
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST COMMAND (avatar sync)
+# ═══════════════════════════════════════════════════════════════════════════
 @router.message(Command("sync_my_avatar"))
-async def cmd_sync_default_avatar(message: Message):
-    """Тест: скачать дефолтный аватар на диск (из DEFAULT_AVATAR_FILE_ID)."""
+async def cmd_sync_default_avatar(message: Message) -> None:
+    """Тест: скачать дефолтный аватар на диск."""
     if not ensure_default_avatar:
         await message.reply("❌ Модуль card_photos недоступен.")
         return
@@ -2212,28 +2462,35 @@ async def cmd_sync_default_avatar(message: Message):
         await message.reply("❌ Не удалось скачать. Проверьте file_id / права.")
 
 
-# ================= ЗАПУСК =================
-async def _run_api_server():
+# ═══════════════════════════════════════════════════════════════════════════
+# STARTUP
+# ═══════════════════════════════════════════════════════════════════════════
+async def _run_api_server() -> None:
     try:
         import uvicorn
         from api import app as fastapi_app
     except ImportError as e:
         logger.warning("API мини-аппки не запущен: %s", e)
         return
+
     port = int(os.getenv("PORT", os.getenv("API_PORT", "8080")))
     logger.info("🌐 API на 0.0.0.0:%s", port)
-    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=port, log_level="info", lifespan="on")
+    config = uvicorn.Config(
+        fastapi_app, host="0.0.0.0", port=port, log_level="info", lifespan="on"
+    )
     server = uvicorn.Server(config)
     await server.serve()
 
 
-async def main():
+async def main() -> None:
     try:
         os.makedirs(os.path.dirname(DB_NAME) or ".", exist_ok=True)
         if LOG_PATH:
             os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
+
         await init_db()
         logger.info("БД инициализирована")
+
         try:
             ensure_photo_dir()
         except Exception as e:
@@ -2246,6 +2503,7 @@ async def main():
                 link_preview=LinkPreviewOptions(is_disabled=True),
             ),
         )
+
         if ensure_default_avatar:
             try:
                 await ensure_default_avatar(bot)
@@ -2259,11 +2517,13 @@ async def main():
 
         tasks = [dp.start_polling(bot)]
 
-        # Админ-бот в том же процессе (одна точка входа на хостинге)
-        admin_token = (os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or "").strip()
+        admin_token = (
+            os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or ""
+        ).strip()
         if admin_token:
             try:
                 from admin_bot import run_admin_bot
+
                 tasks.append(run_admin_bot(admin_token))
                 logger.info("🛡 Админ-бот будет запущен параллельно")
             except Exception as e:
@@ -2275,14 +2535,17 @@ async def main():
             )
 
         start_api = os.getenv("START_API", os.getenv("ENABLE_WEBAPP_API", "0")).strip().lower() in (
-            "1", "true", "yes", "on",
+            "1",
+            "true",
+            "yes",
+            "on",
         )
         if start_api:
             tasks.append(_run_api_server())
 
         await asyncio.gather(*tasks)
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        logger.error("Критическая ошибка: %s", e)
         raise
 
 
