@@ -1,66 +1,91 @@
-# Карточный бот (user + admin)
+# API + фото для бота «Мряу» (v2)
 
-Одна точка входа (`bot.py`), **одна SQLite-база** (WAL).  
-Админ-бот поднимается в том же процессе, если задан `ADMIN_BOT_TOKEN`.
+FastAPI-бэкенд для Telegram Mini App. Работает с той же SQLite, что и бот.
+
+## Что изменилось в v2
+
+- Удалены маркет, кристаллы, обмен и покупка
+- Добавлен `POST /api/claim` — получение карточки из мини-приложения
+- Топ и коллекция считают **уникальные** карточки (не сумму `amount`)
+- Расширенная админка: CRUD карточек, просмотр/правка игроков, выдача карточек
+- `GET /api/help` — справка
 
 ## Файлы
 
-| Файл | Назначение |
-|------|------------|
-| `bot.py` | Точка входа: user-бот (+ admin параллельно) |
-| `admin_bot.py` | Логика админ-бота (импортируется из bot.py) |
-| `card_photos.py` | Скачивание фото на диск |
-
-## .env
-
-```env
-# Пользовательский бот
-BOT_TOKEN=123:AAA
-BOT_USERNAME=milosttbot
-WEBAPP_URL=https://your-miniapp.example.com
-
-# Админ-бот (другой бот в @BotFather) — тот же процесс
-ADMIN_BOT_TOKEN=456:BBB
-
-# Общая БД и фото
-DB_NAME=/app/data/cards_game.db
-CARD_PHOTOS_DIR=/app/data/card_photos
-LOG_PATH=/app/data/bot.log
-ADMIN_LOG_PATH=/app/data/admin_bot.log
-```
+| Файл | Куда |
+|------|------|
+| `api.py` | **Корень репозитория бота** (заменить старый) |
+| `card_photos.py` | Корень репо бота (если ещё нет) |
+| `run_bot_and_api.py` | Корень репо бота (опционально, Bothost) |
+| `BOT_PHOTOS_INTEGRATION.md` | Документация по фото |
+| `requirements.txt` | Объединить с requirements бота |
 
 ## Запуск
 
 ```bash
-# единственная команда на хостинге
-python bot.py
+pip install fastapi uvicorn[standard] aiosqlite pydantic
+
+export BOT_TOKEN="..."           # тот же, что у бота
+export DB_NAME="/app/data/cards_game.db"
+export CORS_ORIGINS="https://твой-фронт.vercel.app,https://web.telegram.org"
+export CARD_PHOTOS_DIR="/app/data/card_photos"   # опционально
+export API_PORT=8080             # или PORT на Bothost
+
+uvicorn api:app --host 0.0.0.0 --port 8080
 ```
 
-Нужны оба файла рядом: `bot.py` и `admin_bot.py` (+ `card_photos.py`).
+На Bothost: точка входа `run_bot_and_api.py`, включи домен, порт 8080.
 
-## Что изменилось
+## Эндпоинты
 
-1. **Нет дубликатов** — только новые карточки; колонка `amount` не используется.
-2. **Маркет / кристаллы / гемы** — удалены.
-3. **Кулдаун 3 часа**; сброс CD только в админ-боте.
-4. **Пол / gender** — удалены.
-5. **Ник** по умолчанию `NULL` → показ имени Telegram или ID; смена **300** 🪙.
-6. **Мини-приложение** — кнопка только после карточки (+ reply-клавиатура 2×2).
-7. **Эффект 🎉** на mythical/legendary (ЛС).
-8. **Админка** вынесена в `admin_bot.py`.
-9. **Дуэли** `/duel <ставка>` ответом в группе, таблица `duels`, 10 мин, 2×dice, банк 100%.
-10. Формат текста: `{emoji} {label}: {value}`.
-11. Reply-клавиатура: карточка / профиль / топ / мини-апп.
-12–13. Фото карточек и дефолт-аватар → диск (`/migrate_photos`, `/sync_default_avatar` в админ-боте).
-14. Стрик — **вторым сообщением**; в группах авто-удаление через 30 с.
-15. Упоминания (`tg://user`) убраны.
+| Метод | Путь | Auth | Описание |
+|-------|------|------|----------|
+| GET | `/health` | — | Проверка |
+| GET | `/api/me` | initData | Профиль |
+| GET | `/api/collection` | initData | Карточки (уникальные) |
+| GET | `/api/top?kind=` | initData | Топ coins/cards/streak |
+| POST | `/api/claim` | initData | Бесплатная карточка |
+| GET | `/api/card/{id}` | initData | Одна карточка |
+| GET | `/api/card/{id}/photo` | — | Фото |
+| GET | `/api/help` | — | Справка |
+| GET | `/api/admin/overview` | admin | Сводка |
+| GET/POST | `/api/admin/cards` | admin | Список / создать |
+| PATCH/DELETE | `/api/admin/cards/{id}` | admin | Изменить / удалить |
+| GET | `/api/admin/users` | admin | Список игроков |
+| GET/PATCH | `/api/admin/users/{id}` | admin | Детали / правка |
+| POST | `/api/admin/users/{id}/give-card` | admin | Выдать карточку |
 
-## Первый супер-админ
+## Логика claim
 
-Первый, кто напишет `/start` **user-боту**, получает `superadmin` в БД. Дальше права — через админ-бота (`/setadmin`).
+1. Проверка кулдауна `last_claim` (4 часа)
+2. Взвешенный random редкости (common 50 … legendary 3)
+3. Случайная карточка этой редкости
+4. INSERT/UPDATE inventory, +монеты по редкости, обновление стрика
+5. Ответ с карточкой, стриком, новым кулдауном
 
-## Тестовые команды (админ-бот)
+Стрик: +1 если claim был «вчера» (UTC-день), иначе сброс в 1.
 
-- `/migrate_photos` — все `photo_id` → `card_photos/{id}.jpg` + `photo_path` в БД  
-- `/sync_default_avatar` — дефолтный аватар на диск  
-- `/getfileid` + фото — показать file_id  
+**Важно:** логика claim в API должна совпадать с ботом. Если в боте другие веса/награды — поправь константы `RARITIES` / `COOLDOWN_SECONDS` в `api.py` под бота.
+
+## Фото
+
+См. `BOT_PHOTOS_INTEGRATION.md` и `card_photos.py`:
+- при добавлении карточки в боте — `sync_card_photo`
+- одноразовая миграция — `/migrate_photos`
+- API отдаёт `/api/card/{id}/photo` с диска
+
+## Nginx (фрагмент)
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name api.example.com;
+    ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
