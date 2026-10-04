@@ -1479,10 +1479,14 @@ async def duel_create(message: Message, command: CommandObject = None) -> None:
                     pass
 
     if stake is None or stake < DUEL_MIN_STAKE:
+        duel_hint = (
+            "Ответьте на сообщение игрока:\n"
+            f"<code>/duel {DUEL_MIN_STAKE}</code>"
+        )
         await reply_ephemeral(
             message,
             "✏️ <b>Как вызвать</b>\n\n"
-            f"{bq(f'Ответьте на сообщение игрока:\\n<code>/duel {DUEL_MIN_STAKE}</code>')}",
+            f"{bq(duel_hint)}",
         )
         return
 
