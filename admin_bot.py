@@ -972,6 +972,7 @@ async def admin_card_manage(call: CallbackQuery, callback_data: AdminCardManageC
 
     b = InlineKeyboardBuilder()
     b.button(text="✏️ Название", callback_data=f"edit_name:{card_id}")
+    b.button(text="✨ ИИ название", callback_data=f"ai_name:{card_id}")
     b.button(text="🎲 Редкость", callback_data=f"edit_rarity:{card_id}")
     b.button(text="🖼 Фото", callback_data=AdminCardEditPhotoCallback(card_id=card_id).pack())
     b.button(text="🗑 Удалить", callback_data=f"delete_card:{card_id}")
@@ -1821,61 +1822,84 @@ async def cmd_rename_rarities(message: Message):
 @router.message(Command("balance_rarities"), admin_filter)
 async def cmd_balance_rarities(message: Message):
     """
-    Переносит «лишние» карточки в соседнюю редкость, чтобы доли
-    ближе соответствовали весам RARITIES.
+    Стабильный пересчёт: веса из БД → target counts →
+    итеративно переносим excess → deficit (не только соседи).
     """
     if not await _require_admin(message):
         return
+    rarities = await _load_rarities_db()
+    global RARITIES
+    RARITIES = rarities
     counts = await get_rarity_counts()
-    total = sum(counts.values())
+    # только известные ключи
+    order = [k for k in RARITY_ORDER if k in rarities]
+    total = sum(counts.get(k, 0) for k in order)
     if total < 6:
         await message.reply("Мало карточек для балансировки (нужно ≥ 6).")
         return
 
-    # целевое количество
-    targets = {
-        k: max(0, round(total * (info["weight"] / 100.0)))
-        for k, info in RARITIES.items()
-    }
-    # корректировка суммы
-    diff = total - sum(targets.values())
-    if diff != 0:
-        targets["common"] = max(0, targets["common"] + diff)
+    weights = {k: max(0, int(rarities[k]["weight"])) for k in order}
+    wsum = sum(weights.values()) or 1
+    targets = {k: int(total * weights[k] / wsum) for k in order}
+    # раздать остаток по наибольшим дробным частям
+    remainder = total - sum(targets.values())
+    fracs = sorted(
+        order,
+        key=lambda k: (total * weights[k] / wsum) - targets[k],
+        reverse=True,
+    )
+    for i in range(remainder):
+        targets[fracs[i % len(fracs)]] += 1
 
     moves: list[str] = []
     async with get_db() as db:
-        for i, key in enumerate(RARITY_ORDER):
-            actual = counts.get(key, 0)
-            target = targets[key]
-            excess = actual - target
-            if excess <= 0:
-                continue
-            # переносим в соседнюю (предпочтительно более редкую)
-            neighbors = []
-            if i + 1 < len(RARITY_ORDER):
-                neighbors.append(RARITY_ORDER[i + 1])
-            if i - 1 >= 0:
-                neighbors.append(RARITY_ORDER[i - 1])
-            for nb in neighbors:
+        # до 5 проходов
+        for _pass in range(5):
+            counts = {
+                k: (
+                    await (
+                        await db.execute(
+                            "SELECT COUNT(*) FROM cards WHERE rarity = ?", (k,)
+                        )
+                    ).fetchone()
+                )[0]
+                for k in order
+            }
+            over = [k for k in order if counts[k] > targets[k]]
+            under = [k for k in order if counts[k] < targets[k]]
+            if not over or not under:
+                break
+            progressed = False
+            for src in over:
+                excess = counts[src] - targets[src]
                 if excess <= 0:
-                    break
-                need = targets[nb] - counts.get(nb, 0)
-                if need <= 0:
                     continue
-                take = min(excess, need)
-                cur = await db.execute(
-                    "SELECT id FROM cards WHERE rarity = ? ORDER BY id LIMIT ?",
-                    (key, take),
-                )
-                ids = [r[0] for r in await cur.fetchall()]
-                for cid in ids:
-                    await db.execute(
-                        "UPDATE cards SET rarity = ? WHERE id = ?", (nb, cid)
+                for dst in under:
+                    need = targets[dst] - counts[dst]
+                    if need <= 0:
+                        continue
+                    take = min(excess, need)
+                    cur = await db.execute(
+                        "SELECT id FROM cards WHERE rarity = ? ORDER BY id LIMIT ?",
+                        (src, take),
                     )
-                    moves.append(f"#{cid}: {key} → {nb}")
-                excess -= len(ids)
-                counts[key] = counts.get(key, 0) - len(ids)
-                counts[nb] = counts.get(nb, 0) + len(ids)
+                    ids = [r[0] for r in await cur.fetchall()]
+                    if not ids:
+                        continue
+                    for cid in ids:
+                        await db.execute(
+                            "UPDATE cards SET rarity = ? WHERE id = ?", (dst, cid)
+                        )
+                        moves.append(f"#{cid}: {src} → {dst}")
+                    counts[src] -= len(ids)
+                    counts[dst] += len(ids)
+                    excess -= len(ids)
+                    progressed = True
+                    if excess <= 0:
+                        break
+            if not progressed:
+                break
+        await db.commit()
 
     if not moves:
         await message.reply("✅ Баланс уже близок к целевому. Переносов нет.")
@@ -1968,16 +1992,219 @@ async def cmd_migrate_photos(message: Message):
             await user_bot.session.close()
 
 
+LEGACY_TABLES = (
+    "gifts",
+    "market_listings",
+    "promo_activations",
+    "promo_codes",
+    "trades",
+    "transactions",
+    "user_achievements",
+    "duels",
+)
+
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+
+async def gemini_suggest_name(hint: str = "", old_name: str = "") -> str:
+    """Одно лаконичное название карточки через Gemini REST API."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY не задан в .env")
+    import json
+    import urllib.request
+    import urllib.error
+
+    prompt = (
+        "Придумай одно короткое красивое название для игровой карточки персонажа "
+        "(1–4 слова, на русском, без кавычек и пояснений). "
+    )
+    if old_name:
+        prompt += f"Текущее название: «{old_name}». Предложи другое, лучше. "
+    if hint:
+        prompt += f"Контекст/подсказка: {hint}. "
+    prompt += "Ответь только названием."
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.9, "maxOutputTokens": 32},
+    }).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        err = e.read().decode()[:300]
+        if e.code in (429, 403) or "quota" in err.lower() or "RESOURCE_EXHAUSTED" in err:
+            raise RuntimeError(f"Квота Gemini исчерпана / доступ запрещён: {err}")
+        raise RuntimeError(f"Gemini HTTP {e.code}: {err}")
+    except Exception as e:
+        raise RuntimeError(f"Gemini недоступен: {e}")
+
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        # одна строка, без кавычек
+        text = text.split("\n")[0].strip().strip('"«»\'')
+        return text[:64] or "Без названия"
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"Неожиданный ответ Gemini: {e}")
+
+
+@router.message(Command("drop_legacy"), admin_filter)
+async def cmd_drop_legacy(message: Message):
+    """Удалить устаревшие таблицы, не используемые кодом."""
+    if not await _require_admin(message):
+        return
+    if not await is_superadmin(message.from_user.id):
+        await message.reply("❌ Только superadmin")
+        return
+    dropped, kept = [], []
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+        existing = {r[0] for r in await cur.fetchall()}
+        for t in LEGACY_TABLES:
+            if t not in existing:
+                kept.append(f"• {t}: нет")
+                continue
+            try:
+                await db.execute(f"DROP TABLE IF EXISTS {t}")
+                dropped.append(t)
+            except Exception as e:
+                kept.append(f"• {t}: ошибка {e}")
+        await db.commit()
+    logger.info("drop_legacy: %s", dropped)
+    await message.reply(
+        f"🗑 Удалено: <b>{', '.join(dropped) or '—'}</b>\n"
+        + (bq("\n".join(kept)) if kept else "")
+    )
+
+
+@router.message(Command("ai"), admin_filter)
+async def cmd_ai_name(message: Message, command: CommandObject):
+    """ /ai [подсказка] — предложить название карточки (Gemini). """
+    if not await _require_admin(message):
+        return
+    hint = (command.args or "").strip()
+    status = await message.reply("✨ Gemini думает…")
+    try:
+        name = await gemini_suggest_name(hint=hint)
+        await status.edit_text(
+            f"✨ Предложение: <b>{esc(name)}</b>\n\n"
+            f"Можно использовать при добавлении/редактировании карточки."
+        )
+    except Exception as e:
+        await status.edit_text(f"❌ {esc(str(e))}")
+
+
+@router.callback_query(F.data.startswith("ai_name:"))
+async def cb_ai_name(call: CallbackQuery):
+    if not await _require_admin(call):
+        return
+    card_id = int(call.data.split(":")[1])
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT name FROM cards WHERE id = ?", (card_id,)
+        )
+        row = await cur.fetchone()
+    if not row:
+        await call.answer("Нет карточки", show_alert=True)
+        return
+    await call.answer("Gemini…")
+    try:
+        new_name = await gemini_suggest_name(old_name=row[0])
+        async with get_db() as db:
+            await db.execute(
+                "UPDATE cards SET name = ? WHERE id = ?", (new_name, card_id)
+            )
+        await call.message.answer(
+            f"✨ #{card_id}: <b>{esc(row[0])}</b> → <b>{esc(new_name)}</b>"
+        )
+    except Exception as e:
+        await call.message.answer(f"❌ {esc(str(e))}")
+
+
+@router.message(Command("renamecards"), admin_filter)
+async def cmd_renamecards(message: Message):
+    """Массовое переименование через Gemini (с бэкапом БД)."""
+    if not await _require_admin(message):
+        return
+    if not await is_superadmin(message.from_user.id):
+        await message.reply("❌ Только superadmin")
+        return
+    if not GEMINI_API_KEY:
+        await message.reply("❌ GEMINI_API_KEY не задан")
+        return
+
+    # бэкап
+    import shutil
+    from datetime import datetime as dt
+    src = Path(DB_NAME)
+    backup_dir = src.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    bak = backup_dir / f"pre_rename_{dt.now().strftime('%Y%m%d_%H%M%S')}.db"
+    try:
+        async with get_db() as db:
+            await db.execute("PRAGMA wal_checkpoint(FULL);")
+        shutil.copy2(src, bak)
+        await message.answer_document(
+            FSInputFile(bak, filename=bak.name),
+            caption="💾 Бэкап перед /renamecards",
+        )
+    except Exception as e:
+        await message.reply(f"❌ Бэкап не удался: {esc(str(e))}")
+        return
+
+    async with get_db() as db:
+        cur = await db.execute("SELECT id, name FROM cards ORDER BY id")
+        rows = await cur.fetchall()
+
+    await message.reply(
+        f"⏳ Переименование {len(rows)} карточек…\n"
+        f"Остановка при ошибке квоты/API."
+    )
+    ok = fail = 0
+    for row in rows:
+        cid, old = row[0], row[1]
+        try:
+            new_name = await gemini_suggest_name(old_name=old)
+            async with get_db() as db:
+                await db.execute(
+                    "UPDATE cards SET name = ? WHERE id = ?", (new_name, cid)
+                )
+            ok += 1
+            await message.answer(
+                f"Карточка ID {cid} «{esc(old)}» переименована: <b>{esc(new_name)}</b>"
+            )
+            await asyncio.sleep(1.2)
+        except Exception as e:
+            fail += 1
+            await message.reply(
+                f"⏹ Остановка на #{cid}: {esc(str(e))}\n"
+                f"Успешно: {ok}, ошибок: {fail}\n"
+                f"Откат: /import_db с файлом {bak.name}"
+            )
+            logger.error("renamecards stop: %s", e)
+            return
+    await message.reply(f"✅ Готово. Переименовано: {ok}")
+
+
 @router.message(Command("check"), admin_filter)
 async def cmd_check(message: Message):
-    """Проверка БД, таблиц, полей, API, фото-папки."""
+    """Проверка БД, таблиц, API, фото карточек на диске."""
     if not await _require_admin(message):
         return
 
     lines: list[str] = []
     ok_all = True
 
-    # DB
     try:
         async with get_db() as db:
             cur = await db.execute("SELECT 1")
@@ -1996,6 +2223,8 @@ async def cmd_check(message: Message):
             "registration", "streak", "last_streak_date", "streak_bonus", "last_dice",
         },
         "inventory": {"user_id", "card_id", "claim_time"},
+        "rarity_config": {"rarity_key", "weight", "reward"},
+        "bot_settings": {"key", "value"},
     }
 
     async with get_db() as db:
@@ -2016,26 +2245,62 @@ async def cmd_check(message: Message):
                 ok_all = False
             else:
                 lines.append(f"✅ Таблица {t}: OK")
-        if "duels" in existing:
-            lines.append("⚠️ Таблица duels ещё есть (можно DROP)")
 
-    # photo dir
+        legacy_found = [t for t in LEGACY_TABLES if t in existing]
+        if legacy_found:
+            lines.append(
+                f"⚠️ Лишние таблицы: {', '.join(legacy_found)} → /drop_legacy"
+            )
+            ok_all = False
+        else:
+            lines.append("✅ Лишних legacy-таблиц нет")
+
+        # изображения карточек
+        cur = await db.execute(
+            "SELECT id, photo_path, photo_uuid, photo_id FROM cards"
+        )
+        cards = await cur.fetchall()
+        missing_files = 0
+        bad_size = 0
+        no_path = 0
+        for c in cards:
+            path = c[1]
+            if not path:
+                no_path += 1
+                continue
+            fp = Path(path)
+            if not fp.is_file():
+                missing_files += 1
+            elif fp.stat().st_size < 500:
+                bad_size += 1
+        lines.append(
+            f"🖼 Карточки: {len(cards)} | без path: {no_path} | "
+            f"файл отсутствует: {missing_files} | крошечные: {bad_size}"
+        )
+        if missing_files or bad_size:
+            ok_all = False
+            lines.append("  → /migrate_photos · /redraw_cards")
+
     try:
-        from card_photos import ensure_photo_dir, _PHOTO_DIR
+        from card_photos import ensure_photo_dir, _PHOTO_DIR, CARD_W, CARD_H
         ensure_photo_dir()
         n = len(list(_PHOTO_DIR.glob("*.jpg"))) if _PHOTO_DIR.exists() else 0
-        lines.append(f"✅ Фото-папка: {_PHOTO_DIR} ({n} jpg)")
+        lines.append(f"✅ Фото-папка: {_PHOTO_DIR} ({n} jpg, цель {CARD_W}×{CARD_H})")
     except Exception as e:
         lines.append(f"⚠️ Фото-папка: {e}")
 
-    # Pillow
     try:
         from PIL import Image  # noqa: F401
         lines.append("✅ Pillow: установлен")
     except ImportError:
-        lines.append("⚠️ Pillow: нет (рамки не будут накладываться)")
+        lines.append("⚠️ Pillow: нет")
+        ok_all = False
 
-    # API
+    if GEMINI_API_KEY:
+        lines.append(f"✅ Gemini: ключ задан (модель {GEMINI_MODEL})")
+    else:
+        lines.append("ℹ️ GEMINI_API_KEY не задан")
+
     if API_BASE:
         try:
             import urllib.request
@@ -2047,13 +2312,10 @@ async def cmd_check(message: Message):
             lines.append(f"❌ API: {e}")
             ok_all = False
     else:
-        lines.append("ℹ️ API_BASE не задан — проверка API пропущена")
+        lines.append("ℹ️ API_BASE не задан")
 
     if WEBAPP_URL:
         lines.append(f"ℹ️ WEBAPP_URL: {WEBAPP_URL}")
-    else:
-        lines.append("ℹ️ WEBAPP_URL не задан")
-
     if SUPERADMIN_IDS:
         lines.append(f"ℹ️ SUPERADMIN_IDS: {', '.join(map(str, SUPERADMIN_IDS))}")
     else:
@@ -2614,6 +2876,9 @@ ADMIN_COMMANDS = [
     BotCommand(command="export_db", description="📤 Экспорт БД"),
     BotCommand(command="import_db", description="📥 Импорт БД"),
     BotCommand(command="clear_logs", description="🧹 Очистить логи"),
+    BotCommand(command="drop_legacy", description="🗑 Удалить лишние таблицы"),
+    BotCommand(command="ai", description="✨ Gemini: название"),
+    BotCommand(command="renamecards", description="✨ Gemini: все названия"),
     BotCommand(command="cache_avatars", description="🖼 Кэш аватарок"),
 ]
 

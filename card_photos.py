@@ -41,10 +41,15 @@ RARITY_STARS = {
     "negative": 1,
 }
 
-BORDER = 18          # толщина цветной рамки
-CORNER_SIZE = 28     # размер ромбика в углу
-STAR_AREA = 36       # высота полосы под звёзды
+BORDER = 18
+CORNER_SIZE = 28
+STAR_AREA = 36
 BG = (22, 22, 28)
+
+# Единый вертикальный формат карточки (2:3)
+CARD_W = 720
+CARD_H = 1080
+FILL_BG = (28, 28, 34)
 
 
 def ensure_photo_dir() -> Path:
@@ -148,21 +153,56 @@ def _draw_diamond(draw, cx: int, cy: int, size: int, fill, outline, width: int =
         draw.polygon(pts2, outline=_lighten(outline if isinstance(outline, tuple) else fill, 30))
 
 
+
+def normalize_to_portrait(img):
+    """Привести изображение к единому вертикальному CARD_W×CARD_H.
+    - RGBA → RGB на FILL_BG
+    - горизонтальные: letterbox (поля сверху/снизу) или center-crop к 2:3
+    - вертикальные: scale + pad
+    """
+    from PIL import Image
+    if img.mode == "RGBA":
+        base = Image.new("RGB", img.size, FILL_BG)
+        base.paste(img, mask=img.split()[3])
+        img = base
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    w, h = img.size
+    target_ratio = CARD_W / CARD_H  # ~0.666
+    src_ratio = w / h if h else 1
+
+    # Центрированный crop к 2:3, если почти подходит; иначе letterbox
+    if abs(src_ratio - target_ratio) < 0.08:
+        # близко к 2:3 — center crop
+        if src_ratio > target_ratio:
+            new_w = int(h * target_ratio)
+            left = (w - new_w) // 2
+            img = img.crop((left, 0, left + new_w, h))
+        else:
+            new_h = int(w / target_ratio)
+            top = (h - new_h) // 2
+            img = img.crop((0, top, w, top + new_h))
+        return img.resize((CARD_W, CARD_H), Image.Resampling.LANCZOS)
+
+    # letterbox: вписать целиком, заполнить поля
+    scale = min(CARD_W / w, CARD_H / h)
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (CARD_W, CARD_H), FILL_BG)
+    canvas.paste(resized, ((CARD_W - nw) // 2, (CARD_H - nh) // 2))
+    return canvas
+
+
 def apply_rarity_frame(
     src: Path,
     dest: Path,
     rarity: str,
     frame_width: int = BORDER,
 ) -> bool:
-    """
-    Красивое оформление:
-    - тёмный фон-подложка
-    - цветная рамка
-    - ромбы в четырёх углах
-    - ряд звёзд внизу (1–6 по редкости), цвет редкости
-    """
+    """Нормализация 720×1080 + цветная рамка + ромбы + звёзды."""
     try:
-        from PIL import Image, ImageDraw, ImageFilter
+        from PIL import Image, ImageDraw
     except ImportError:
         logger.warning("Pillow не установлен — рамка пропущена")
         if src != dest:
@@ -170,22 +210,15 @@ def apply_rarity_frame(
         return dest.is_file()
 
     try:
-        img = Image.open(src).convert("RGB")
-        # если уже оформляли — берём центр (эвристика: обрезать старую рамку сложно,
-        # поэтому вызывающий код должен передавать «сырое» фото при перерисовке)
+        img = Image.open(src)
+        img = normalize_to_portrait(img)
+
         color = RARITY_FRAME_COLORS.get(rarity, (128, 128, 128))
         light = _lighten(color, 55)
         dark = _darken(color, 40)
         n_stars = RARITY_STARS.get(rarity, 1)
 
-        w, h = img.size
-        # ограничиваем слишком большие
-        max_side = 1280
-        if max(w, h) > max_side:
-            ratio = max_side / max(w, h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
-            w, h = img.size
-
+        w, h = img.size  # CARD_W, CARD_H
         pad = frame_width + 8
         star_h = STAR_AREA
         new_w = w + 2 * pad
@@ -194,36 +227,25 @@ def apply_rarity_frame(
         canvas = Image.new("RGB", (new_w, new_h), BG)
         draw = ImageDraw.Draw(canvas)
 
-        # внешняя тёмная обводка
         draw.rectangle([0, 0, new_w - 1, new_h - 1], outline=(12, 12, 16), width=3)
-
-        # основная цветная рамка (верх + бока; низ до звёзд)
-        # верх
         draw.rectangle([4, 4, new_w - 5, 4 + frame_width], fill=color)
-        # лево
         draw.rectangle([4, 4, 4 + frame_width, new_h - star_h - 5], fill=color)
-        # право
         draw.rectangle([new_w - 5 - frame_width, 4, new_w - 5, new_h - star_h - 5], fill=color)
-        # низ (над звёздами)
         draw.rectangle(
             [4, new_h - star_h - 5 - frame_width, new_w - 5, new_h - star_h - 5],
             fill=color,
         )
 
-        # блик по внутреннему краю рамки
         inner = 4 + frame_width
         draw.rectangle(
             [inner, inner, new_w - inner - 1, new_h - star_h - inner - 1],
-            outline=light,
-            width=2,
+            outline=light, width=2,
         )
         draw.rectangle(
             [inner + 2, inner + 2, new_w - inner - 3, new_h - star_h - inner - 3],
-            outline=dark,
-            width=1,
+            outline=dark, width=1,
         )
 
-        # ромбы в углах (поверх рамки)
         cs = CORNER_SIZE
         corners = [
             (pad // 2 + 4, pad // 2 + 4),
@@ -235,25 +257,20 @@ def apply_rarity_frame(
             _draw_diamond(draw, cx, cy, cs, fill=dark, outline=light)
             _draw_diamond(draw, cx, cy, cs // 2, fill=color, outline=light)
 
-        # вставляем фото
         canvas.paste(img, (pad, pad))
 
-        # полоса под звёзды
         star_top = new_h - star_h
         draw.rectangle([0, star_top, new_w, new_h], fill=(18, 18, 24))
-        # тонкая линия-разделитель цвета редкости
         draw.line([(pad, star_top + 2), (new_w - pad, star_top + 2)], fill=color, width=2)
 
-        # звёзды по центру
         star_r = 11
         gap = 8
-        total_w = n_stars * (star_r * 2) + (n_stars - 1) * gap
+        total_w = n_stars * (star_r * 2) + max(0, n_stars - 1) * gap
         start_x = (new_w - total_w) // 2 + star_r
         cy = star_top + star_h // 2 + 2
         for i in range(n_stars):
             cx = start_x + i * (star_r * 2 + gap)
             _draw_star(draw, cx, cy, star_r, color=light, fill=color)
-            # маленькая точка-блик
             draw.ellipse([cx - 2, cy - 4, cx + 2, cy], fill=light)
 
         ensure_photo_dir()
