@@ -2004,7 +2004,7 @@ LEGACY_TABLES = (
 )
 
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 
 async def gemini_suggest_name(hint: str = "", old_name: str = "") -> str:
