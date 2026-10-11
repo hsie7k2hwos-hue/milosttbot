@@ -43,14 +43,20 @@ SUPERADMIN_IDS = {
     if x.strip().isdigit()
 }
 
-RARITIES = {
-    "common":         {"icon": "⚪", "name": "Обычная",     "reward": 8,   "weight": 40},
-    "rare":           {"icon": "🔵", "name": "Редкая",      "reward": 20,  "weight": 25},
-    "uncommon":       {"icon": "🟢", "name": "Необычная",   "reward": 40,  "weight": 15},
-    "valuable":       {"icon": "🟣", "name": "Ценная",      "reward": 70,  "weight": 10},
-    "super_valuable": {"icon": "🟠", "name": "Сверхценная", "reward": 110, "weight": 7},
-    "legendary":      {"icon": "🟡", "name": "Легендарная", "reward": 200, "weight": 3},
-}
+try:
+    from game_config import DEFAULT_RARITIES, API_COOLDOWN_SECONDS
+    RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
+    COOLDOWN_SECONDS = API_COOLDOWN_SECONDS
+except ImportError:
+    RARITIES = {
+        "common":         {"icon": "⚪", "name": "Обычная",     "reward": 10,  "weight": 40},
+        "rare":           {"icon": "🔵", "name": "Редкая",      "reward": 25,  "weight": 25},
+        "uncommon":       {"icon": "🟢", "name": "Необычная",   "reward": 45,  "weight": 15},
+        "valuable":       {"icon": "🟣", "name": "Ценная",      "reward": 75,  "weight": 10},
+        "super_valuable": {"icon": "🟠", "name": "Сверхценная", "reward": 120, "weight": 7},
+        "legendary":      {"icon": "🟡", "name": "Легендарная", "reward": 200, "weight": 3},
+    }
+    COOLDOWN_SECONDS = 4 * 3600
 
 ROLES = {
     "user":       {"icon": "👤", "name": "Пользователь"},
@@ -58,8 +64,6 @@ ROLES = {
     "superadmin": {"icon": "👑", "name": "Главный администратор"},
     "banned":     {"icon": "🚫", "name": "Заблокирован"},
 }
-
-COOLDOWN_SECONDS = 4 * 3600
 
 app = FastAPI(title="Мряу Mini App API", version="2.1")
 

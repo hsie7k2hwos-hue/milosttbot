@@ -90,36 +90,39 @@ SUPERADMIN_IDS = {
     if x.strip().isdigit()
 }
 
-COOLDOWN_SECONDS = 3 * 3600
-NICKNAME_COST = 300
+from game_config import (
+    DEFAULT_RARITIES,
+    COOLDOWN_SECONDS,
+    NICKNAME_COST,
+    DICE_COOLDOWN_SECONDS,
+    DICE_MIN_BALANCE,
+    DICE_SPIN_DELAY,
+    DICE_VALUE_MAP,
+    STREAK_BONUSES,
+    streak_bonus_for,
+    ROLES as _GC_ROLES,
+    SUPERADMIN_IDS as _GC_SUPERADMIN_IDS,
+    load_rarities,
+    ensure_config_tables,
+    is_user_bot_enabled,
+)
+
 GROUP_AUTODELETE_SECONDS = 30
 STREAK_EXPIRE_SECONDS = 24 * 3600
-
-DICE_COOLDOWN_SECONDS = 10 * 60
-DICE_MIN_BALANCE = 10
-DICE_SPIN_DELAY = 3
-DICE_VALUE_MAP = {1: -10, 2: -5, 3: 0, 4: 5, 5: 10, 6: 15}
-
 EFFECT_PARTY = "5046509860389126442"
 
-# Новые редкости (сумма весов = 100)
-RARITIES = {
-    "common":         {"icon": "⚪", "name": "Обычная",     "weight": 40, "reward": 8},
-    "rare":           {"icon": "🔵", "name": "Редкая",      "weight": 25, "reward": 20},
-    "uncommon":       {"icon": "🟢", "name": "Необычная",   "weight": 15, "reward": 40},
-    "valuable":       {"icon": "🟣", "name": "Ценная",      "weight": 10, "reward": 70},
-    "super_valuable": {"icon": "🟠", "name": "Сверхценная", "weight": 7,  "reward": 110},
-    "legendary":      {"icon": "🟡", "name": "Легендарная", "weight": 3,  "reward": 200},
-}
+RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
+ROLES = _GC_ROLES
+if _GC_SUPERADMIN_IDS:
+    SUPERADMIN_IDS.update(_GC_SUPERADMIN_IDS)
 
-ROLES = {
-    "user":       {"icon": "👤", "name": "Игрок"},
-    "admin":      {"icon": "🛡", "name": "Администратор"},
-    "superadmin": {"icon": "👑", "name": "Владелец"},
-    "banned":     {"icon": "🚫", "name": "Заблокирован"},
-}
 
-STREAK_BONUSES = [(2, 15), (7, 20), (14, 25), (30, 30), (float("inf"), 35)]
+async def refresh_rarities() -> dict:
+    global RARITIES
+    async with get_db() as db:
+        await ensure_config_tables(db)
+        RARITIES = await load_rarities(db)
+    return RARITIES
 
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
@@ -859,9 +862,7 @@ async def check_and_update_streak(user_id: int) -> tuple[int, int, int, bool]:
 
             is_consecutive = streak > 0 and yesterday_start <= last_date <= yesterday_end
             new_streak = (streak + 1) if is_consecutive else 1
-            new_bonus = 0 if new_streak == 1 else next(
-                b for d, b in STREAK_BONUSES if new_streak <= d
-            )
+            new_bonus = streak_bonus_for(new_streak)
 
             await db.execute(
                 "UPDATE users SET streak = ?, last_streak_date = ?, streak_bonus = ?, "
@@ -1074,12 +1075,12 @@ HELP_TABS = {
         "body": (
             "Стрик — серия дней подряд с хотя бы одной карточкой.\n\n"
             "Если пропустить больше 24 часов — серия сгорает.\n\n"
-            "<b>Бонусы</b>\n"
-            "• 2+ дня — +15 🪙\n"
-            "• 7+ дней — +20 🪙\n"
-            "• 14+ дней — +25 🪙\n"
+            "<b>Бонусы (раз в день при обновлении стрика)</b>\n"
+            "• 2+ дня — +10 🪙\n"
+            "• 7+ дней — +15 🪙\n"
+            "• 14+ дней — +20 🪙\n"
             "• 30+ дней — +30 🪙\n"
-            "• дальше — +35 🪙"
+            "• 60+ дней — +40 🪙"
         ),
     },
     "games": {
@@ -1088,7 +1089,7 @@ HELP_TABS = {
         "body": (
             "Команда /dice или «мряу кубик». Нужно минимум "
             f"{DICE_MIN_BALANCE} 🪙. Кулдаун — 10 минут.\n\n"
-            "1 → −10 · 2 → −5 · 3 → ±0 · 4 → +5 · 5 → +10 · 6 → +15"
+            "1 → −15 · 2 → −8 · 3 → ±0 · 4 → +8 · 5 → +15 · 6 → +25"
         ),
     },
     "profile": {
@@ -2052,56 +2053,75 @@ async def main() -> None:
         await init_db()
         logger.info("БД инициализирована")
 
-        # назначить superadmin из env при старте
         async with get_db() as db:
             await ensure_superadmin_from_env(db)
+            await ensure_config_tables(db)
+            if not await is_user_bot_enabled(db):
+                logger.warning("user_bot_enabled=0 — user-бот не стартует (только polling skip)")
+                # всё равно можно крутить admin/api ниже
+        await refresh_rarities()
 
         try:
             ensure_photo_dir()
         except Exception as e:
             logger.warning("photo dir: %s", e)
 
-        bot = Bot(
-            token=BOT_TOKEN,
-            default=DefaultBotProperties(
-                parse_mode=ParseMode.HTML,
-                link_preview=LinkPreviewOptions(is_disabled=True),
-            ),
-        )
+        tasks = []
+        from_main = os.getenv("_MAIN_ENTRY") == "1"
 
-        if ensure_default_avatar:
-            try:
-                await ensure_default_avatar(bot)
-            except Exception as e:
-                logger.warning("default avatar: %s", e)
+        async with get_db() as db:
+            user_on = await is_user_bot_enabled(db)
 
-        dp = Dispatcher(storage=MemoryStorage())
-        dp.include_router(router)
-        await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
-        logger.info("🤖 Пользовательский бот запущен")
+        if user_on:
+            bot = Bot(
+                token=BOT_TOKEN,
+                default=DefaultBotProperties(
+                    parse_mode=ParseMode.HTML,
+                    link_preview=LinkPreviewOptions(is_disabled=True),
+                ),
+            )
+            if ensure_default_avatar:
+                try:
+                    await ensure_default_avatar(bot)
+                except Exception as e:
+                    logger.warning("default avatar: %s", e)
+            dp = Dispatcher(storage=MemoryStorage())
+            dp.include_router(router)
+            await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
+            logger.info("🤖 Пользовательский бот запущен")
+            tasks.append(dp.start_polling(bot))
+        else:
+            logger.warning("🤖 User-бот выключен через admin (/userbot off)")
 
-        tasks = [dp.start_polling(bot)]
-
+        # admin: если не из main.py — поднимаем сами
         admin_token = (
             os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or ""
         ).strip()
-        if admin_token:
+        if admin_token and not from_main:
             try:
                 from admin_bot import run_admin_bot
                 tasks.append(run_admin_bot(admin_token))
-                logger.info("🛡 Админ-бот будет запущен параллельно")
+                logger.info("🛡 Админ-бот параллельно")
             except Exception as e:
-                logger.error("Не удалось подключить admin_bot: %s", e)
-        else:
-            logger.warning(
-                "ADMIN_BOT_TOKEN не задан — админ-бот не запущен."
-            )
+                logger.error("admin_bot: %s", e)
+        elif admin_token and from_main:
+            # main.py мог не поднять admin, если user включён — поднимем здесь
+            try:
+                from admin_bot import run_admin_bot
+                tasks.append(run_admin_bot(admin_token))
+                logger.info("🛡 Админ-бот (из bot через main)")
+            except Exception as e:
+                logger.error("admin_bot: %s", e)
 
         start_api = os.getenv("START_API", os.getenv("ENABLE_WEBAPP_API", "0")).strip().lower() in (
             "1", "true", "yes", "on",
         )
-        if start_api:
+        if start_api and not from_main:
             tasks.append(_run_api_server())
+
+        if not tasks:
+            logger.error("Нет задач для запуска (user выключен, admin нет)")
+            return
 
         await asyncio.gather(*tasks)
     except Exception as e:

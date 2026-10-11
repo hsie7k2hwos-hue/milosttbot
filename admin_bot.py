@@ -2078,6 +2078,299 @@ async def test_get_file_id(message: Message):
     await message.reply(f"🆔 <code>{esc(file_id)}</code>")
 
 
+# ── Rarity config / balance / userbot / backup ──
+async def _load_rarities_db() -> dict:
+    from game_config import load_rarities, ensure_config_tables
+    async with get_db() as db:
+        await ensure_config_tables(db)
+        return await load_rarities(db)
+
+
+@router.message(Command("checkbalance"), admin_filter)
+async def cmd_checkbalance(message: Message):
+    """Проверка сбалансированности редкостей, весов и наград."""
+    if not await _require_admin(message):
+        return
+    rarities = await _load_rarities_db()
+    counts = await get_rarity_counts()
+    total = sum(counts.values()) or 1
+    weight_sum = sum(r["weight"] for r in rarities.values())
+    lines = [
+        f"Всего карточек: <b>{total}</b>",
+        f"Сумма весов: <b>{weight_sum}</b> (цель 100)",
+        "",
+    ]
+    issues = []
+    for key, info in rarities.items():
+        cnt = counts.get(key, 0)
+        share = 100.0 * cnt / total
+        target = info["weight"]
+        delta = share - target
+        mark = "✓" if abs(delta) < 8 else ("↑" if delta > 0 else "↓")
+        lines.append(
+            f"{info['icon']} <b>{info['name']}</b>\n"
+            f"    карт: {cnt} ({share:.0f}%) · вес {target}% · награда {info['reward']} 🪙 {mark}"
+        )
+        if abs(delta) >= 12:
+            issues.append(f"{info['name']}: отклонение {delta:+.0f}%")
+        if info["reward"] <= 0:
+            issues.append(f"{info['name']}: награда ≤ 0")
+    if weight_sum != 100:
+        issues.append(f"Сумма весов {weight_sum} ≠ 100")
+    # sanity: более редкая ≥ награды более частой
+    prev_r = -1
+    for key in RARITY_ORDER:
+        r = rarities[key]["reward"]
+        if prev_r >= 0 and r < prev_r:
+            issues.append(f"Награда {key} ({r}) меньше предыдущей ({prev_r})")
+        prev_r = r
+
+    text = "⚖ <b>Баланс редкостей</b>\n" + sep(20) + "\n\n" + bq("\n".join(lines))
+    if issues:
+        text += "\n\n⚠️ <b>Замечания</b>\n" + bq("\n".join(issues))
+    else:
+        text += "\n\n✅ Существенных отклонений нет."
+    text += (
+        "\n\n<code>/setrarity KEY weight N</code>\n"
+        "<code>/setrarity KEY reward N</code>\n"
+        "<code>/resetrarities</code> — дефолт"
+    )
+    await message.reply(text)
+
+
+@router.message(Command("setrarity"), admin_filter)
+async def cmd_setrarity(message: Message, command: CommandObject):
+    """ /setrarity common weight 35  |  /setrarity legendary reward 250 """
+    if not await _require_admin(message):
+        return
+    from game_config import set_rarity_params, DEFAULT_RARITIES
+    args = (command.args or "").strip().split()
+    if len(args) < 3:
+        await message.reply(
+            "✏️ /setrarity KEY weight|reward N\n"
+            "Ключи: " + ", ".join(DEFAULT_RARITIES.keys())
+        )
+        return
+    key, field, val_s = args[0].lower(), args[1].lower(), args[2]
+    if key not in DEFAULT_RARITIES:
+        await message.reply("❌ Неизвестный ключ редкости")
+        return
+    try:
+        val = int(val_s)
+    except ValueError:
+        await message.reply("❌ N должно быть числом")
+        return
+    if field not in ("weight", "reward"):
+        await message.reply("❌ field: weight или reward")
+        return
+    async with get_db() as db:
+        ok = await set_rarity_params(
+            db, key,
+            weight=val if field == "weight" else None,
+            reward=val if field == "reward" else None,
+        )
+    if not ok:
+        await message.reply("❌ Не удалось сохранить")
+        return
+    # обновить кэш в процессе
+    global RARITIES
+    RARITIES = await _load_rarities_db()
+    await message.reply(f"✅ {key}.{field} = {val}")
+
+
+@router.message(Command("resetrarities"), admin_filter)
+async def cmd_resetrarities(message: Message):
+    if not await _require_admin(message):
+        return
+    from game_config import reset_rarities_to_default
+    async with get_db() as db:
+        await reset_rarities_to_default(db)
+    global RARITIES
+    RARITIES = await _load_rarities_db()
+    await message.reply("✅ Редкости сброшены на сбалансированный дефолт")
+
+
+@router.message(Command("redraw_cards"), admin_filter)
+async def cmd_redraw_cards(message: Message):
+    """Пересчитать оформление всех карточек по текущей редкости (рамка + звёзды)."""
+    if not await _require_admin(message):
+        return
+    if not reframe_all_photos:
+        await message.reply("❌ reframe_all_photos недоступен")
+        return
+    status = await message.reply("⏳ Перерисовка карточек (скачивание + рамка + звёзды)…")
+    try:
+        async with get_db() as db:
+            ok, fail = await reframe_all_photos(message.bot, db)
+        await status.edit_text(
+            f"✅ Перерисовка\n\n{bq(line('✓', 'Ок', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
+        )
+    except Exception as e:
+        await status.edit_text(f"❌ {esc(str(e))}")
+
+
+@router.message(Command("recalc_balances"), admin_filter)
+async def cmd_recalc_balances(message: Message):
+    """
+    Пересчитать монеты пользователей = сумма reward их карточек (по текущему rarity_config).
+    Не учитывает стрик/кубик/ник — только «стоимость коллекции».
+    """
+    if not await _require_admin(message):
+        return
+    rarities = await _load_rarities_db()
+    status = await message.reply("⏳ Пересчёт балансов по коллекциям…")
+    updated = 0
+    async with get_db() as db:
+        cur = await db.execute("SELECT user_id FROM users")
+        users = [r[0] for r in await cur.fetchall()]
+        for uid in users:
+            cur = await db.execute(
+                """SELECT c.rarity, COUNT(*) FROM inventory i
+                   JOIN cards c ON c.id = i.card_id
+                   WHERE i.user_id = ? GROUP BY c.rarity""",
+                (uid,),
+            )
+            rows = await cur.fetchall()
+            total = 0
+            for rarity, cnt in rows:
+                reward = rarities.get(rarity, {}).get("reward", 0)
+                total += reward * cnt
+            await db.execute("UPDATE users SET coins = ? WHERE user_id = ?", (total, uid))
+            updated += 1
+    await status.edit_text(
+        f"✅ Балансы пересчитаны для <b>{updated}</b> пользователей\n"
+        f"(сумма наград за карточки в коллекции)"
+    )
+
+
+@router.message(Command("userbot"), admin_filter)
+async def cmd_userbot(message: Message, command: CommandObject):
+    """ /userbot on | off | status """
+    if not await _require_admin(message):
+        return
+    from game_config import get_setting, set_setting, is_user_bot_enabled
+    arg = (command.args or "").strip().lower()
+    async with get_db() as db:
+        if arg in ("on", "1", "enable", "вкл"):
+            await set_setting(db, "user_bot_enabled", "1")
+            await message.reply(
+                "✅ User-бот <b>включён</b> в настройках.\n"
+                "Перезапустите процесс (<code>python main.py</code>), чтобы поднять polling."
+            )
+        elif arg in ("off", "0", "disable", "выкл"):
+            await set_setting(db, "user_bot_enabled", "0")
+            await message.reply(
+                "⏸ User-бот <b>выключен</b> в настройках.\n"
+                "После перезапуска <code>main.py</code> polling user-бота не стартует. "
+                "Админ-бот продолжит работать."
+            )
+        else:
+            enabled = await is_user_bot_enabled(db)
+            await message.reply(
+                f"User-бот: <b>{'включён ✅' if enabled else 'выключен ⏸'}</b>\n"
+                f"/userbot on · /userbot off"
+            )
+
+
+@router.message(Command("backup"), admin_filter)
+async def cmd_backup(message: Message):
+    """Ручной бэкап SQLite → файл в чат."""
+    if not await _require_admin(message):
+        return
+    import shutil
+    from datetime import datetime as dt
+    src = Path(DB_NAME)
+    if not src.is_file():
+        await message.reply("❌ Файл БД не найден")
+        return
+    backup_dir = src.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = dt.now().strftime("%Y%m%d_%H%M%S")
+    dest = backup_dir / f"cards_game_{stamp}.db"
+    try:
+        # checkpoint WAL
+        async with get_db() as db:
+            await db.execute("PRAGMA wal_checkpoint(FULL);")
+        shutil.copy2(src, dest)
+        # также journal если есть
+        size = dest.stat().st_size
+        doc = FSInputFile(dest, filename=dest.name)
+        await message.answer_document(
+            document=doc,
+            caption=f"💾 <b>Бэкап БД</b>\n{line('📦', 'Размер', fmt_num(size) + ' байт')}\n"
+                    f"{line('📁', 'Путь', esc(str(dest)))}",
+        )
+    except Exception as e:
+        await message.reply(f"❌ {esc(str(e))}")
+
+
+@router.message(Command("export_db"), admin_filter)
+async def cmd_export_db(message: Message):
+    """Экспорт БД (то же, что backup, но имя export)."""
+    if not await _require_admin(message):
+        return
+    import shutil
+    from datetime import datetime as dt
+    src = Path(DB_NAME)
+    if not src.is_file():
+        await message.reply("❌ БД не найдена")
+        return
+    async with get_db() as db:
+        await db.execute("PRAGMA wal_checkpoint(FULL);")
+    tmp = src.parent / f"export_{dt.now().strftime('%Y%m%d_%H%M%S')}.db"
+    shutil.copy2(src, tmp)
+    try:
+        await message.answer_document(
+            FSInputFile(tmp, filename=tmp.name),
+            caption="📤 Экспорт БД",
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@router.message(Command("import_db"), admin_filter, F.document)
+async def cmd_import_db(message: Message):
+    """Импорт: отправьте .db файлом с подписью /import_db (осторожно!)."""
+    if not await _require_admin(message):
+        return
+    if not await is_superadmin(message.from_user.id):
+        await message.reply("❌ Только superadmin")
+        return
+    doc = message.document
+    if not doc or not (doc.file_name or "").endswith(".db"):
+        await message.reply("❌ Нужен файл .db и команда /import_db в подписи или ответе")
+        return
+    status = await message.reply("⏳ Импорт БД…")
+    try:
+        # бэкап текущей
+        import shutil
+        from datetime import datetime as dt
+        src = Path(DB_NAME)
+        backup_dir = src.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        if src.is_file():
+            shutil.copy2(src, backup_dir / f"pre_import_{dt.now().strftime('%Y%m%d_%H%M%S')}.db")
+        tg_file = await message.bot.get_file(doc.file_id)
+        dest = Path(DB_NAME)
+        await message.bot.download_file(tg_file.file_path, destination=dest)
+        await status.edit_text(
+            "✅ БД импортирована. Перезапустите ботов.\n"
+            "Предыдущая копия лежит в backups/."
+        )
+    except Exception as e:
+        await status.edit_text(f"❌ {esc(str(e))}")
+
+
+@router.message(Command("import_db"), admin_filter)
+async def cmd_import_db_hint(message: Message):
+    if not await _require_admin(message):
+        return
+    await message.reply(
+        "📥 Отправьте файл <code>.db</code> с подписью <code>/import_db</code>\n"
+        "Только superadmin. Перед импортом текущая БД сохранится в backups/."
+    )
+
+
 # ── HELP ──
 HELP_PAGES = [
     {
@@ -2095,8 +2388,9 @@ HELP_PAGES = [
             "➕ Добавить — фото → название → редкость (с рекомендацией баланса)\n"
             "/addcard Название редкость + фото\n"
             "/delcard ID\n"
-            "/migrate_photos · /frame_all · /migrate_uuid\n"
-            "/rename_rarities · /balance_rarities"
+            "/migrate_photos · /frame_all · /migrate_uuid · /redraw_cards\n"
+            "/rename_rarities · /balance_rarities · /checkbalance\n"
+            "/setrarity KEY weight|reward N · /resetrarities"
         ),
     },
     {
@@ -2105,13 +2399,16 @@ HELP_PAGES = [
             "/setnick USERID Ник\n"
             "/setcoins [USERID] N\n"
             "/resetcd [USERID]\n"
-            "/ban · /unban · /setadmin · /unsetadmin"
+            "/ban · /unban · /setadmin · /unsetadmin\n"
+            "/recalc_balances — монеты = сумма наград коллекции"
         ),
     },
     {
         "title": "Сервис",
         "body": (
-            "/check — проверка БД, таблиц, API, фото\n"
+            "/check · /checkbalance\n"
+            "/userbot on|off|status\n"
+            "/backup · /export_db · /import_db\n"
             "/logs · /cache_avatars · /stats · /top"
         ),
     },
@@ -2189,6 +2486,15 @@ ADMIN_COMMANDS = [
     BotCommand(command="migrate_uuid", description="🔑 UUID-имена файлов"),
     BotCommand(command="rename_rarities", description="🏷 Старые→новые редкости"),
     BotCommand(command="balance_rarities", description="⚖ Баланс редкостей"),
+    BotCommand(command="checkbalance", description="⚖ Проверка баланса редкостей"),
+    BotCommand(command="setrarity", description="✏️ Вес/награда редкости"),
+    BotCommand(command="resetrarities", description="↺ Дефолт редкостей"),
+    BotCommand(command="redraw_cards", description="🖼 Перерисовка рамок"),
+    BotCommand(command="recalc_balances", description="🪙 Пересчёт монет игроков"),
+    BotCommand(command="userbot", description="⏯ Вкл/выкл user-бота"),
+    BotCommand(command="backup", description="💾 Бэкап БД"),
+    BotCommand(command="export_db", description="📤 Экспорт БД"),
+    BotCommand(command="import_db", description="📥 Импорт БД"),
     BotCommand(command="cache_avatars", description="🖼 Кэш аватарок"),
 ]
 
@@ -2208,6 +2514,14 @@ async def run_admin_bot(token: Optional[str] = None) -> None:
 
     await init_db_minimal()
     await ensure_superadmin_from_env()
+    try:
+        from game_config import ensure_config_tables, load_rarities
+        async with get_db() as db:
+            await ensure_config_tables(db)
+            global RARITIES
+            RARITIES = await load_rarities(db)
+    except Exception as e:
+        logger.warning("rarity config: %s", e)
     try:
         ensure_photo_dir()
     except Exception:

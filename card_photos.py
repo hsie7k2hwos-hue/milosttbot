@@ -1,7 +1,7 @@
-"""Локальное хранение фото карточек с UUID-именами и цветными рамками по редкости.
+"""Локальное хранение фото карточек с UUID-именами и оформлением по редкости.
 
-Файлы: card_photos/{uuid}.jpg  (нельзя угадать по card_id)
-В БД: cards.photo_path = полный путь или имя файла, cards.photo_uuid = uuid.
+Файлы: card_photos/{uuid}.jpg
+Оформление: цветная рамка с ромбическими акцентами + ряд звёзд (1–6 по редкости).
 """
 from __future__ import annotations
 
@@ -22,18 +22,30 @@ DEFAULT_AVATAR_FILE_ID = (
     "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
 )
 
-# Цвета рамок (RGB) по ключу редкости
+# Цвета по редкости (RGB)
 RARITY_FRAME_COLORS = {
-    "common": (170, 170, 170),
-    "rare": (70, 130, 255),
-    "uncommon": (50, 200, 100),
-    "valuable": (160, 80, 220),
-    "super_valuable": (255, 140, 40),
-    "legendary": (255, 200, 40),
+    "common": (180, 180, 185),
+    "rare": (64, 140, 255),
+    "uncommon": (48, 200, 110),
+    "valuable": (168, 90, 230),
+    "super_valuable": (255, 145, 45),
+    "legendary": (255, 205, 50),
 }
 
-FRAME_WIDTH = 14
-OUTER_PAD = 6
+# Число звёзд по редкости
+RARITY_STARS = {
+    "common": 1,
+    "rare": 2,
+    "uncommon": 3,
+    "valuable": 4,
+    "super_valuable": 5,
+    "legendary": 6,
+}
+
+BORDER = 18          # толщина цветной рамки
+CORNER_SIZE = 28     # размер ромбика в углу
+STAR_AREA = 36       # высота полосы под звёзды
+BG = (22, 22, 28)
 
 
 def ensure_photo_dir() -> Path:
@@ -50,12 +62,10 @@ def photo_path_for_uuid(photo_uuid: str) -> Path:
 
 
 def get_card_photo_input(card_id: int, photo_path: Optional[str] = None):
-    """FSInputFile если файл есть, иначе None. card_id не используется для поиска по имени."""
     if photo_path:
         p = Path(photo_path)
         if p.is_file() and p.stat().st_size > 0:
             return FSInputFile(str(p))
-        # только имя файла
         cand = _PHOTO_DIR / p.name
         if cand.is_file() and cand.stat().st_size > 0:
             return FSInputFile(str(cand))
@@ -79,15 +89,63 @@ async def download_telegram_file(bot: Bot, file_id: str, dest: Path) -> bool:
         return False
 
 
+def _lighten(rgb: tuple, amount: int = 50) -> tuple:
+    return tuple(min(255, c + amount) for c in rgb)
+
+
+def _darken(rgb: tuple, amount: int = 50) -> tuple:
+    return tuple(max(0, c - amount) for c in rgb)
+
+
+def _draw_star(draw, cx: int, cy: int, outer_r: int, color: tuple, fill: tuple):
+    """Пятиконечная звезда."""
+    import math
+    pts = []
+    for i in range(10):
+        angle = math.radians(-90 + i * 36)
+        r = outer_r if i % 2 == 0 else outer_r * 0.42
+        pts.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+    draw.polygon(pts, fill=fill, outline=color)
+
+
+def _draw_diamond(draw, cx: int, cy: int, size: int, fill, outline, width: int = 2):
+    """Ромб с центром (cx, cy)."""
+    half = size // 2
+    pts = [
+        (cx, cy - half),
+        (cx + half, cy),
+        (cx, cy + half),
+        (cx - half, cy),
+    ]
+    draw.polygon(pts, fill=fill, outline=outline)
+    if width > 1:
+        # внутренний блик
+        inner = max(4, size // 3)
+        h = inner // 2
+        pts2 = [
+            (cx, cy - h),
+            (cx + h, cy),
+            (cx, cy + h),
+            (cx - h, cy),
+        ]
+        draw.polygon(pts2, outline=_lighten(outline if isinstance(outline, tuple) else fill, 30))
+
+
 def apply_rarity_frame(
     src: Path,
     dest: Path,
     rarity: str,
-    frame_width: int = FRAME_WIDTH,
+    frame_width: int = BORDER,
 ) -> bool:
-    """Накладывает цветную рамку редкости. Требует Pillow."""
+    """
+    Красивое оформление:
+    - тёмный фон-подложка
+    - цветная рамка
+    - ромбы в четырёх углах
+    - ряд звёзд внизу (1–6 по редкости), цвет редкости
+    """
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFilter
     except ImportError:
         logger.warning("Pillow не установлен — рамка пропущена")
         if src != dest:
@@ -96,35 +154,93 @@ def apply_rarity_frame(
 
     try:
         img = Image.open(src).convert("RGB")
+        # если уже оформляли — берём центр (эвристика: обрезать старую рамку сложно,
+        # поэтому вызывающий код должен передавать «сырое» фото при перерисовке)
         color = RARITY_FRAME_COLORS.get(rarity, (128, 128, 128))
+        light = _lighten(color, 55)
+        dark = _darken(color, 40)
+        n_stars = RARITY_STARS.get(rarity, 1)
+
         w, h = img.size
-        pad = frame_width + OUTER_PAD
-        new_w, new_h = w + 2 * pad, h + 2 * pad
-        canvas = Image.new("RGB", (new_w, new_h), (30, 30, 35))
+        # ограничиваем слишком большие
+        max_side = 1280
+        if max(w, h) > max_side:
+            ratio = max_side / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
+            w, h = img.size
+
+        pad = frame_width + 8
+        star_h = STAR_AREA
+        new_w = w + 2 * pad
+        new_h = h + 2 * pad + star_h
+
+        canvas = Image.new("RGB", (new_w, new_h), BG)
         draw = ImageDraw.Draw(canvas)
-        # внешняя тонкая обводка
-        draw.rectangle([0, 0, new_w - 1, new_h - 1], outline=(20, 20, 22), width=2)
-        # основная цветная рамка
+
+        # внешняя тёмная обводка
+        draw.rectangle([0, 0, new_w - 1, new_h - 1], outline=(12, 12, 16), width=3)
+
+        # основная цветная рамка (верх + бока; низ до звёзд)
+        # верх
+        draw.rectangle([4, 4, new_w - 5, 4 + frame_width], fill=color)
+        # лево
+        draw.rectangle([4, 4, 4 + frame_width, new_h - star_h - 5], fill=color)
+        # право
+        draw.rectangle([new_w - 5 - frame_width, 4, new_w - 5, new_h - star_h - 5], fill=color)
+        # низ (над звёздами)
         draw.rectangle(
-            [OUTER_PAD, OUTER_PAD, new_w - OUTER_PAD - 1, new_h - OUTER_PAD - 1],
-            outline=color,
-            width=frame_width,
+            [4, new_h - star_h - 5 - frame_width, new_w - 5, new_h - star_h - 5],
+            fill=color,
         )
-        # внутренний блик
-        light = tuple(min(255, c + 40) for c in color)
+
+        # блик по внутреннему краю рамки
+        inner = 4 + frame_width
         draw.rectangle(
-            [
-                OUTER_PAD + 2,
-                OUTER_PAD + 2,
-                new_w - OUTER_PAD - 3,
-                new_h - OUTER_PAD - 3,
-            ],
+            [inner, inner, new_w - inner - 1, new_h - star_h - inner - 1],
             outline=light,
             width=2,
         )
+        draw.rectangle(
+            [inner + 2, inner + 2, new_w - inner - 3, new_h - star_h - inner - 3],
+            outline=dark,
+            width=1,
+        )
+
+        # ромбы в углах (поверх рамки)
+        cs = CORNER_SIZE
+        corners = [
+            (pad // 2 + 4, pad // 2 + 4),
+            (new_w - pad // 2 - 4, pad // 2 + 4),
+            (pad // 2 + 4, new_h - star_h - pad // 2 - 4),
+            (new_w - pad // 2 - 4, new_h - star_h - pad // 2 - 4),
+        ]
+        for cx, cy in corners:
+            _draw_diamond(draw, cx, cy, cs, fill=dark, outline=light)
+            _draw_diamond(draw, cx, cy, cs // 2, fill=color, outline=light)
+
+        # вставляем фото
         canvas.paste(img, (pad, pad))
+
+        # полоса под звёзды
+        star_top = new_h - star_h
+        draw.rectangle([0, star_top, new_w, new_h], fill=(18, 18, 24))
+        # тонкая линия-разделитель цвета редкости
+        draw.line([(pad, star_top + 2), (new_w - pad, star_top + 2)], fill=color, width=2)
+
+        # звёзды по центру
+        star_r = 11
+        gap = 8
+        total_w = n_stars * (star_r * 2) + (n_stars - 1) * gap
+        start_x = (new_w - total_w) // 2 + star_r
+        cy = star_top + star_h // 2 + 2
+        for i in range(n_stars):
+            cx = start_x + i * (star_r * 2 + gap)
+            _draw_star(draw, cx, cy, star_r, color=light, fill=color)
+            # маленькая точка-блик
+            draw.ellipse([cx - 2, cy - 4, cx + 2, cy], fill=light)
+
         ensure_photo_dir()
-        canvas.save(dest, "JPEG", quality=92)
+        canvas.save(dest, "JPEG", quality=93, optimize=True)
         return dest.is_file() and dest.stat().st_size > 0
     except Exception as e:
         logger.error("apply_rarity_frame: %s", e)
@@ -138,10 +254,7 @@ async def sync_card_photo(
     rarity: str = "common",
     existing_uuid: Optional[str] = None,
 ) -> Optional[Tuple[str, str]]:
-    """
-    Скачивает photo_id, накладывает рамку, сохраняет как UUID.jpg.
-    Возвращает (photo_uuid, photo_path) или None.
-    """
+    """Скачать → рамка → UUID.jpg. Возвращает (uuid, path)."""
     ensure_photo_dir()
     photo_uuid = existing_uuid or new_photo_uuid()
     dest = photo_path_for_uuid(photo_uuid)
@@ -160,7 +273,6 @@ async def sync_card_photo(
 
 
 async def migrate_all_card_photos(bot: Bot, db) -> tuple[int, int]:
-    """Скачать все photo_id без photo_path / без файла. (ok, fail)."""
     ensure_photo_dir()
     cur = await db.execute(
         "SELECT id, photo_id, photo_path, photo_uuid, rarity FROM cards"
@@ -194,7 +306,10 @@ async def migrate_all_card_photos(bot: Bot, db) -> tuple[int, int]:
 
 
 async def reframe_all_photos(bot: Bot, db) -> tuple[int, int]:
-    """Переналожить рамки на уже скачанные фото (по текущей редкости)."""
+    """
+    Перерисовка: если есть photo_id — скачать заново (сырое) и наложить рамку.
+    Иначе — применить рамку к существующему файлу (может наслоить).
+    """
     ensure_photo_dir()
     cur = await db.execute(
         "SELECT id, photo_id, photo_path, photo_uuid, rarity FROM cards"
@@ -203,21 +318,13 @@ async def reframe_all_photos(bot: Bot, db) -> tuple[int, int]:
     ok = fail = 0
     for row in rows:
         rarity = row["rarity"] or "common"
-        src = None
-        if row["photo_path"] and Path(row["photo_path"]).is_file():
-            src = Path(row["photo_path"])
-        elif row["photo_uuid"]:
-            cand = photo_path_for_uuid(row["photo_uuid"])
-            if cand.is_file():
-                src = cand
+        photo_uuid = row["photo_uuid"] or new_photo_uuid()
+        dest = photo_path_for_uuid(photo_uuid)
 
-        if src is None:
-            # попробовать скачать заново
-            if not row["photo_id"]:
-                fail += 1
-                continue
+        # предпочтительно свежая загрузка с Telegram
+        if row["photo_id"]:
             result = await sync_card_photo(
-                bot, row["id"], row["photo_id"], rarity=rarity, existing_uuid=row["photo_uuid"]
+                bot, row["id"], row["photo_id"], rarity=rarity, existing_uuid=photo_uuid
             )
             if result:
                 puuid, ppath = result
@@ -230,9 +337,12 @@ async def reframe_all_photos(bot: Bot, db) -> tuple[int, int]:
                 fail += 1
             continue
 
-        photo_uuid = row["photo_uuid"] or new_photo_uuid()
-        dest = photo_path_for_uuid(photo_uuid)
-        # если src == dest — пишем во временный
+        src = None
+        if row["photo_path"] and Path(row["photo_path"]).is_file():
+            src = Path(row["photo_path"])
+        if src is None:
+            fail += 1
+            continue
         tmp = _PHOTO_DIR / f"_reframe_{photo_uuid}.jpg"
         try:
             tmp.write_bytes(src.read_bytes())
@@ -251,7 +361,6 @@ async def reframe_all_photos(bot: Bot, db) -> tuple[int, int]:
 
 
 async def migrate_to_uuid_names(db) -> tuple[int, int]:
-    """Переименовать старые {id}.jpg → {uuid}.jpg и обновить БД."""
     ensure_photo_dir()
     cur = await db.execute("SELECT id, photo_path, photo_uuid FROM cards")
     rows = await cur.fetchall()
@@ -261,26 +370,20 @@ async def migrate_to_uuid_names(db) -> tuple[int, int]:
         if row["photo_path"] and Path(row["photo_path"]).is_file():
             old_path = Path(row["photo_path"])
         else:
-            # legacy: card_id.jpg
             legacy = _PHOTO_DIR / f"{row['id']}.jpg"
             if legacy.is_file():
                 old_path = legacy
-
         if old_path is None:
             fail += 1
             continue
-
-        # уже UUID-имя?
         if row["photo_uuid"] and old_path.name == f"{row['photo_uuid']}.jpg":
             ok += 1
             continue
-
         photo_uuid = row["photo_uuid"] or new_photo_uuid()
         new_path = photo_path_for_uuid(photo_uuid)
         try:
             if old_path.resolve() != new_path.resolve():
                 new_path.write_bytes(old_path.read_bytes())
-                # не удаляем старый сразу — на всякий случай
             await db.execute(
                 "UPDATE cards SET photo_path = ?, photo_uuid = ? WHERE id = ?",
                 (str(new_path), photo_uuid, row["id"]),
