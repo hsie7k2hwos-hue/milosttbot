@@ -2004,7 +2004,7 @@ LEGACY_TABLES = (
 )
 
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 
 async def gemini_suggest_name(hint: str = "", old_name: str = "") -> str:
@@ -2367,8 +2367,8 @@ async def cmd_check(message: Message):
     try:
         from card_photos import ensure_photo_dir, _PHOTO_DIR, CARD_W, CARD_H
         ensure_photo_dir()
-        n = len(list(_PHOTO_DIR.glob("*.jpg"))) if _PHOTO_DIR.exists() else 0
-        lines.append(f"✅ Фото-папка: {_PHOTO_DIR} ({n} jpg, цель {CARD_W}×{CARD_H})")
+        n = (len(list(_PHOTO_DIR.glob("*.webp"))) + len(list(_PHOTO_DIR.glob("*.jpg")))) if _PHOTO_DIR.exists() else 0
+        lines.append(f"✅ Фото-папка: {_PHOTO_DIR} ({n} webp/jpg, цель {CARD_W}×{CARD_H})")
     except Exception as e:
         lines.append(f"⚠️ Фото-папка: {e}")
 

@@ -1,7 +1,7 @@
 """Локальное хранение фото карточек с UUID-именами и оформлением по редкости.
 
-Файлы: card_photos/{uuid}.jpg
-Оформление: цветная рамка с ромбическими акцентами + ряд звёзд (1–6 по редкости).
+Файлы: card_photos/{uuid}.webp (fallback .jpg)
+Оформление: blur-переливка + цветная рамка + ромбы + звёзды.
 """
 from __future__ import annotations
 
@@ -61,19 +61,78 @@ def new_photo_uuid() -> str:
     return uuid.uuid4().hex
 
 
-def photo_path_for_uuid(photo_uuid: str) -> Path:
-    return _PHOTO_DIR / f"{photo_uuid}.jpg"
+PHOTO_EXT = ".webp"  # основной формат; при отсутствии libwebp → .jpg
+WEBP_QUALITY = 88
 
 
-def get_card_photo_input(card_id: int, photo_path: Optional[str] = None):
+def _webp_supported() -> bool:
+    try:
+        from PIL import Image
+        from io import BytesIO
+        buf = BytesIO()
+        Image.new("RGB", (2, 2), (0, 0, 0)).save(buf, "WEBP", quality=80)
+        return True
+    except Exception:
+        return False
+
+
+def photo_path_for_uuid(photo_uuid: str, ext: Optional[str] = None) -> Path:
+    e = ext or (PHOTO_EXT if _webp_supported() else ".jpg")
+    return _PHOTO_DIR / f"{photo_uuid}{e}"
+
+
+def find_existing_photo(photo_uuid: Optional[str], photo_path: Optional[str] = None) -> Optional[Path]:
+    """Найти файл карточки: path из БД, затем uuid.webp / uuid.jpg."""
     if photo_path:
         p = Path(photo_path)
         if p.is_file() and p.stat().st_size > 0:
-            return FSInputFile(str(p))
+            return p
         cand = _PHOTO_DIR / p.name
+        if cand.is_file() and cand.stat().st_size > 0:
+            return cand
+    if photo_uuid:
+        for e in (".webp", ".jpg", ".png", ".jpeg"):
+            cand = _PHOTO_DIR / f"{photo_uuid}{e}"
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand
+    return None
+
+
+def get_card_photo_input(card_id: int, photo_path: Optional[str] = None):
+    p = find_existing_photo(None, photo_path)
+    if p is not None:
+        return FSInputFile(str(p))
+    # legacy by id
+    for e in (".webp", ".jpg"):
+        cand = _PHOTO_DIR / f"{card_id}{e}"
         if cand.is_file() and cand.stat().st_size > 0:
             return FSInputFile(str(cand))
     return None
+
+
+def save_card_image(img, dest: Path) -> Path:
+    """Сохранить RGB-изображение: WebP, иначе JPEG. Возвращает фактический путь."""
+    ensure_photo_dir()
+    dest = Path(dest)
+    use_webp = dest.suffix.lower() == ".webp" or _webp_supported()
+    if use_webp:
+        out = dest.with_suffix(".webp")
+        try:
+            img.save(out, "WEBP", quality=WEBP_QUALITY, method=6)
+            if out.is_file() and out.stat().st_size > 0:
+                # убрать старый jpg с тем же stem
+                old = out.with_suffix(".jpg")
+                if old.is_file() and old != out:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+                return out
+        except Exception as e:
+            logger.warning("WebP save failed, fallback JPEG: %s", e)
+    out = dest.with_suffix(".jpg")
+    img.save(out, "JPEG", quality=93, optimize=True)
+    return out
 
 
 def get_default_avatar_input():
@@ -316,8 +375,11 @@ def apply_rarity_frame(
             draw.ellipse([cx - 2, cy - 4, cx + 2, cy], fill=light)
 
         ensure_photo_dir()
-        canvas.save(dest, "JPEG", quality=93, optimize=True)
-        return dest.is_file() and dest.stat().st_size > 0
+        actual = save_card_image(canvas, Path(dest))
+        # dest мог быть .jpg — actual .webp: синхронизируем имя
+        if actual.resolve() != Path(dest).resolve():
+            logger.debug("saved as %s (requested %s)", actual, dest)
+        return actual.is_file() and actual.stat().st_size > 0
     except Exception as e:
         logger.error("apply_rarity_frame: %s", e)
         return False
@@ -331,7 +393,7 @@ async def sync_card_photo(
     existing_uuid: Optional[str] = None,
     fallback_bot: Optional[Bot] = None,
 ) -> Optional[Tuple[str, str]]:
-    """Скачать → рамка → UUID.jpg. Сначала bot, при ошибке — fallback_bot (user)."""
+    """Скачать → blur+рамка → UUID.webp. Сначала bot, при ошибке — fallback_bot (user)."""
     ensure_photo_dir()
     photo_uuid = existing_uuid or new_photo_uuid()
     dest = photo_path_for_uuid(photo_uuid)
@@ -350,7 +412,18 @@ async def sync_card_photo(
     tmp.unlink(missing_ok=True)
     if not framed:
         return None
-    return photo_uuid, str(dest)
+    # фактический файл (webp или jpg)
+    actual = find_existing_photo(photo_uuid, str(dest))
+    if actual is None:
+        # apply мог сохранить с другим суффиксом
+        for e in (".webp", ".jpg"):
+            cand = _PHOTO_DIR / f"{photo_uuid}{e}"
+            if cand.is_file() and cand.stat().st_size > 0:
+                actual = cand
+                break
+    if actual is None:
+        return None
+    return photo_uuid, str(actual)
 
 
 async def migrate_all_card_photos(
@@ -482,13 +555,18 @@ async def migrate_to_uuid_names(db) -> tuple[int, int]:
         if row["photo_path"] and Path(row["photo_path"]).is_file():
             old_path = Path(row["photo_path"])
         else:
-            legacy = _PHOTO_DIR / f"{row['id']}.jpg"
+            legacy = None
+        for _e in (".webp", ".jpg"):
+            _c = _PHOTO_DIR / f"{row['id']}{_e}"
+            if _c.is_file():
+                legacy = _c
+                break
             if legacy.is_file():
                 old_path = legacy
         if old_path is None:
             fail += 1
             continue
-        if row["photo_uuid"] and old_path.name == f"{row['photo_uuid']}.jpg":
+        if row["photo_uuid"] and old_path.stem == row["photo_uuid"] and old_path.suffix.lower() in (".jpg", ".webp", ".png"):
             ok += 1
             continue
         photo_uuid = row["photo_uuid"] or new_photo_uuid()
