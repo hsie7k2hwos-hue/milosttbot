@@ -153,7 +153,7 @@ async def run_user_bot() -> None:
     if not BOT_TOKEN:
         return
     # init_db + polling из bot
-    from bot import main as bot_main
+    from user_bot import main as bot_main
     await bot_main()
 
 

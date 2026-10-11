@@ -25,21 +25,20 @@ DEFAULT_AVATAR_FILE_ID = (
 # Цвета по редкости (RGB)
 RARITY_FRAME_COLORS = {
     "common": (180, 180, 185),
-    "rare": (64, 140, 255),
     "uncommon": (48, 200, 110),
     "valuable": (168, 90, 230),
     "super_valuable": (255, 145, 45),
     "legendary": (255, 205, 50),
+    "negative": (90, 20, 25),
 }
 
-# Число звёзд по редкости
 RARITY_STARS = {
     "common": 1,
-    "rare": 2,
-    "uncommon": 3,
-    "valuable": 4,
-    "super_valuable": 5,
-    "legendary": 6,
+    "uncommon": 2,
+    "valuable": 3,
+    "super_valuable": 4,
+    "legendary": 5,
+    "negative": 1,
 }
 
 BORDER = 18          # толщина цветной рамки
@@ -85,8 +84,26 @@ async def download_telegram_file(bot: Bot, file_id: str, dest: Path) -> bool:
         await bot.download_file(tg_file.file_path, destination=dest)
         return dest.is_file() and dest.stat().st_size > 0
     except Exception as e:
-        logger.error("download_telegram_file %s → %s: %s", file_id[:24], dest, e)
+        logger.warning("download via primary bot failed %s: %s", file_id[:24], e)
         return False
+
+
+async def download_telegram_file_any(
+    bots: list,
+    file_id: str,
+    dest: Path,
+) -> bool:
+    """Пробует скачать file_id по очереди ботами (admin → user)."""
+    for i, bot in enumerate(bots):
+        if bot is None:
+            continue
+        ok = await download_telegram_file(bot, file_id, dest)
+        if ok:
+            if i > 0:
+                logger.info("download OK via fallback bot #%s for %s", i, file_id[:24])
+            return True
+    logger.error("download failed for all bots: %s", file_id[:24])
+    return False
 
 
 def _lighten(rgb: tuple, amount: int = 50) -> tuple:
@@ -253,14 +270,19 @@ async def sync_card_photo(
     photo_id: str,
     rarity: str = "common",
     existing_uuid: Optional[str] = None,
+    fallback_bot: Optional[Bot] = None,
 ) -> Optional[Tuple[str, str]]:
-    """Скачать → рамка → UUID.jpg. Возвращает (uuid, path)."""
+    """Скачать → рамка → UUID.jpg. Сначала bot, при ошибке — fallback_bot (user)."""
     ensure_photo_dir()
     photo_uuid = existing_uuid or new_photo_uuid()
     dest = photo_path_for_uuid(photo_uuid)
     tmp = _PHOTO_DIR / f"_tmp_{photo_uuid}.jpg"
 
-    ok = await download_telegram_file(bot, photo_id, tmp)
+    bots = [bot]
+    if fallback_bot is not None and fallback_bot is not bot:
+        bots.append(fallback_bot)
+
+    ok = await download_telegram_file_any(bots, photo_id, tmp)
     if not ok:
         tmp.unlink(missing_ok=True)
         return None
@@ -272,7 +294,9 @@ async def sync_card_photo(
     return photo_uuid, str(dest)
 
 
-async def migrate_all_card_photos(bot: Bot, db) -> tuple[int, int]:
+async def migrate_all_card_photos(
+    bot: Bot, db, fallback_bot: Optional[Bot] = None
+) -> tuple[int, int]:
     ensure_photo_dir()
     cur = await db.execute(
         "SELECT id, photo_id, photo_path, photo_uuid, rarity FROM cards"
@@ -290,7 +314,12 @@ async def migrate_all_card_photos(bot: Bot, db) -> tuple[int, int]:
             continue
         rarity = row["rarity"] or "common"
         result = await sync_card_photo(
-            bot, row["id"], photo_id, rarity=rarity, existing_uuid=row["photo_uuid"]
+            bot,
+            row["id"],
+            photo_id,
+            rarity=rarity,
+            existing_uuid=row["photo_uuid"],
+            fallback_bot=fallback_bot,
         )
         if result:
             puuid, ppath = result
@@ -305,10 +334,11 @@ async def migrate_all_card_photos(bot: Bot, db) -> tuple[int, int]:
     return ok, fail
 
 
-async def reframe_all_photos(bot: Bot, db) -> tuple[int, int]:
+async def reframe_all_photos(
+    bot: Bot, db, fallback_bot: Optional[Bot] = None
+) -> tuple[int, int]:
     """
-    Перерисовка: если есть photo_id — скачать заново (сырое) и наложить рамку.
-    Иначе — применить рамку к существующему файлу (может наслоить).
+    Перерисовка: скачать сырое фото (admin → user token) и наложить рамку.
     """
     ensure_photo_dir()
     cur = await db.execute(
@@ -321,10 +351,14 @@ async def reframe_all_photos(bot: Bot, db) -> tuple[int, int]:
         photo_uuid = row["photo_uuid"] or new_photo_uuid()
         dest = photo_path_for_uuid(photo_uuid)
 
-        # предпочтительно свежая загрузка с Telegram
         if row["photo_id"]:
             result = await sync_card_photo(
-                bot, row["id"], row["photo_id"], rarity=rarity, existing_uuid=photo_uuid
+                bot,
+                row["id"],
+                row["photo_id"],
+                rarity=rarity,
+                existing_uuid=photo_uuid,
+                fallback_bot=fallback_bot,
             )
             if result:
                 puuid, ppath = result
@@ -334,7 +368,26 @@ async def reframe_all_photos(bot: Bot, db) -> tuple[int, int]:
                 )
                 ok += 1
             else:
-                fail += 1
+                # fallback: локальный файл без перекачки
+                src = None
+                if row["photo_path"] and Path(row["photo_path"]).is_file():
+                    src = Path(row["photo_path"])
+                if src is not None:
+                    tmp = _PHOTO_DIR / f"_reframe_{photo_uuid}.jpg"
+                    try:
+                        tmp.write_bytes(src.read_bytes())
+                        if apply_rarity_frame(tmp, dest, rarity):
+                            await db.execute(
+                                "UPDATE cards SET photo_path = ?, photo_uuid = ? WHERE id = ?",
+                                (str(dest), photo_uuid, row["id"]),
+                            )
+                            ok += 1
+                        else:
+                            fail += 1
+                    finally:
+                        tmp.unlink(missing_ok=True)
+                else:
+                    fail += 1
             continue
 
         src = None

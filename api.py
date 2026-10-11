@@ -531,11 +531,16 @@ async def api_claim(x_telegram_init_data: Optional[str] = Header(None)):
             raise HTTPException(400, "all_collected")
         reward = RARITIES.get(selected_rarity, RARITIES["common"])["reward"]
         new_streak, new_last = _calc_streak(user["last_streak_date"] or 0, user["streak"] or 0, now)
+        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
+        old_bal = ((await cur.fetchone()) or {"coins": 0})["coins"] or 0
+        new_bal = max(0, old_bal + int(reward))
+        actual = new_bal - old_bal
         await db.execute(
-            """UPDATE users SET last_claim = ?, coins = coins + ?, streak = ?, last_streak_date = ?
+            """UPDATE users SET last_claim = ?, coins = ?, streak = ?, last_streak_date = ?
                WHERE user_id = ?""",
-            (now, reward, new_streak, new_last, user_id),
+            (now, new_bal, new_streak, new_last, user_id),
         )
+        reward = actual
         await db.execute(
             """INSERT INTO inventory (user_id, card_id, claim_time) VALUES (?, ?, ?)
                ON CONFLICT(user_id, card_id) DO UPDATE SET claim_time = ?""",

@@ -1,65 +1,36 @@
-# Мряу v2.2
-
-User-бот + admin-бот + Mini App API, общая SQLite.
+# Мряу v2.3
 
 ## Запуск
-
 ```bash
 pip install -r requirements.txt
-export BOT_TOKEN=... ADMIN_BOT_TOKEN=... SUPERADMIN_IDS=123456789
-python main.py          # единая точка входа
+export BOT_TOKEN=... ADMIN_BOT_TOKEN=... SUPERADMIN_IDS=...
+python main.py
 ```
 
-Или по отдельности: `python bot.py` / `python admin_bot.py` / `uvicorn api:app`.
+## Редкости (дефолт)
+| key | имя | вес | награда |
+|-----|-----|-----|---------|
+| common | Обычная | 38 | +10 |
+| uncommon | Необычная | 20 | +40 |
+| valuable | Ценная | 12 | +70 |
+| super_valuable | Сверхценная | 8 | +120 |
+| legendary | Легендарная | 4 | +200 |
+| negative | Негативная | 18 | **−20** |
 
-## Новое в 2.2
-
-- **Рамка карточки:** цветная окантовка + ромбы в углах + звёзды (1–6 по редкости)
-- **`rarity_config` в БД** — веса и награды: `/setrarity`, `/resetrarities`, `/checkbalance`
-- **`/redraw_cards`** — перерисовка всех фото под текущую редкость
-- **`/recalc_balances`** — монеты = сумма наград карточек в коллекции
-- **`/userbot on|off`** — выключить user-бот (нужен рестарт main.py)
-- **`/backup` · `/export_db` · `/import_db`** — бэкап и обмен БД
-- **Стрик:** 2→10, 7→15, 14→20, 30→30, 60→40
-- **Экономика:** ник 120, кубик −15…+25, карты 10…200
-- **`main.py`** — проверка окружения и запуск всего
+`rare` удалена. Миграция: `/remove_rare` (rare→uncommon + redraw + дефолт конфиг).
 
 ## Файлы
+- `main.py` — точка входа
+- `user_bot.py` — user-бот (бывший bot.py)
+- `admin_bot.py` — админ
+- `api.py` — Mini App API
+- `card_photos.py` — UUID + рамки
+- `game_config.py` — константы / rarity_config
 
-| Файл | Роль |
-|------|------|
-| main.py | Точка входа |
-| bot.py | User-бот |
-| admin_bot.py | Админ |
-| api.py | Mini App API |
-| card_photos.py | UUID + рамки |
-| game_config.py | Константы и БД-конфиг |
-
-## Env
-
+## Админ
 ```
-BOT_TOKEN=
-ADMIN_BOT_TOKEN=
-SUPERADMIN_IDS=123456789
-DB_NAME=/app/data/cards_game.db
-CARD_PHOTOS_DIR=/app/data/card_photos
-START_API=0
-API_PORT=8080
-```
-
-## Админ-команды баланса
-
-```
-/checkbalance
-/setrarity common weight 35
-/setrarity legendary reward 250
-/resetrarities
-/balance_rarities
-/redraw_cards
-/recalc_balances
-/userbot off|on
-/backup
-/export_db
-/import_db   (файл .db + superadmin)
-/check
+/remove_rare      — убрать rare, баланс, redraw
+/checkbalance · /setrarity · /resetrarities
+/redraw_cards · /recalc_balances
+/clear_logs · /backup · /userbot on|off
 ```

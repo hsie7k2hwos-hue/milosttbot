@@ -98,26 +98,27 @@ SUPERADMIN_IDS = {
 
 COOLDOWN_SECONDS = 3 * 3600
 
-RARITIES = {
-    "common":         {"icon": "⚪", "name": "Обычная",     "weight": 40, "reward": 8},
-    "rare":           {"icon": "🔵", "name": "Редкая",      "weight": 25, "reward": 20},
-    "uncommon":       {"icon": "🟢", "name": "Необычная",   "weight": 15, "reward": 40},
-    "valuable":       {"icon": "🟣", "name": "Ценная",      "weight": 10, "reward": 70},
-    "super_valuable": {"icon": "🟠", "name": "Сверхценная", "weight": 7,  "reward": 110},
-    "legendary":      {"icon": "🟡", "name": "Легендарная", "weight": 3,  "reward": 200},
-}
-
-# Порядок редкостей для соседнего переноса при балансировке
-RARITY_ORDER = list(RARITIES.keys())
-
-# Миграция старых ключей → новые
-OLD_RARITY_MAP = {
-    "common": "common",
-    "rare": "rare",
-    "epic": "uncommon",
-    "mythical": "valuable",
-    "legendary": "legendary",
-}
+try:
+    from game_config import DEFAULT_RARITIES, OLD_RARITY_MAP, RARITY_ORDER as _RO
+    RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
+    RARITY_ORDER = list(_RO)
+except ImportError:
+    RARITIES = {
+        "common":         {"icon": "⚪", "name": "Обычная",     "weight": 38, "reward": 10},
+        "uncommon":       {"icon": "🟢", "name": "Необычная",   "weight": 20, "reward": 40},
+        "valuable":       {"icon": "🟣", "name": "Ценная",      "weight": 12, "reward": 70},
+        "super_valuable": {"icon": "🟠", "name": "Сверхценная", "weight": 8,  "reward": 120},
+        "legendary":      {"icon": "🟡", "name": "Легендарная", "weight": 4,  "reward": 200},
+        "negative":       {"icon": "⬛", "name": "Негативная",  "weight": 18, "reward": -20},
+    }
+    RARITY_ORDER = list(RARITIES.keys())
+    OLD_RARITY_MAP = {
+        "common": "common",
+        "rare": "uncommon",
+        "epic": "uncommon",
+        "mythical": "valuable",
+        "legendary": "legendary",
+    }
 
 ROLES = {
     "user":       {"icon": "👤", "name": "Пользователь"},
@@ -136,19 +137,26 @@ AVATAR_DELAY = (3.0, 5.0)
 
 def _setup_logging() -> logging.Logger:
     log = logging.getLogger("admin_bot")
-    log.setLevel(logging.INFO)
+    log.setLevel(logging.DEBUG)
     log.handlers.clear()
-    fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s")
+    fmt = logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(name)s | %(funcName)s:%(lineno)d | %(message)s"
+    )
     sh = logging.StreamHandler()
+    sh.setLevel(logging.INFO)
     sh.setFormatter(fmt)
     log.addHandler(sh)
     try:
         Path(ADMIN_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(ADMIN_LOG_PATH, encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         log.addHandler(fh)
     except Exception as exc:
         log.warning("Не удалось открыть файл логов %s: %s", ADMIN_LOG_PATH, exc)
+    # aiogram/aiosqlite — меньше шума в консоль
+    logging.getLogger("aiogram").setLevel(logging.WARNING)
+    logging.getLogger("aiohttp").setLevel(logging.WARNING)
     return log
 
 
@@ -1880,6 +1888,17 @@ async def cmd_balance_rarities(message: Message):
     )
 
 
+async def _user_bot_fallback() -> Optional[Bot]:
+    """Bot с USER_BOT_TOKEN — file_id обычно принадлежат user-боту."""
+    if not USER_BOT_TOKEN:
+        return None
+    try:
+        return Bot(token=USER_BOT_TOKEN)
+    except Exception as e:
+        logger.error("user bot fallback: %s", e)
+        return None
+
+
 @router.message(Command("frame_all"), admin_filter)
 async def cmd_frame_all(message: Message):
     """Переналожить цветные рамки на все фото по текущей редкости."""
@@ -1888,16 +1907,23 @@ async def cmd_frame_all(message: Message):
     if not reframe_all_photos:
         await message.reply("❌ card_photos.reframe_all_photos недоступен (нужен Pillow)")
         return
-    status = await message.reply("⏳ Накладываю рамки…")
+    status = await message.reply("⏳ Накладываю рамки (admin → user token)…")
+    user_bot = await _user_bot_fallback()
     try:
         async with get_db() as db:
-            ok, fail = await reframe_all_photos(message.bot, db)
+            ok, fail = await reframe_all_photos(
+                message.bot, db, fallback_bot=user_bot
+            )
+        extra = "" if user_bot else "\n⚠️ BOT_TOKEN не задан — fallback user недоступен"
         await status.edit_text(
-            f"✅ Рамки\n\n{bq(line('✓', 'Успешно', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
+            f"✅ Рамки\n\n{bq(line('✓', 'Успешно', ok) + chr(10) + line('✗', 'Ошибки', fail))}{extra}"
         )
     except Exception as e:
         logger.error("frame_all: %s", e)
         await status.edit_text(f"❌ {esc(str(e))}")
+    finally:
+        if user_bot:
+            await user_bot.session.close()
 
 
 @router.message(Command("migrate_uuid"), admin_filter)
@@ -1924,15 +1950,22 @@ async def cmd_migrate_photos(message: Message):
     if not migrate_all_card_photos:
         await message.reply("❌ Модуль card_photos.py не найден")
         return
-    status = await message.reply("⏳ Скачиваю фото…")
+    status = await message.reply("⏳ Скачиваю фото (admin → user token)…")
+    user_bot = await _user_bot_fallback()
     try:
         async with get_db() as db:
-            ok, fail = await migrate_all_card_photos(message.bot, db)
+            ok, fail = await migrate_all_card_photos(
+                message.bot, db, fallback_bot=user_bot
+            )
+        extra = "" if user_bot else "\n⚠️ BOT_TOKEN не задан — fallback user недоступен"
         await status.edit_text(
-            f"✅ Миграция\n\n{bq(line('✓', 'Успешно', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
+            f"✅ Миграция\n\n{bq(line('✓', 'Успешно', ok) + chr(10) + line('✗', 'Ошибки', fail))}{extra}"
         )
     except Exception as e:
         await status.edit_text(f"❌ {esc(str(e))}")
+    finally:
+        if user_bot:
+            await user_bot.session.close()
 
 
 @router.message(Command("check"), admin_filter)
@@ -2117,11 +2150,13 @@ async def cmd_checkbalance(message: Message):
             issues.append(f"{info['name']}: награда ≤ 0")
     if weight_sum != 100:
         issues.append(f"Сумма весов {weight_sum} ≠ 100")
-    # sanity: более редкая ≥ награды более частой
-    prev_r = -1
+    # sanity: среди положительных награда не убывает
+    prev_r = None
     for key in RARITY_ORDER:
         r = rarities[key]["reward"]
-        if prev_r >= 0 and r < prev_r:
+        if r < 0:
+            continue
+        if prev_r is not None and r < prev_r:
             issues.append(f"Награда {key} ({r}) меньше предыдущей ({prev_r})")
         prev_r = r
 
@@ -2190,6 +2225,79 @@ async def cmd_resetrarities(message: Message):
     await message.reply("✅ Редкости сброшены на сбалансированный дефолт")
 
 
+@router.message(Command("remove_rare"), admin_filter)
+async def cmd_remove_rare(message: Message):
+    """
+    Удалить редкость «Редкая» (rare):
+    cards.rarity rare → uncommon, rarity_config, дефолтные веса, перерисовка.
+    """
+    if not await _require_admin(message):
+        return
+    from game_config import reset_rarities_to_default, DEFAULT_RARITIES
+
+    status = await message.reply("⏳ Удаляю rare → uncommon, обновляю конфиг…")
+    moved = 0
+    async with get_db() as db:
+        cur = await db.execute(
+            "UPDATE cards SET rarity = 'uncommon' WHERE rarity = 'rare'"
+        )
+        moved = cur.rowcount or 0
+        await db.execute("DELETE FROM rarity_config WHERE rarity_key = 'rare'")
+        await reset_rarities_to_default(db)
+
+    global RARITIES
+    RARITIES = await _load_rarities_db()
+    RARITY_ORDER[:] = list(RARITIES.keys())
+
+    redraw_note = ""
+    user_bot = await _user_bot_fallback()
+    try:
+        if reframe_all_photos:
+            async with get_db() as db:
+                ok, fail = await reframe_all_photos(
+                    message.bot, db, fallback_bot=user_bot
+                )
+            redraw_note = f"\nПерерисовка: ✓{ok} / ✗{fail}"
+    except Exception as e:
+        redraw_note = f"\nПерерисовка: ошибка {e}"
+    finally:
+        if user_bot:
+            await user_bot.session.close()
+
+    await status.edit_text(
+        f"✅ rare удалена\n"
+        f"Перенесено карточек rare→uncommon: <b>{moved}</b>\n"
+        f"Конфиг сброшен на дефолт (с negative, без rare)."
+        f"{redraw_note}"
+    )
+    logger.info("remove_rare: moved=%s", moved)
+
+
+@router.message(Command("clear_logs"), admin_filter)
+async def cmd_clear_logs(message: Message):
+    """Очистить admin_bot.log и bot.log (с опциональным бэкапом)."""
+    if not await _require_admin(message):
+        return
+    import shutil
+    from datetime import datetime as dt
+
+    cleared = []
+    for name, path in (("admin_bot.log", ADMIN_LOG_PATH), ("bot.log", USER_LOG_PATH)):
+        p = Path(path)
+        if not p.is_file():
+            cleared.append(f"• {name}: нет файла")
+            continue
+        try:
+            bak = p.with_suffix(p.suffix + f".bak_{dt.now().strftime('%Y%m%d_%H%M%S')}")
+            shutil.copy2(p, bak)
+            p.write_text("", encoding="utf-8")
+            cleared.append(f"• {name}: очищен (бэкап {bak.name})")
+            logger.info("clear_logs: %s → %s", path, bak)
+        except Exception as e:
+            cleared.append(f"• {name}: ошибка {e}")
+    await message.reply("✅ Логи\n" + bq("\n".join(cleared)))
+
+
 @router.message(Command("redraw_cards"), admin_filter)
 async def cmd_redraw_cards(message: Message):
     """Пересчитать оформление всех карточек по текущей редкости (рамка + звёзды)."""
@@ -2198,15 +2306,24 @@ async def cmd_redraw_cards(message: Message):
     if not reframe_all_photos:
         await message.reply("❌ reframe_all_photos недоступен")
         return
-    status = await message.reply("⏳ Перерисовка карточек (скачивание + рамка + звёзды)…")
+    status = await message.reply(
+        "⏳ Перерисовка (скачивание admin→user token + рамка + звёзды)…"
+    )
+    user_bot = await _user_bot_fallback()
     try:
         async with get_db() as db:
-            ok, fail = await reframe_all_photos(message.bot, db)
+            ok, fail = await reframe_all_photos(
+                message.bot, db, fallback_bot=user_bot
+            )
+        extra = "" if user_bot else "\n⚠️ BOT_TOKEN не задан — fallback user недоступен"
         await status.edit_text(
-            f"✅ Перерисовка\n\n{bq(line('✓', 'Ок', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
+            f"✅ Перерисовка\n\n{bq(line('✓', 'Ок', ok) + chr(10) + line('✗', 'Ошибки', fail))}{extra}"
         )
     except Exception as e:
         await status.edit_text(f"❌ {esc(str(e))}")
+    finally:
+        if user_bot:
+            await user_bot.session.close()
 
 
 @router.message(Command("recalc_balances"), admin_filter)
@@ -2489,12 +2606,14 @@ ADMIN_COMMANDS = [
     BotCommand(command="checkbalance", description="⚖ Проверка баланса редкостей"),
     BotCommand(command="setrarity", description="✏️ Вес/награда редкости"),
     BotCommand(command="resetrarities", description="↺ Дефолт редкостей"),
+    BotCommand(command="remove_rare", description="🗑 Удалить rare + redraw"),
     BotCommand(command="redraw_cards", description="🖼 Перерисовка рамок"),
     BotCommand(command="recalc_balances", description="🪙 Пересчёт монет игроков"),
     BotCommand(command="userbot", description="⏯ Вкл/выкл user-бота"),
     BotCommand(command="backup", description="💾 Бэкап БД"),
     BotCommand(command="export_db", description="📤 Экспорт БД"),
     BotCommand(command="import_db", description="📥 Импорт БД"),
+    BotCommand(command="clear_logs", description="🧹 Очистить логи"),
     BotCommand(command="cache_avatars", description="🖼 Кэш аватарок"),
 ]
 
@@ -2538,10 +2657,21 @@ async def run_admin_bot(token: Optional[str] = None) -> None:
     dp.include_router(router)
 
     await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeDefault())
-    logger.info(
-        "🛡 Админ-бот запущен (DB=%s, log=%s)",
-        DB_NAME, ADMIN_LOG_PATH,
-    )
+    me = await bot.get_me()
+    async with get_db() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        n_users = (await cur.fetchone())[0]
+        cur = await db.execute("SELECT COUNT(*) FROM cards")
+        n_cards = (await cur.fetchone())[0]
+    logger.info("=" * 48)
+    logger.info("🛡 Админ-бот запущен")
+    logger.info("  username : @%s (id=%s)", me.username, me.id)
+    logger.info("  DB       : %s", DB_NAME)
+    logger.info("  log file : %s", ADMIN_LOG_PATH)
+    logger.info("  users    : %s | cards: %s", n_users, n_cards)
+    logger.info("  rarities : %s", ", ".join(RARITIES.keys()))
+    logger.info("  BOT_TOKEN (user fallback): %s", "yes" if USER_BOT_TOKEN else "NO")
+    logger.info("=" * 48)
     await dp.start_polling(bot)
 
 
