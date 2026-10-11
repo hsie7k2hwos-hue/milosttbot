@@ -4,12 +4,8 @@
 Запуск:
   ADMIN_BOT_TOKEN=... BOT_TOKEN=... DB_NAME=/app/data/cards_game.db python admin_bot.py
 
-Требования:
-  - Пользовательский и админ-бот монтируют одну папку данных.
-  - SQLite WAL позволяет одновременный доступ.
-  - BOT_TOKEN (пользовательского бота) нужен для кэширования аватарок.
+SUPERADMIN_IDS — через запятую в .env (если в БД нет superadmin).
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -50,9 +46,6 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Optional photo helpers (shared with user-bot)
-# ---------------------------------------------------------------------------
 try:
     from card_photos import (
         sync_card_photo,
@@ -62,12 +55,18 @@ try:
         ensure_default_avatar,
         DEFAULT_AVATAR_PATH,
         DEFAULT_AVATAR_FILE_ID,
+        reframe_all_photos,
+        migrate_to_uuid_names,
+        RARITY_FRAME_COLORS,
     )
 except ImportError:
     sync_card_photo = None
     migrate_all_card_photos = None
     get_card_photo_input = None
     ensure_default_avatar = None
+    reframe_all_photos = None
+    migrate_to_uuid_names = None
+    RARITY_FRAME_COLORS = {}
     DEFAULT_AVATAR_PATH = Path("/app/data/card_photos/default_avatar.jpg")
     DEFAULT_AVATAR_FILE_ID = (
         "AgACAgIAAxkBAAID12qql3EFpnb2HwTCE7Yn_Ri1TQsNAAKRIGsbfHlYSVUpxfU75O60AQADAgADeAADPQQ"
@@ -77,28 +76,47 @@ except ImportError:
         pass
 
 
-# ===========================================================================
-# CONFIG
-# ===========================================================================
 load_dotenv()
 
 ADMIN_BOT_TOKEN = (
     os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or ""
 ).strip()
-USER_BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()  # для кэша аватарок
+USER_BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 ADMIN_LOG_PATH = os.getenv("ADMIN_LOG_PATH", "/app/data/admin_bot.log")
 USER_LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 AVATARS_DIR = Path(os.getenv("AVATARS_DIR", "/app/data/user_avatars"))
+API_BASE = (os.getenv("API_BASE") or os.getenv("WEBAPP_API_URL") or "").rstrip("/")
+WEBAPP_URL = (os.getenv("WEBAPP_URL") or "").strip()
+
+SUPERADMIN_IDS = {
+    int(x.strip())
+    for x in (os.getenv("SUPERADMIN_IDS") or os.getenv("SUPERADMIN_ID") or "").split(",")
+    if x.strip().isdigit()
+}
+
 COOLDOWN_SECONDS = 3 * 3600
 
 RARITIES = {
-    "common":    {"icon": "⚪", "name": "Обычная",     "weight": 50, "reward": 10},
-    "rare":      {"icon": "🔵", "name": "Редкая",      "weight": 20, "reward": 25},
-    "epic":      {"icon": "🟣", "name": "Эпическая",   "weight": 15, "reward": 50},
-    "mythical":  {"icon": "🔴", "name": "Мифическая",  "weight": 10, "reward": 75},
-    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5,  "reward": 100},
+    "common":         {"icon": "⚪", "name": "Обычная",     "weight": 40, "reward": 8},
+    "rare":           {"icon": "🔵", "name": "Редкая",      "weight": 25, "reward": 20},
+    "uncommon":       {"icon": "🟢", "name": "Необычная",   "weight": 15, "reward": 40},
+    "valuable":       {"icon": "🟣", "name": "Ценная",      "weight": 10, "reward": 70},
+    "super_valuable": {"icon": "🟠", "name": "Сверхценная", "weight": 7,  "reward": 110},
+    "legendary":      {"icon": "🟡", "name": "Легендарная", "weight": 3,  "reward": 200},
+}
+
+# Порядок редкостей для соседнего переноса при балансировке
+RARITY_ORDER = list(RARITIES.keys())
+
+# Миграция старых ключей → новые
+OLD_RARITY_MAP = {
+    "common": "common",
+    "rare": "rare",
+    "epic": "uncommon",
+    "mythical": "valuable",
+    "legendary": "legendary",
 }
 
 ROLES = {
@@ -113,23 +131,17 @@ URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
 
 PER_PAGE = 5
 AVATAR_BATCH = 25
-AVATAR_DELAY = (3.0, 5.0)  # min, max delay between downloads
+AVATAR_DELAY = (3.0, 5.0)
 
 
-# ===========================================================================
-# LOGGING
-# ===========================================================================
 def _setup_logging() -> logging.Logger:
     log = logging.getLogger("admin_bot")
     log.setLevel(logging.INFO)
     log.handlers.clear()
-
     fmt = logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s")
-
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     log.addHandler(sh)
-
     try:
         Path(ADMIN_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(ADMIN_LOG_PATH, encoding="utf-8")
@@ -137,16 +149,12 @@ def _setup_logging() -> logging.Logger:
         log.addHandler(fh)
     except Exception as exc:
         log.warning("Не удалось открыть файл логов %s: %s", ADMIN_LOG_PATH, exc)
-
     return log
 
 
 logger = _setup_logging()
 
 
-# ===========================================================================
-# HELPERS
-# ===========================================================================
 def esc(text) -> str:
     return html.escape(str(text), quote=False)
 
@@ -183,9 +191,6 @@ def sep(width: int = 18) -> str:
     return "─" * width
 
 
-# ===========================================================================
-# SAFE EDIT / SEND
-# ===========================================================================
 async def safe_edit(
     message: Message,
     *,
@@ -194,11 +199,6 @@ async def safe_edit(
     reply_markup: Optional[InlineKeyboardMarkup] = None,
     media: Optional[Union[str, FSInputFile]] = None,
 ) -> Message:
-    """
-    Пытается отредактировать сообщение.
-    При неудаче — удаляет старое и отправляет новое (без спама).
-    Возвращает итоговое сообщение.
-    """
     try:
         if media is not None:
             await message.edit_media(
@@ -218,7 +218,6 @@ async def safe_edit(
             await message.delete()
         except Exception:
             pass
-
         if media is not None:
             return await message.answer_photo(
                 photo=media, caption=caption or "", reply_markup=reply_markup
@@ -226,17 +225,14 @@ async def safe_edit(
         return await message.answer(text or caption or "—", reply_markup=reply_markup)
 
 
-# ===========================================================================
-# CALLBACK DATA
-# ===========================================================================
+# ── Callback data ──
 class AdminRarityCallback(CallbackData, prefix="ar"):
     card_id: int
     rarity: str
 
 
 class AdminCardFilterCallback(CallbackData, prefix="acf"):
-    """Выбор фильтра редкости перед списком карточек."""
-    rarity: str  # "all" или ключ редкости
+    rarity: str
 
 
 class AdminCardPageCallback(CallbackData, prefix="acp"):
@@ -246,7 +242,7 @@ class AdminCardPageCallback(CallbackData, prefix="acp"):
 
 class AdminCardManageCallback(CallbackData, prefix="acm"):
     card_id: int
-    rarity: str = "all"  # чтобы вернуться в правильный фильтр
+    rarity: str = "all"
 
 
 class AdminCardEditPhotoCallback(CallbackData, prefix="acep"):
@@ -254,8 +250,7 @@ class AdminCardEditPhotoCallback(CallbackData, prefix="acep"):
 
 
 class AdminUserFilterCallback(CallbackData, prefix="auf"):
-    """Выбор фильтра роли перед списком пользователей."""
-    role: str  # "all" или ключ роли
+    role: str
 
 
 class AdminUserPageCallback(CallbackData, prefix="aup"):
@@ -285,9 +280,7 @@ class AdminMainCallback(CallbackData, prefix="amain"):
     pass
 
 
-# ===========================================================================
-# DATABASE
-# ===========================================================================
+# ── DB ──
 @asynccontextmanager
 async def get_db():
     db = await aiosqlite.connect(DB_NAME)
@@ -314,7 +307,8 @@ async def init_db_minimal() -> None:
                 name TEXT NOT NULL,
                 rarity TEXT NOT NULL,
                 photo_id TEXT,
-                photo_path TEXT
+                photo_path TEXT,
+                photo_uuid TEXT
             )
         """)
         await db.execute("""
@@ -340,7 +334,6 @@ async def init_db_minimal() -> None:
                 FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
             )
         """)
-        # Кэш аватарок: путь + хеш содержимого
         await db.execute("""
             CREATE TABLE IF NOT EXISTS user_avatars (
                 user_id INTEGER PRIMARY KEY,
@@ -352,12 +345,42 @@ async def init_db_minimal() -> None:
         for table, column, definition in (
             ("cards", "photo_path", "TEXT"),
             ("cards", "photo_id", "TEXT"),
+            ("cards", "photo_uuid", "TEXT"),
             ("users", "last_dice", "INTEGER DEFAULT 0"),
         ):
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             except aiosqlite.OperationalError:
                 pass
+        try:
+            await db.execute("DROP TABLE IF EXISTS duels")
+        except Exception:
+            pass
+
+
+async def ensure_superadmin_from_env() -> None:
+    if not SUPERADMIN_IDS:
+        return
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'superadmin'"
+        )
+        if (await cur.fetchone())[0] > 0:
+            return
+        for sid in SUPERADMIN_IDS:
+            cur = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (sid,))
+            if await cur.fetchone():
+                await db.execute(
+                    "UPDATE users SET role = 'superadmin' WHERE user_id = ?", (sid,)
+                )
+            else:
+                now = int(time.time())
+                await db.execute(
+                    "INSERT OR IGNORE INTO users (user_id, registration, role) "
+                    "VALUES (?, ?, 'superadmin')",
+                    (sid, now),
+                )
+            logger.info("SUPERADMIN_IDS: %s → superadmin", sid)
 
 
 async def get_user_role(user_id: int) -> str:
@@ -389,15 +412,12 @@ async def set_user_role(user_id: int, role: str) -> bool:
     return True
 
 
-# ===========================================================================
-# AVATAR CACHE
-# ===========================================================================
+# ── Avatar cache ──
 def avatar_path(user_id: int) -> Path:
     return AVATARS_DIR / f"{user_id}.jpg"
 
 
 async def get_cached_avatar(user_id: int) -> Optional[Union[FSInputFile, str]]:
-    """Возвращает FSInputFile из кэша или None / default."""
     p = avatar_path(user_id)
     if p.is_file() and p.stat().st_size > 0:
         return FSInputFile(p)
@@ -409,25 +429,17 @@ async def get_cached_avatar(user_id: int) -> Optional[Union[FSInputFile, str]]:
 
 
 async def cache_user_avatar(user_bot: Bot, user_id: int) -> str:
-    """
-    Скачивает аватарку через user-бота и сохраняет на диск.
-    Возвращает статус: 'new' | 'updated' | 'unchanged' | 'empty' | 'error'
-    """
     AVATARS_DIR.mkdir(parents=True, exist_ok=True)
     dest = avatar_path(user_id)
-
     try:
         photos = await user_bot.get_user_profile_photos(user_id, limit=1)
         if photos.total_count == 0 or not photos.photos:
             return "empty"
-
         file_id = photos.photos[0][-1].file_id
         tg_file = await user_bot.get_file(file_id)
         data = await user_bot.download_file(tg_file.file_path)
         content = data.read()
-
         new_hash = hashlib.md5(content).hexdigest()
-
         old_hash = None
         async with get_db() as db:
             cur = await db.execute(
@@ -436,12 +448,9 @@ async def cache_user_avatar(user_bot: Bot, user_id: int) -> str:
             row = await cur.fetchone()
             if row:
                 old_hash = row["file_hash"]
-
         if old_hash == new_hash and dest.is_file():
             return "unchanged"
-
         dest.write_bytes(content)
-
         async with get_db() as db:
             await db.execute(
                 """INSERT INTO user_avatars (user_id, path, file_hash, updated_at)
@@ -460,9 +469,7 @@ async def cache_user_avatar(user_bot: Bot, user_id: int) -> str:
         return "error"
 
 
-# ===========================================================================
-# FILTERS
-# ===========================================================================
+# ── Filters / FSM ──
 class AdminFilter(BaseFilter):
     async def __call__(self, message: Message) -> bool:
         return await is_admin(message.from_user.id)
@@ -477,9 +484,6 @@ admin_filter = AdminFilter()
 superadmin_filter = SuperAdminFilter()
 
 
-# ===========================================================================
-# FSM
-# ===========================================================================
 class AddCardSG(StatesGroup):
     photo = State()
     name = State()
@@ -496,9 +500,7 @@ class EditCardPhotoSG(StatesGroup):
     photo = State()
 
 
-# ===========================================================================
-# KEYBOARDS
-# ===========================================================================
+# ── Keyboards ──
 def get_main_reply_kb(fsm_active: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📜 Карточки")],
@@ -525,9 +527,42 @@ def get_rarity_keyboard(callback_prefix: str = "set_rarity") -> InlineKeyboardMa
     return b.as_markup()
 
 
-# ===========================================================================
-# ROUTER
-# ===========================================================================
+# ── Balance helpers ──
+async def get_rarity_counts() -> dict[str, int]:
+    async with get_db() as db:
+        cur = await db.execute("SELECT rarity, COUNT(*) FROM cards GROUP BY rarity")
+        return dict(await cur.fetchall())
+
+
+async def recommend_rarity() -> tuple[str, str]:
+    """Рекомендует редкость с наибольшим дефицитом относительно целевых весов."""
+    counts = await get_rarity_counts()
+    total = sum(counts.values()) or 1
+    best_key = "common"
+    best_deficit = -1e9
+    lines = []
+    for key, info in RARITIES.items():
+        actual = counts.get(key, 0)
+        expected_share = info["weight"] / 100.0
+        actual_share = actual / total
+        deficit = expected_share - actual_share
+        lines.append(
+            f"{info['icon']} {info['name']}: {actual} "
+            f"(цель ~{info['weight']}%, сейчас {actual_share*100:.0f}%)"
+        )
+        if deficit > best_deficit:
+            best_deficit = deficit
+            best_key = key
+    rec = RARITIES[best_key]
+    hint = (
+        f"💡 Рекомендация: <b>{rec['icon']} {rec['name']}</b>\n"
+        f"(наибольший дефицит относительно весов)\n\n"
+        + "\n".join(lines)
+    )
+    return best_key, hint
+
+
+# ── Router ──
 router = Router()
 
 
@@ -543,9 +578,6 @@ async def _require_admin(event: Message | CallbackQuery) -> bool:
     return False
 
 
-# ===========================================================================
-# START / PANEL
-# ===========================================================================
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -577,9 +609,6 @@ async def admin_main_back(call: CallbackQuery):
     await call.answer()
 
 
-# ===========================================================================
-# CANCEL (FSM + reply button)
-# ===========================================================================
 @router.message(Command("cancel"))
 @router.message(F.text == "❌ Отмена")
 async def cancel_handler(message: Message, state: FSMContext):
@@ -598,16 +627,19 @@ async def cancel_add_card_callback(call: CallbackQuery, state: FSMContext):
     await call.message.answer("✅ Отменено", reply_markup=get_main_reply_kb())
 
 
-# ===========================================================================
-# ADD CARD
-# ===========================================================================
+# ── ADD CARD ──
 @router.message(F.text == "➕ Добавить")
 @router.callback_query(F.data == "admin_add_card")
 async def add_card_start(event: Message | CallbackQuery, state: FSMContext):
     if not await _require_admin(event):
         return
     await state.set_state(AddCardSG.photo)
-    text = "📷 <b>Отправьте фото новой карточки</b>\n\nИли нажмите «❌ Отмена»."
+    _, hint = await recommend_rarity()
+    text = (
+        "📷 <b>Отправьте фото новой карточки</b>\n\n"
+        f"{bq(hint)}\n\n"
+        "Или «❌ Отмена»."
+    )
     kb = get_main_reply_kb(fsm_active=True)
     if isinstance(event, CallbackQuery):
         await event.message.answer(text, reply_markup=kb)
@@ -634,6 +666,7 @@ async def quick_add_card(message: Message, command: CommandObject):
 
     photo_id = message.photo[-1].file_id
     photo_path = None
+    photo_uuid = None
 
     async with get_db() as db:
         cur = await db.execute(
@@ -643,12 +676,13 @@ async def quick_add_card(message: Message, command: CommandObject):
         card_id = cur.lastrowid
         if sync_card_photo:
             try:
-                path = await sync_card_photo(message.bot, card_id, photo_id)
-                if path:
+                result = await sync_card_photo(message.bot, card_id, photo_id, rarity=rarity)
+                if result:
+                    photo_uuid, photo_path = result
                     await db.execute(
-                        "UPDATE cards SET photo_path = ? WHERE id = ?", (path, card_id)
+                        "UPDATE cards SET photo_path = ?, photo_uuid = ? WHERE id = ?",
+                        (photo_path, photo_uuid, card_id),
                     )
-                    photo_path = path
             except Exception as e:
                 logger.error("sync_card_photo: %s", e)
 
@@ -658,6 +692,7 @@ async def quick_add_card(message: Message, command: CommandObject):
         line(r["icon"], "Редкость", r["name"]),
         line("🆔", "ID", card_id),
         line("💾", "Файл", photo_path or "только file_id"),
+        line("🖼", "Рамка", "да" if photo_path else "нет"),
     ])
     await message.reply(
         f"✅ <b>Карточка добавлена</b>\n\n{bq(body)}",
@@ -687,8 +722,9 @@ async def add_card_name(message: Message, state: FSMContext):
         return
     await state.update_data(name=message.text[:64])
     await state.set_state(AddCardSG.rarity)
+    _, hint = await recommend_rarity()
     await message.answer(
-        "🎲 <b>Выберите редкость</b>",
+        f"🎲 <b>Выберите редкость</b>\n\n{bq(hint)}",
         reply_markup=get_rarity_keyboard(),
     )
 
@@ -702,6 +738,7 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
     rarity = call.data.split(":")[1]
     data = await state.get_data()
     photo_path = None
+    photo_uuid = None
 
     async with get_db() as db:
         cur = await db.execute(
@@ -711,12 +748,15 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
         card_id = cur.lastrowid
         if sync_card_photo:
             try:
-                path = await sync_card_photo(call.bot, card_id, data["photo_id"])
-                if path:
+                result = await sync_card_photo(
+                    call.bot, card_id, data["photo_id"], rarity=rarity
+                )
+                if result:
+                    photo_uuid, photo_path = result
                     await db.execute(
-                        "UPDATE cards SET photo_path = ? WHERE id = ?", (path, card_id)
+                        "UPDATE cards SET photo_path = ?, photo_uuid = ? WHERE id = ?",
+                        (photo_path, photo_uuid, card_id),
                     )
-                    photo_path = path
             except Exception as e:
                 logger.error("sync: %s", e)
 
@@ -726,6 +766,7 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
         line(r["icon"], "Редкость", r["name"]),
         line("🆔", "ID", card_id),
         line("💾", "Файл", photo_path or "только file_id"),
+        line("🖼", "Рамка", "да" if photo_path else "нет"),
     ])
     await call.message.answer(
         f"✅ <b>Карточка добавлена</b>\n\n{bq(body)}",
@@ -735,9 +776,7 @@ async def add_card_rarity(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# ===========================================================================
-# CARDS — filter first, then list
-# ===========================================================================
+# ── CARDS list ──
 async def build_card_filter_menu() -> tuple[str, InlineKeyboardMarkup]:
     async with get_db() as db:
         cur = await db.execute("SELECT rarity, COUNT(*) FROM cards GROUP BY rarity")
@@ -979,19 +1018,27 @@ async def admin_card_edit_photo_save(message: Message, state: FSMContext):
 
     new_photo = message.photo[-1].file_id
     path_str = None
+    photo_uuid = None
 
     async with get_db() as db:
+        cur = await db.execute("SELECT rarity, photo_uuid FROM cards WHERE id = ?", (card_id,))
+        row = await cur.fetchone()
+        rarity = (row["rarity"] if row else "common") or "common"
+        existing_uuid = row["photo_uuid"] if row else None
         await db.execute(
             "UPDATE cards SET photo_id = ? WHERE id = ?", (new_photo, card_id)
         )
         if sync_card_photo:
             try:
-                path = await sync_card_photo(message.bot, card_id, new_photo)
-                if path:
+                result = await sync_card_photo(
+                    message.bot, card_id, new_photo, rarity=rarity, existing_uuid=existing_uuid
+                )
+                if result:
+                    photo_uuid, path_str = result
                     await db.execute(
-                        "UPDATE cards SET photo_path = ? WHERE id = ?", (path, card_id)
+                        "UPDATE cards SET photo_path = ?, photo_uuid = ? WHERE id = ?",
+                        (path_str, photo_uuid, card_id),
                     )
-                    path_str = path
             except Exception as e:
                 logger.error("sync edit: %s", e)
 
@@ -1080,9 +1127,7 @@ async def edit_card_rarity_save(call: CallbackQuery, callback_data: AdminRarityC
     await call.answer()
 
 
-# ===========================================================================
-# USERS — filter first, then list
-# ===========================================================================
+# ── USERS (сокращённо, логика та же) ──
 async def build_user_filter_menu() -> tuple[str, InlineKeyboardMarkup]:
     async with get_db() as db:
         cur = await db.execute("SELECT role, COUNT(*) FROM users GROUP BY role")
@@ -1302,7 +1347,6 @@ async def admin_user_view(call: CallbackQuery, callback_data: AdminUserViewCallb
     b.adjust(1)
 
     photo = await get_cached_avatar(user_id)
-
     await safe_edit(
         call.message,
         text=caption if not photo else None,
@@ -1407,9 +1451,7 @@ async def admin_user_action(call: CallbackQuery, callback_data: AdminUserActionC
         await call.answer()
 
 
-# ===========================================================================
-# COMMANDS
-# ===========================================================================
+# ── Commands ──
 @router.message(Command("setnick"), admin_filter)
 async def admin_setnick(message: Message, command: CommandObject):
     args = (command.args or "").strip().split()
@@ -1455,7 +1497,7 @@ async def set_admin_cmd(message: Message, command: CommandObject):
         return
     ok = await set_user_role(target_id, "admin")
     if not ok:
-        await message.reply("❌ Пользователь не найден (должен зайти в user-бота)")
+        await message.reply("❌ Пользователь не найден")
         return
     await message.reply(f"✅ Администратор: <code>{target_id}</code>")
 
@@ -1622,9 +1664,7 @@ async def admin_delcard(message: Message, command: CommandObject):
     await message.reply(f"🗑 Удалена: {esc(card['name'])} (#{card_id})")
 
 
-# ===========================================================================
-# STATS (expanded + navigation)
-# ===========================================================================
+# ── STATS / TOP / LOGS (упрощённо) ──
 async def _stats_overview() -> str:
     async with get_db() as db:
         cur = await db.execute("SELECT COUNT(*) FROM users")
@@ -1656,123 +1696,12 @@ async def _stats_overview() -> str:
     )
 
 
-async def _stats_today() -> str:
-    now = datetime.now()
-    start = int(datetime(now.year, now.month, now.day).timestamp())
-    async with get_db() as db:
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM users WHERE registration >= ?", (start,)
-        )
-        new_users = (await cur.fetchone())[0]
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM inventory WHERE claim_time >= ?", (start,)
-        )
-        claims = (await cur.fetchone())[0]
-        cur = await db.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM inventory WHERE claim_time >= ?",
-            (start,),
-        )
-        active = (await cur.fetchone())[0]
-
-    return (
-        f"📅 <b>Сегодня</b>\n{sep(20)}\n\n"
-        f"{bq(line('🆕', 'Новых пользователей', f'<b>{fmt_num(new_users)}</b>') + chr(10) + line('🃏', 'Получено карточек', f'<b>{fmt_num(claims)}</b>') + chr(10) + line('👤', 'Активных игроков', f'<b>{fmt_num(active)}</b>'))}"
-    )
-
-
-async def _stats_recent_claims(limit: int = 10) -> str:
-    async with get_db() as db:
-        cur = await db.execute(
-            """SELECT i.user_id, i.claim_time, c.name, c.rarity, u.nickname
-               FROM inventory i
-               JOIN cards c ON c.id = i.card_id
-               LEFT JOIN users u ON u.user_id = i.user_id
-               ORDER BY i.claim_time DESC LIMIT ?""",
-            (limit,),
-        )
-        rows = await cur.fetchall()
-
-    if not rows:
-        return f"🕐 <b>Последние получения</b>\n{sep(20)}\n\nПока пусто."
-
-    lines = []
-    for r in rows:
-        ts = (
-            datetime.fromtimestamp(r["claim_time"]).strftime("%d.%m %H:%M")
-            if r["claim_time"]
-            else "—"
-        )
-        nick = display_name(r["nickname"], r["user_id"])
-        icon = RARITIES.get(r["rarity"], {}).get("icon", "•")
-        lines.append(f"{ts} · {icon} {esc(r['name'])}\n    → {esc(nick)}")
-
-    return (
-        f"🕐 <b>Последние получения</b>\n{sep(20)}\n\n"
-        f"{bq(chr(10).join(lines))}"
-    )
-
-
-async def _stats_recent_users(limit: int = 10) -> str:
-    async with get_db() as db:
-        cur = await db.execute(
-            """SELECT user_id, nickname, registration, role, coins
-               FROM users ORDER BY registration DESC LIMIT ?""",
-            (limit,),
-        )
-        rows = await cur.fetchall()
-
-    if not rows:
-        return f"🆕 <b>Последние регистрации</b>\n{sep(20)}\n\nПока пусто."
-
-    lines = []
-    for r in rows:
-        ts = (
-            datetime.fromtimestamp(r["registration"]).strftime("%d.%m.%Y %H:%M")
-            if r["registration"]
-            else "—"
-        )
-        nick = display_name(r["nickname"], r["user_id"])
-        role_icon = ROLES.get(r["role"] or "user", ROLES["user"])["icon"]
-        lines.append(
-            f"{ts} · {role_icon} {esc(nick)}\n"
-            f"    <code>{r['user_id']}</code> · 🪙 {fmt_num(r['coins'] or 0)}"
-        )
-
-    return (
-        f"🆕 <b>Последние регистрации</b>\n{sep(20)}\n\n"
-        f"{bq(chr(10).join(lines))}"
-    )
-
-
 def _stats_nav(section: str) -> InlineKeyboardMarkup:
-    sections = [
-        ("overview", "📊 Обзор"),
-        ("today", "📅 Сегодня"),
-        ("claims", "🕐 Получения"),
-        ("regs", "🆕 Регистрации"),
-    ]
     b = InlineKeyboardBuilder()
-    for key, label in sections:
-        mark = "● " if key == section else ""
-        b.button(
-            text=f"{mark}{label}",
-            callback_data=AdminStatsCallback(section=key).pack(),
-        )
+    b.button(text="📊 Обзор", callback_data=AdminStatsCallback(section="overview").pack())
     b.button(text="‹ В меню", callback_data="admin_main")
-    b.adjust(2, 2, 1)
+    b.adjust(1)
     return b.as_markup()
-
-
-async def build_stats(section: str = "overview") -> tuple[str, InlineKeyboardMarkup]:
-    if section == "today":
-        text = await _stats_today()
-    elif section == "claims":
-        text = await _stats_recent_claims()
-    elif section == "regs":
-        text = await _stats_recent_users()
-    else:
-        text = await _stats_overview()
-    return text, _stats_nav(section)
 
 
 @router.message(Command("stats"), admin_filter)
@@ -1781,98 +1710,59 @@ async def admin_stats(message: Message):
     if not await _require_admin(message):
         return
     try:
-        text, kb = await build_stats("overview")
-        await message.reply(text, reply_markup=kb)
+        text = await _stats_overview()
+        await message.reply(text, reply_markup=_stats_nav("overview"))
     except Exception as e:
         logger.error("stats: %s", e)
-        await message.reply("❌ Ошибка при получении статистики")
+        await message.reply("❌ Ошибка статистики")
 
 
 @router.callback_query(AdminStatsCallback.filter())
 async def admin_stats_section(call: CallbackQuery, callback_data: AdminStatsCallback):
     if not await _require_admin(call):
         return
-    try:
-        text, kb = await build_stats(callback_data.section)
-        await safe_edit(call.message, text=text, reply_markup=kb)
-    except Exception as e:
-        logger.error("stats section: %s", e)
-        await call.answer("Ошибка", show_alert=True)
+    text = await _stats_overview()
+    await safe_edit(call.message, text=text, reply_markup=_stats_nav(callback_data.section))
     await call.answer()
 
 
-# ===========================================================================
-# TOP PLAYERS
-# ===========================================================================
 @router.message(Command("top"), admin_filter)
 @router.message(F.text == "🏆 Топ")
 async def admin_top(message: Message):
     if not await _require_admin(message):
         return
-
     async with get_db() as db:
         cur = await db.execute(
-            """SELECT user_id, nickname, coins, streak,
+            """SELECT user_id, nickname, coins,
                       (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards
-               FROM users u
-               WHERE role != 'banned'
-               ORDER BY coins DESC LIMIT 10"""
+               FROM users u WHERE role != 'banned' ORDER BY coins DESC LIMIT 10"""
         )
         by_coins = await cur.fetchall()
 
-        cur = await db.execute(
-            """SELECT user_id, nickname, coins, streak,
-                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards
-               FROM users u
-               WHERE role != 'banned'
-               ORDER BY cards DESC LIMIT 10"""
-        )
-        by_cards = await cur.fetchall()
-
-        cur = await db.execute(
-            """SELECT user_id, nickname, coins, streak,
-                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards
-               FROM users u
-               WHERE role != 'banned'
-               ORDER BY streak DESC LIMIT 10"""
-        )
-        by_streak = await cur.fetchall()
-
-    def _fmt_top(rows, value_key, value_emoji) -> str:
+    def _fmt(rows, key, emoji):
         if not rows:
             return "Пусто"
-        lines = []
         medals = ["🥇", "🥈", "🥉"]
+        lines = []
         for i, r in enumerate(rows):
             medal = medals[i] if i < 3 else f"{i + 1}."
             nick = display_name(r["nickname"], r["user_id"])
-            val = r[value_key] or 0
-            lines.append(f"{medal} {esc(nick)} — {value_emoji} {fmt_num(val)}")
+            lines.append(f"{medal} {esc(nick)} — {emoji} {fmt_num(r[key] or 0)}")
         return "\n".join(lines)
 
     text = (
-        f"🏆 <b>Топ игроков</b>\n{sep(20)}\n\n"
-        f"<b>🪙 По монетам</b>\n{bq(_fmt_top(by_coins, 'coins', '🪙'))}\n\n"
-        f"<b>🃏 По карточкам</b>\n{bq(_fmt_top(by_cards, 'cards', '🃏'))}\n\n"
-        f"<b>🔥 По стрику</b>\n{bq(_fmt_top(by_streak, 'streak', '🔥'))}"
+        f"🏆 <b>Топ</b>\n{sep(20)}\n\n"
+        f"<b>🪙 По монетам</b>\n{bq(_fmt(by_coins, 'coins', '🪙'))}"
     )
     await message.reply(text, reply_markup=get_main_reply_kb())
 
 
-# ===========================================================================
-# LOGS
-# ===========================================================================
 @router.message(F.text == "📥 Логи")
 @router.message(Command("logs"), admin_filter)
 async def admin_logs(message: Message):
     if not await _require_admin(message):
         return
-
-    files = [
-        ("admin_bot.log", ADMIN_LOG_PATH),
-        ("bot.log", USER_LOG_PATH),
-    ]
-
+    files = [("admin_bot.log", ADMIN_LOG_PATH), ("bot.log", USER_LOG_PATH)]
     sent = 0
     for name, path in files:
         p = Path(path)
@@ -1885,94 +1775,150 @@ async def admin_logs(message: Message):
                 await message.answer(f"ℹ️ {name} пуст")
                 continue
             if size > 45 * 1024 * 1024:
-                await message.answer(f"⚠️ {name} слишком большой ({fmt_num(size)} байт)")
+                await message.answer(f"⚠️ {name} слишком большой")
                 continue
             doc = FSInputFile(p, filename=name)
             await message.answer_document(
                 document=doc,
-                caption=f"📄 <b>{esc(name)}</b>\n{line('📦', 'Размер', fmt_num(size) + ' байт')}",
+                caption=f"📄 <b>{esc(name)}</b> · {fmt_num(size)} байт",
             )
             sent += 1
         except Exception as e:
-            logger.error("Не удалось отправить %s: %s", path, e)
-            await message.answer(f"❌ Ошибка при отправке {name}: {esc(str(e))}")
-
+            await message.answer(f"❌ {name}: {esc(str(e))}")
     if sent == 0:
-        await message.answer("Нет доступных логов для выгрузки.")
+        await message.answer("Нет доступных логов.")
 
 
-# ===========================================================================
-# CACHE AVATARS
-# ===========================================================================
-@router.message(Command("cache_avatars"), admin_filter)
-async def cmd_cache_avatars(message: Message, command: CommandObject):
+# ── Test / maintenance commands ──
+@router.message(Command("rename_rarities"), admin_filter)
+async def cmd_rename_rarities(message: Message):
+    """Переименовать старые ключи редкости (epic→uncommon, mythical→valuable)."""
     if not await _require_admin(message):
         return
-    if not USER_BOT_TOKEN:
-        await message.reply(
-            "❌ BOT_TOKEN (пользовательского бота) не задан в окружении.\n"
-            "Без него нельзя получить аватарки других пользователей."
-        )
-        return
-
-    offset = 0
-    args = (command.args or "").strip().split()
-    if args:
-        try:
-            offset = max(0, int(args[0]))
-        except ValueError:
-            await message.reply(
-                "✏️ /cache_avatars [offset]\n"
-                "offset — с какого пользователя начинать (по registration DESC)"
-            )
-            return
-
-    status = await message.reply(
-        f"⏳ Кэширую аватарки (offset={offset}, batch={AVATAR_BATCH})…"
-    )
-
+    moved = 0
     async with get_db() as db:
-        cur = await db.execute(
-            "SELECT user_id FROM users ORDER BY registration DESC LIMIT ? OFFSET ?",
-            (AVATAR_BATCH, offset),
-        )
-        user_ids = [r[0] for r in await cur.fetchall()]
-
-    if not user_ids:
-        await status.edit_text("Нет пользователей в этом диапазоне.")
-        return
-
-    user_bot = Bot(token=USER_BOT_TOKEN)
-    stats = {"new": 0, "updated": 0, "unchanged": 0, "empty": 0, "error": 0}
-
-    try:
-        for i, uid in enumerate(user_ids):
-            result = await cache_user_avatar(user_bot, uid)
-            stats[result] = stats.get(result, 0) + 1
-            if i < len(user_ids) - 1:
-                delay = AVATAR_DELAY[0] + (AVATAR_DELAY[1] - AVATAR_DELAY[0]) * (i % 3) / 2
-                await asyncio.sleep(delay)
-    finally:
-        await user_bot.session.close()
-
-    body = "\n".join([
-        line("🆕", "Новые", stats["new"]),
-        line("🔄", "Обновлены", stats["updated"]),
-        line("✓", "Без изменений", stats["unchanged"]),
-        line("∅", "Нет аватарки", stats["empty"]),
-        line("✗", "Ошибки", stats["error"]),
-    ])
-    next_offset = offset + len(user_ids)
-    await status.edit_text(
-        f"✅ Кэш аватарок\n\n{bq(body)}\n\n"
-        f"Обработано: {len(user_ids)} (offset {offset}→{next_offset})\n"
-        f"Следующая пачка: /cache_avatars {next_offset}"
+        for old, new in OLD_RARITY_MAP.items():
+            if old == new:
+                continue
+            cur = await db.execute(
+                "UPDATE cards SET rarity = ? WHERE rarity = ?", (new, old)
+            )
+            moved += cur.rowcount or 0
+    await message.reply(
+        f"✅ Переименовано карточек: <b>{moved}</b>\n"
+        f"epic→uncommon, mythical→valuable"
     )
 
 
-# ===========================================================================
-# PHOTO MIGRATION / UTILS
-# ===========================================================================
+@router.message(Command("balance_rarities"), admin_filter)
+async def cmd_balance_rarities(message: Message):
+    """
+    Переносит «лишние» карточки в соседнюю редкость, чтобы доли
+    ближе соответствовали весам RARITIES.
+    """
+    if not await _require_admin(message):
+        return
+    counts = await get_rarity_counts()
+    total = sum(counts.values())
+    if total < 6:
+        await message.reply("Мало карточек для балансировки (нужно ≥ 6).")
+        return
+
+    # целевое количество
+    targets = {
+        k: max(0, round(total * (info["weight"] / 100.0)))
+        for k, info in RARITIES.items()
+    }
+    # корректировка суммы
+    diff = total - sum(targets.values())
+    if diff != 0:
+        targets["common"] = max(0, targets["common"] + diff)
+
+    moves: list[str] = []
+    async with get_db() as db:
+        for i, key in enumerate(RARITY_ORDER):
+            actual = counts.get(key, 0)
+            target = targets[key]
+            excess = actual - target
+            if excess <= 0:
+                continue
+            # переносим в соседнюю (предпочтительно более редкую)
+            neighbors = []
+            if i + 1 < len(RARITY_ORDER):
+                neighbors.append(RARITY_ORDER[i + 1])
+            if i - 1 >= 0:
+                neighbors.append(RARITY_ORDER[i - 1])
+            for nb in neighbors:
+                if excess <= 0:
+                    break
+                need = targets[nb] - counts.get(nb, 0)
+                if need <= 0:
+                    continue
+                take = min(excess, need)
+                cur = await db.execute(
+                    "SELECT id FROM cards WHERE rarity = ? ORDER BY id LIMIT ?",
+                    (key, take),
+                )
+                ids = [r[0] for r in await cur.fetchall()]
+                for cid in ids:
+                    await db.execute(
+                        "UPDATE cards SET rarity = ? WHERE id = ?", (nb, cid)
+                    )
+                    moves.append(f"#{cid}: {key} → {nb}")
+                excess -= len(ids)
+                counts[key] = counts.get(key, 0) - len(ids)
+                counts[nb] = counts.get(nb, 0) + len(ids)
+
+    if not moves:
+        await message.reply("✅ Баланс уже близок к целевому. Переносов нет.")
+        return
+
+    preview = "\n".join(moves[:30])
+    more = f"\n… и ещё {len(moves) - 30}" if len(moves) > 30 else ""
+    await message.reply(
+        f"✅ Перенесено: <b>{len(moves)}</b>\n\n{bq(preview + more)}"
+    )
+
+
+@router.message(Command("frame_all"), admin_filter)
+async def cmd_frame_all(message: Message):
+    """Переналожить цветные рамки на все фото по текущей редкости."""
+    if not await _require_admin(message):
+        return
+    if not reframe_all_photos:
+        await message.reply("❌ card_photos.reframe_all_photos недоступен (нужен Pillow)")
+        return
+    status = await message.reply("⏳ Накладываю рамки…")
+    try:
+        async with get_db() as db:
+            ok, fail = await reframe_all_photos(message.bot, db)
+        await status.edit_text(
+            f"✅ Рамки\n\n{bq(line('✓', 'Успешно', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
+        )
+    except Exception as e:
+        logger.error("frame_all: %s", e)
+        await status.edit_text(f"❌ {esc(str(e))}")
+
+
+@router.message(Command("migrate_uuid"), admin_filter)
+async def cmd_migrate_uuid(message: Message):
+    """Переименовать файлы фото в UUID-имена."""
+    if not await _require_admin(message):
+        return
+    if not migrate_to_uuid_names:
+        await message.reply("❌ migrate_to_uuid_names недоступен")
+        return
+    status = await message.reply("⏳ Переименовываю в UUID…")
+    try:
+        async with get_db() as db:
+            ok, fail = await migrate_to_uuid_names(db)
+        await status.edit_text(
+            f"✅ UUID-миграция\n\n{bq(line('✓', 'Ок', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
+        )
+    except Exception as e:
+        await status.edit_text(f"❌ {esc(str(e))}")
+
+
 @router.message(Command("migrate_photos"), admin_filter)
 async def cmd_migrate_photos(message: Message):
     if not migrate_all_card_photos:
@@ -1983,25 +1929,147 @@ async def cmd_migrate_photos(message: Message):
         async with get_db() as db:
             ok, fail = await migrate_all_card_photos(message.bot, db)
         await status.edit_text(
-            f"✅ Миграция завершена\n\n"
-            f"{bq(line('✓', 'Успешно', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
+            f"✅ Миграция\n\n{bq(line('✓', 'Успешно', ok) + chr(10) + line('✗', 'Ошибки', fail))}"
         )
     except Exception as e:
-        logger.error("migrate: %s", e)
         await status.edit_text(f"❌ {esc(str(e))}")
 
 
-@router.message(Command("sync_default_avatar"), admin_filter)
-async def cmd_sync_default_avatar(message: Message):
-    if not ensure_default_avatar:
-        await message.reply("❌ card_photos недоступен")
+@router.message(Command("check"), admin_filter)
+async def cmd_check(message: Message):
+    """Проверка БД, таблиц, полей, API, фото-папки."""
+    if not await _require_admin(message):
         return
-    ok = await ensure_default_avatar(message.bot)
-    path = str(DEFAULT_AVATAR_PATH) if DEFAULT_AVATAR_PATH else "?"
-    if ok:
-        await message.reply(f"✅ Аватар синхронизирован:\n<code>{esc(path)}</code>")
+
+    lines: list[str] = []
+    ok_all = True
+
+    # DB
+    try:
+        async with get_db() as db:
+            cur = await db.execute("SELECT 1")
+            await cur.fetchone()
+        lines.append("✅ БД: доступна")
+    except Exception as e:
+        lines.append(f"❌ БД: {e}")
+        ok_all = False
+        await message.reply("\n".join(lines))
+        return
+
+    expected_tables = {
+        "cards": {"id", "name", "rarity", "photo_id", "photo_path", "photo_uuid"},
+        "users": {
+            "user_id", "last_claim", "role", "nickname", "coins",
+            "registration", "streak", "last_streak_date", "streak_bonus", "last_dice",
+        },
+        "inventory": {"user_id", "card_id", "claim_time"},
+    }
+
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+        existing = {r[0] for r in await cur.fetchall()}
+        for t, cols in expected_tables.items():
+            if t not in existing:
+                lines.append(f"❌ Таблица {t}: отсутствует")
+                ok_all = False
+                continue
+            cur = await db.execute(f"PRAGMA table_info({t})")
+            have = {r[1] for r in await cur.fetchall()}
+            missing = cols - have
+            if missing:
+                lines.append(f"⚠️ {t}: нет полей {', '.join(sorted(missing))}")
+                ok_all = False
+            else:
+                lines.append(f"✅ Таблица {t}: OK")
+        if "duels" in existing:
+            lines.append("⚠️ Таблица duels ещё есть (можно DROP)")
+
+    # photo dir
+    try:
+        from card_photos import ensure_photo_dir, _PHOTO_DIR
+        ensure_photo_dir()
+        n = len(list(_PHOTO_DIR.glob("*.jpg"))) if _PHOTO_DIR.exists() else 0
+        lines.append(f"✅ Фото-папка: {_PHOTO_DIR} ({n} jpg)")
+    except Exception as e:
+        lines.append(f"⚠️ Фото-папка: {e}")
+
+    # Pillow
+    try:
+        from PIL import Image  # noqa: F401
+        lines.append("✅ Pillow: установлен")
+    except ImportError:
+        lines.append("⚠️ Pillow: нет (рамки не будут накладываться)")
+
+    # API
+    if API_BASE:
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{API_BASE}/health", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read().decode()[:200]
+            lines.append(f"✅ API /health: {body}")
+        except Exception as e:
+            lines.append(f"❌ API: {e}")
+            ok_all = False
     else:
-        await message.reply("❌ Не удалось скачать аватар")
+        lines.append("ℹ️ API_BASE не задан — проверка API пропущена")
+
+    if WEBAPP_URL:
+        lines.append(f"ℹ️ WEBAPP_URL: {WEBAPP_URL}")
+    else:
+        lines.append("ℹ️ WEBAPP_URL не задан")
+
+    if SUPERADMIN_IDS:
+        lines.append(f"ℹ️ SUPERADMIN_IDS: {', '.join(map(str, SUPERADMIN_IDS))}")
+    else:
+        lines.append("⚠️ SUPERADMIN_IDS пуст")
+
+    header = "✅ Всё в порядке" if ok_all else "⚠️ Есть замечания"
+    await message.reply(f"<b>{header}</b>\n\n" + "\n".join(lines))
+
+
+@router.message(Command("cache_avatars"), admin_filter)
+async def cmd_cache_avatars(message: Message, command: CommandObject):
+    if not await _require_admin(message):
+        return
+    if not USER_BOT_TOKEN:
+        await message.reply("❌ BOT_TOKEN не задан")
+        return
+    offset = 0
+    args = (command.args or "").strip().split()
+    if args:
+        try:
+            offset = max(0, int(args[0]))
+        except ValueError:
+            await message.reply("✏️ /cache_avatars [offset]")
+            return
+    status = await message.reply(f"⏳ Кэш аватарок (offset={offset})…")
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT user_id FROM users ORDER BY registration DESC LIMIT ? OFFSET ?",
+            (AVATAR_BATCH, offset),
+        )
+        user_ids = [r[0] for r in await cur.fetchall()]
+    if not user_ids:
+        await status.edit_text("Нет пользователей.")
+        return
+    user_bot = Bot(token=USER_BOT_TOKEN)
+    stats = {"new": 0, "updated": 0, "unchanged": 0, "empty": 0, "error": 0}
+    try:
+        for i, uid in enumerate(user_ids):
+            result = await cache_user_avatar(user_bot, uid)
+            stats[result] = stats.get(result, 0) + 1
+            if i < len(user_ids) - 1:
+                delay = AVATAR_DELAY[0] + (AVATAR_DELAY[1] - AVATAR_DELAY[0]) * (i % 3) / 2
+                await asyncio.sleep(delay)
+    finally:
+        await user_bot.session.close()
+    body = "\n".join(f"{k}: {v}" for k, v in stats.items())
+    await status.edit_text(
+        f"✅ Кэш\n{bq(body)}\n\nСлед.: /cache_avatars {offset + len(user_ids)}"
+    )
 
 
 @router.message(Command("getfileid"), admin_filter, F.photo)
@@ -2010,116 +2078,41 @@ async def test_get_file_id(message: Message):
     await message.reply(f"🆔 <code>{esc(file_id)}</code>")
 
 
-@router.message(Command("getusers"), admin_filter)
-async def admin_getusers(message: Message):
-    async with get_db() as db:
-        cur = await db.execute(
-            """SELECT u.user_id, u.nickname, u.coins, u.streak, u.role,
-                      (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards_count
-               FROM users u ORDER BY u.registration DESC"""
-        )
-        users = await cur.fetchall()
-
-    if not users:
-        await message.reply("Пусто")
-        return
-
-    chunk = f"👥 Всего: {fmt_num(len(users))}\n\n"
-    for u in users:
-        role_info = ROLES.get(u["role"] or "user", ROLES["user"])
-        nick = display_name(u["nickname"], u["user_id"])
-        line_s = (
-            f"{role_info['icon']} <b>{esc(nick)}</b> (<code>{u['user_id']}</code>)\n"
-            f"    🪙 {fmt_num(u['coins'] or 0)} | 🃏 {fmt_num(u['cards_count'])} | 🔥 {u['streak'] or 0}\n"
-        )
-        if len(chunk) + len(line_s) > 3500:
-            await message.reply(chunk)
-            chunk = line_s
-        else:
-            chunk += line_s
-    if chunk:
-        await message.reply(chunk)
-
-
-# ===========================================================================
-# HELP (rewritten)
-# ===========================================================================
+# ── HELP ──
 HELP_PAGES = [
     {
-        "title": "Роли и доступ",
+        "title": "Роли",
         "body": (
-            "В системе четыре роли:\n\n"
-            f"{line('👑', 'Superadmin', 'полный доступ: назначение/снятие ролей, бан админов')}\n"
-            f"{line('🛡', 'Admin', 'карточки, пользователи, балансы, статистика')}\n"
-            f"{line('👤', 'User', 'обычный игрок (в админ-боте не имеет доступа)')}\n"
-            f"{line('🚫', 'Banned', 'заблокирован в user-боте')}\n\n"
-            "Первый пользователь, зашедший в user-бота, автоматически получает роль superadmin.\n"
-            "Назначать и снимать админов может только superadmin."
+            f"{line('👑', 'Superadmin', 'полный доступ')}\n"
+            f"{line('🛡', 'Admin', 'карточки, пользователи, статистика')}\n\n"
+            "Superadmin задаётся через SUPERADMIN_IDS в .env "
+            "(если в БД ещё нет ни одного)."
         ),
     },
     {
         "title": "Карточки",
         "body": (
-            "Добавление:\n"
-            "• Кнопка «➕ Добавить» — пошагово (фото → название → редкость)\n"
-            "• /addcard Название редкость + прикреплённое фото\n\n"
-            "Список:\n"
-            "• «📜 Карточки» → выбор редкости → список с пагинацией\n"
-            "• В карточке: смена названия, редкости, фото, удаление\n\n"
-            "Дополнительно:\n"
-            "• /delcard ID — удалить по ID\n"
-            "• /migrate_photos — скачать все фото на диск\n"
-            "• /sync_default_avatar — обновить дефолтный аватар"
+            "➕ Добавить — фото → название → редкость (с рекомендацией баланса)\n"
+            "/addcard Название редкость + фото\n"
+            "/delcard ID\n"
+            "/migrate_photos · /frame_all · /migrate_uuid\n"
+            "/rename_rarities · /balance_rarities"
         ),
     },
     {
         "title": "Пользователи",
         "body": (
-            "Список:\n"
-            "• «👥 Пользователи» → выбор роли → список с пагинацией\n"
-            "• В профиле: ник, монеты, сброс кулдауна, бан/разбан, роли\n\n"
-            "Команды:\n"
-            "• /setnick USERID Ник\n"
-            "• /setcoins [USERID] N\n"
-            "• /resetcd [USERID]\n"
-            "• /ban USERID · /unban USERID\n"
-            "• /setadmin USERID · /unsetadmin USERID (только superadmin)\n"
-            "• /getusers — полный список текстом"
+            "/setnick USERID Ник\n"
+            "/setcoins [USERID] N\n"
+            "/resetcd [USERID]\n"
+            "/ban · /unban · /setadmin · /unsetadmin"
         ),
     },
     {
-        "title": "Статистика и топ",
+        "title": "Сервис",
         "body": (
-            "«📊 Статистика» или /stats открывает разделы:\n"
-            "• Обзор — общие цифры и распределение редкостей\n"
-            "• Сегодня — новые пользователи и получения за сутки\n"
-            "• Получения — последние полученные карточки\n"
-            "• Регистрации — последние зарегистрированные\n\n"
-            "«🏆 Топ» или /top — топ-10 по монетам, карточкам и стрику."
-        ),
-    },
-    {
-        "title": "Аватарки и логи",
-        "body": (
-            "Аватарки кэшируются на диск, потому что file_id одного бота "
-            "нельзя использовать в другом.\n\n"
-            "• /cache_avatars [offset] — скачать пачку (25 шт.) через BOT_TOKEN "
-            "пользовательского бота с задержкой 3–5 сек.\n"
-            "  Повторный запуск с большим offset продолжит с нужного места.\n"
-            "  Если аватарка не изменилась — пропускается.\n\n"
-            "Логи:\n"
-            "• «📥 Логи» или /logs — выгрузка admin_bot.log и bot.log"
-        ),
-    },
-    {
-        "title": "Прочие команды",
-        "body": (
-            "/start — сброс состояния и главное меню\n"
-            "/help — эта справка\n"
-            "/cancel или кнопка «❌ Отмена» — прервать текущую операцию FSM\n"
-            "/getfileid + фото — получить file_id\n\n"
-            "Все команды без параметров кликабельны сами по себе. "
-            "Параметры указываются только когда они обязательны."
+            "/check — проверка БД, таблиц, API, фото\n"
+            "/logs · /cache_avatars · /stats · /top"
         ),
     },
 ]
@@ -2174,16 +2167,14 @@ async def ignore_cb(callback: CallbackQuery):
     await callback.answer()
 
 
-# ===========================================================================
-# STARTUP
-# ===========================================================================
+# ── Startup ──
 ADMIN_COMMANDS = [
-    BotCommand(command="start", description="⚙️ Панель / сброс"),
+    BotCommand(command="start", description="⚙️ Панель"),
     BotCommand(command="help", description="🛠 Справка"),
     BotCommand(command="stats", description="📊 Статистика"),
-    BotCommand(command="top", description="🏆 Топ игроков"),
-    BotCommand(command="logs", description="📥 Выгрузить логи"),
-    BotCommand(command="cache_avatars", description="🖼 Кэш аватарок"),
+    BotCommand(command="top", description="🏆 Топ"),
+    BotCommand(command="logs", description="📥 Логи"),
+    BotCommand(command="check", description="🩺 Проверка системы"),
     BotCommand(command="addcard", description="➕ Карточка + фото"),
     BotCommand(command="delcard", description="🗑 Удалить карточку"),
     BotCommand(command="setcoins", description="🪙 Монеты"),
@@ -2194,8 +2185,11 @@ ADMIN_COMMANDS = [
     BotCommand(command="setadmin", description="👑 Назначить админа"),
     BotCommand(command="unsetadmin", description="❌ Снять права"),
     BotCommand(command="migrate_photos", description="💾 Фото на диск"),
-    BotCommand(command="sync_default_avatar", description="🖼 Дефолт-аватар"),
-    BotCommand(command="getusers", description="👥 Список пользователей"),
+    BotCommand(command="frame_all", description="🖼 Рамки на все фото"),
+    BotCommand(command="migrate_uuid", description="🔑 UUID-имена файлов"),
+    BotCommand(command="rename_rarities", description="🏷 Старые→новые редкости"),
+    BotCommand(command="balance_rarities", description="⚖ Баланс редкостей"),
+    BotCommand(command="cache_avatars", description="🖼 Кэш аватарок"),
 ]
 
 
@@ -2213,6 +2207,7 @@ async def run_admin_bot(token: Optional[str] = None) -> None:
     AVATARS_DIR.mkdir(parents=True, exist_ok=True)
 
     await init_db_minimal()
+    await ensure_superadmin_from_env()
     try:
         ensure_photo_dir()
     except Exception:
@@ -2230,8 +2225,8 @@ async def run_admin_bot(token: Optional[str] = None) -> None:
 
     await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeDefault())
     logger.info(
-        "🛡 Админ-бот запущен (DB=%s, log=%s, avatars=%s)",
-        DB_NAME, ADMIN_LOG_PATH, AVATARS_DIR,
+        "🛡 Админ-бот запущен (DB=%s, log=%s)",
+        DB_NAME, ADMIN_LOG_PATH,
     )
     await dp.start_polling(bot)
 
@@ -2239,8 +2234,7 @@ async def run_admin_bot(token: Optional[str] = None) -> None:
 async def main() -> None:
     if not ADMIN_BOT_TOKEN:
         raise SystemExit(
-            "ADMIN_BOT_TOKEN не задан. Укажите токен админ-бота в .env "
-            "(отдельный бот от пользовательского)."
+            "ADMIN_BOT_TOKEN не задан. Укажите токен админ-бота в .env."
         )
     await run_admin_bot(ADMIN_BOT_TOKEN)
 

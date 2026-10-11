@@ -1,8 +1,8 @@
 """
-Пользовательский бот карточек.
+Пользовательский бот «Мряу».
 
 Одна точка входа. Если задан ADMIN_BOT_TOKEN — параллельно поднимается
-админ-бот (общая БД). Опционально — API мини-приложения.
+админ-бот (общая БД). Опционально — API мини-приложения (START_API=1).
 """
 from __future__ import annotations
 
@@ -69,9 +69,6 @@ except ImportError:
         pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════════════════════════════════════
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -86,9 +83,15 @@ OPEN_APP_URL = f"{BOT_URL}?startapp"
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 LOG_PATH = os.getenv("LOG_PATH", "/app/data/bot.log")
 
+# ID суперадминов через запятую (если в БД ещё нет ни одного superadmin)
+SUPERADMIN_IDS = {
+    int(x.strip())
+    for x in (os.getenv("SUPERADMIN_IDS") or os.getenv("SUPERADMIN_ID") or "").split(",")
+    if x.strip().isdigit()
+}
+
 COOLDOWN_SECONDS = 3 * 3600
 NICKNAME_COST = 300
-
 GROUP_AUTODELETE_SECONDS = 30
 STREAK_EXPIRE_SECONDS = 24 * 3600
 
@@ -97,17 +100,16 @@ DICE_MIN_BALANCE = 10
 DICE_SPIN_DELAY = 3
 DICE_VALUE_MAP = {1: -10, 2: -5, 3: 0, 4: 5, 5: 10, 6: 15}
 
-DUEL_EXPIRE_SECONDS = 10 * 60
-DUEL_MIN_STAKE = 1
-
 EFFECT_PARTY = "5046509860389126442"
 
+# Новые редкости (сумма весов = 100)
 RARITIES = {
-    "common":    {"icon": "⚪", "name": "Обычная",     "weight": 50, "reward": 10},
-    "rare":      {"icon": "🔵", "name": "Редкая",      "weight": 20, "reward": 25},
-    "epic":      {"icon": "🟣", "name": "Эпическая",   "weight": 15, "reward": 50},
-    "mythical":  {"icon": "🔴", "name": "Мифическая",  "weight": 10, "reward": 75},
-    "legendary": {"icon": "🟡", "name": "Легендарная", "weight": 5,  "reward": 100},
+    "common":         {"icon": "⚪", "name": "Обычная",     "weight": 40, "reward": 8},
+    "rare":           {"icon": "🔵", "name": "Редкая",      "weight": 25, "reward": 20},
+    "uncommon":       {"icon": "🟢", "name": "Необычная",   "weight": 15, "reward": 40},
+    "valuable":       {"icon": "🟣", "name": "Ценная",      "weight": 10, "reward": 70},
+    "super_valuable": {"icon": "🟠", "name": "Сверхценная", "weight": 7,  "reward": 110},
+    "legendary":      {"icon": "🟡", "name": "Легендарная", "weight": 3,  "reward": 200},
 }
 
 ROLES = {
@@ -126,7 +128,6 @@ DICE_CMD_RE = re.compile(r"^мряу\s+кубик\s*$", re.IGNORECASE | re.UNICO
 PROFILE_CMD_RE = re.compile(r"^мряу\s+профиль\s*$", re.IGNORECASE | re.UNICODE)
 TOP_CMD_RE = re.compile(r"^мряу\s+топ\s*$", re.IGNORECASE | re.UNICODE)
 HELP_CMD_RE = re.compile(r"^мряу\s+помощь\s*$", re.IGNORECASE | re.UNICODE)
-DUEL_CMD_RE = re.compile(r"^мряу\s+дуэль\s+(\d+)\s*$", re.IGNORECASE | re.UNICODE)
 NICK_CMD_RE = re.compile(r"^мряу\s+ник\s+(.+)$", re.IGNORECASE | re.UNICODE)
 
 logging.basicConfig(
@@ -174,10 +175,6 @@ def fmt_days(n: int) -> str:
     return f"{fmt_num(n)} {plural(n, 'день', 'дня', 'дней')}"
 
 
-def fmt_cards(n: int) -> str:
-    return f"{fmt_num(n)} {plural(n, 'карточка', 'карточки', 'карточек')}"
-
-
 def fmt_coins(n: int) -> str:
     return f"{fmt_num(n)} {plural(n, 'монета', 'монеты', 'монет')}"
 
@@ -187,7 +184,6 @@ def line(emoji: str, label: str, value: Any) -> str:
 
 
 def bq(text: str) -> str:
-    """Telegram HTML blockquote."""
     return f"<blockquote>{text}</blockquote>"
 
 
@@ -284,14 +280,6 @@ class TopRefreshCallback(CallbackData, prefix="top_refresh"):
     kind: str
 
 
-class DuelAcceptCallback(CallbackData, prefix="duel_acc"):
-    duel_id: int
-
-
-class DuelCancelCallback(CallbackData, prefix="duel_can"):
-    duel_id: int
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # DATABASE
 # ═══════════════════════════════════════════════════════════════════════════
@@ -321,7 +309,8 @@ async def init_db() -> None:
                 name       TEXT NOT NULL,
                 rarity     TEXT NOT NULL,
                 photo_id   TEXT,
-                photo_path TEXT
+                photo_path TEXT,
+                photo_uuid TEXT
             )
         """)
         await db.execute("""
@@ -347,18 +336,6 @@ async def init_db() -> None:
                 FOREIGN KEY (card_id) REFERENCES cards (id) ON DELETE CASCADE
             )
         """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS duels (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                challenger_id INTEGER NOT NULL,
-                opponent_id   INTEGER NOT NULL,
-                stake         INTEGER NOT NULL,
-                status        TEXT    DEFAULT 'pending',
-                created_at    INTEGER NOT NULL,
-                chat_id       INTEGER,
-                message_id    INTEGER
-            )
-        """)
 
         for sql in (
             "CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(rarity)",
@@ -367,8 +344,6 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_users_coins ON users(coins)",
             "CREATE INDEX IF NOT EXISTS idx_users_streak ON users(streak)",
             "CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)",
-            "CREATE INDEX IF NOT EXISTS idx_duels_status ON duels(status)",
-            "CREATE INDEX IF NOT EXISTS idx_duels_created ON duels(created_at)",
         ):
             await db.execute(sql)
 
@@ -381,11 +356,18 @@ async def init_db() -> None:
             ("inventory", "claim_time", "INTEGER DEFAULT 0"),
             ("cards", "photo_path", "TEXT"),
             ("cards", "photo_id", "TEXT"),
+            ("cards", "photo_uuid", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             except aiosqlite.OperationalError:
                 pass
+
+        # Удаляем устаревшую таблицу дуэлей, если осталась
+        try:
+            await db.execute("DROP TABLE IF EXISTS duels")
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -409,6 +391,32 @@ async def is_banned(user_id: int) -> bool:
     return (await get_user_role(user_id)) == "banned"
 
 
+async def ensure_superadmin_from_env(db: aiosqlite.Connection) -> None:
+    """Если в БД нет superadmin и задан SUPERADMIN_IDS — назначить."""
+    if not SUPERADMIN_IDS:
+        return
+    cur = await db.execute(
+        "SELECT COUNT(*) FROM users WHERE role = 'superadmin'"
+    )
+    if (await cur.fetchone())[0] > 0:
+        return
+    for sid in SUPERADMIN_IDS:
+        cur = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (sid,))
+        if await cur.fetchone():
+            await db.execute(
+                "UPDATE users SET role = 'superadmin' WHERE user_id = ?", (sid,)
+            )
+            logger.info("SUPERADMIN_IDS: %s → superadmin", sid)
+        else:
+            # создаём запись, чтобы роль сохранилась до первого /start
+            now = int(time.time())
+            await db.execute(
+                "INSERT OR IGNORE INTO users (user_id, registration, role) VALUES (?, ?, 'superadmin')",
+                (sid, now),
+            )
+            logger.info("SUPERADMIN_IDS: создан %s как superadmin", sid)
+
+
 async def get_or_create_user(
     user_id: int,
     username: Optional[str] = None,
@@ -421,9 +429,7 @@ async def get_or_create_user(
             return user
 
         now = int(time.time())
-        cur = await db.execute("SELECT COUNT(*) FROM users")
-        total = (await cur.fetchone())[0]
-        role = "superadmin" if total == 0 else "user"
+        role = "superadmin" if user_id in SUPERADMIN_IDS else "user"
 
         await db.execute(
             "INSERT INTO users (user_id, nickname, registration, streak, last_streak_date, role) "
@@ -431,7 +437,9 @@ async def get_or_create_user(
             (user_id, now, role),
         )
         if role == "superadmin":
-            logger.info("Первый пользователь %s → superadmin", user_id)
+            logger.info("Пользователь %s назначен superadmin (из SUPERADMIN_IDS)", user_id)
+
+        await ensure_superadmin_from_env(db)
 
         cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
         return await cur.fetchone()
@@ -513,7 +521,6 @@ def get_ok_kb() -> InlineKeyboardMarkup:
 def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     app_url = get_app_url()
-
     builder.button(
         text="🃏 Мои карточки",
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
@@ -662,13 +669,13 @@ async def show_or_edit_photo(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CARD ISSUE (no duplicates)
+# CARD ISSUE (без дубликатов)
 # ═══════════════════════════════════════════════════════════════════════════
 async def issue_card(
     user_id: int,
     check_cooldown: bool = True,
 ) -> tuple[Optional[dict], str]:
-    """Выдаёт только новую (не имеющуюся) карточку. Дубликатов нет."""
+    """Выдаёт только новую (не имеющуюся) карточку."""
     try:
         async with get_db() as db:
             cur = await db.execute("SELECT COUNT(*) FROM cards")
@@ -725,7 +732,7 @@ async def issue_card(
             card_name = card["name"]
             photo_id = card["photo_id"]
             photo_path = card["photo_path"]
-            base_coins = RARITIES[selected_rarity]["reward"]
+            base_coins = RARITIES.get(selected_rarity, RARITIES["common"])["reward"]
             coins_earned = base_coins
             now = int(time.time())
 
@@ -773,7 +780,7 @@ async def issue_card(
 
 
 def _card_caption(card: dict) -> str:
-    r = RARITIES[card["rarity"]]
+    r = RARITIES.get(card["rarity"], RARITIES["common"])
     name_str = f"<b>{esc(card['name'])}</b>"
     reward_str = f"+<b>{fmt_num(card['coins_earned'])}</b> → {fmt_num(card['balance'])}"
     return (
@@ -908,7 +915,7 @@ async def send_streak_notice(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# RATE LIMIT
+# RATE LIMIT / AUTO-DELETE / BAN
 # ═══════════════════════════════════════════════════════════════════════════
 _rate_bucket: dict[str, list[float]] = {}
 _RATE_BUCKET_MAX_KEYS = 10_000
@@ -928,9 +935,6 @@ def rate_limited(key: str, limit: int, window: float) -> bool:
     return False
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# AUTO-DELETE
-# ═══════════════════════════════════════════════════════════════════════════
 async def _try_delete(msg: Optional[Message]) -> None:
     if msg is None:
         return
@@ -961,9 +965,6 @@ async def reply_ephemeral(message: Message, text: str, **kwargs):
     return sent
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# BAN CHECKS
-# ═══════════════════════════════════════════════════════════════════════════
 async def check_not_banned(message: Message) -> bool:
     if await is_banned(message.from_user.id):
         await reply_ephemeral(
@@ -991,7 +992,6 @@ USER_COMMANDS = [
     BotCommand(command="profile", description="👤 Профиль"),
     BotCommand(command="top", description="🏆 Топ игроков"),
     BotCommand(command="dice", description="🎲 Кубик"),
-    BotCommand(command="duel", description="⚔️ Дуэль (в группах)"),
     BotCommand(command="nick", description="✏️ Сменить ник"),
     BotCommand(command="help", description="❓ Справка"),
     BotCommand(command="miniapp", description="📱 Мини-приложение"),
@@ -1023,8 +1023,7 @@ async def cmd_start(message: Message) -> None:
             "👋 <b>Добро пожаловать</b>\n\n"
             f"{bq('Собирайте коллекцию карточек, копите монеты и соревнуйтесь в топе.')}\n\n"
             f"{line('🃏', 'Карточка', '«мряу» или кнопка ниже')}\n"
-            f"{line('⏱', 'Кулдаун', 'раз в 3 часа')}\n"
-            f"{line('⚔️', 'Дуэль', '/duel ставка — ответом в группе')}"
+            f"{line('⏱', 'Кулдаун', 'раз в 3 часа')}"
         )
         await message.reply(welcome, reply_markup=get_main_km())
     except Exception as e:
@@ -1049,80 +1048,57 @@ HELP_TABS = {
                 for v in RARITIES.values()
             )
             + "\n\n"
-            "Чем реже карточка, тем больше монет вы получите. Дубликатов нет: "
+            "Чем реже карточка, тем больше монет. Дубликатов нет: "
             "каждая карточка выдаётся только один раз.\n\n"
             "<b>Мои карточки</b>\n"
-            "Откройте профиль и нажмите «Мои карточки», чтобы посмотреть "
-            "собранную коллекцию по редкостям."
+            "Откройте профиль и нажмите «Мои карточки»."
         ),
     },
     "coins": {
         "label": "🪙 Монеты",
         "title": "🪙 Монеты",
         "body": (
-            "Монеты — внутриигровая валюта. Они начисляются за карточки, "
-            "стрик и мини-игры, а тратятся на смену ника и дуэли.\n\n"
-            "<b>Откуда берутся</b>\n"
-            "• Награда за карточку (от 10 до 100 🪙 в зависимости от редкости)\n"
+            "Монеты — внутриигровая валюта.\n\n"
+            "<b>Откуда</b>\n"
+            "• Награда за карточку\n"
             "• Ежедневный бонус за стрик\n"
-            "• Выигрыш в кубике или дуэли\n\n"
-            "<b>На что тратятся</b>\n"
-            f"• Смена никнейма — {NICKNAME_COST} 🪙\n"
-            "• Ставка в дуэли\n\n"
-            "Баланс всегда виден в профиле."
+            "• Выигрыш в кубике\n\n"
+            "<b>Куда</b>\n"
+            f"• Смена никнейма — {NICKNAME_COST} 🪙\n\n"
+            "Баланс виден в профиле."
         ),
     },
     "streak": {
         "label": "🔥 Стрик",
         "title": "🔥 Стрик",
         "body": (
-            "Стрик — серия дней подряд, в которые вы получили хотя бы одну карточку.\n\n"
-            "<b>Как работает</b>\n"
-            "Получите карточку сегодня — стрик увеличится на 1. "
-            "Если пропустить больше 24 часов без карточки, серия сгорит и обнулится.\n\n"
-            "<b>Бонусы за длину</b>\n"
+            "Стрик — серия дней подряд с хотя бы одной карточкой.\n\n"
+            "Если пропустить больше 24 часов — серия сгорает.\n\n"
+            "<b>Бонусы</b>\n"
             "• 2+ дня — +15 🪙\n"
             "• 7+ дней — +20 🪙\n"
             "• 14+ дней — +25 🪙\n"
             "• 30+ дней — +30 🪙\n"
-            "• дальше — +35 🪙\n\n"
-            "Бонус начисляется один раз в день при обновлении стрика. "
-            "Чем дольше серия, тем выгоднее заходить каждый день."
+            "• дальше — +35 🪙"
         ),
     },
     "games": {
-        "label": "🎲 Игры",
-        "title": "🎲 Игры",
+        "label": "🎲 Кубик",
+        "title": "🎲 Кубик",
         "body": (
-            "<b>Кубик</b>\n"
             "Команда /dice или «мряу кубик». Нужно минимум "
-            f"{DICE_MIN_BALANCE} 🪙 на балансе. Кулдаун — 10 минут.\n\n"
-            "Выпадает число от 1 до 6:\n"
-            "1 → −10 🪙 · 2 → −5 🪙 · 3 → ±0 · 4 → +5 🪙 · 5 → +10 🪙 · 6 → +15 🪙\n\n"
-            "<b>Дуэль</b>\n"
-            "Только в групповых чатах. Ответьте на сообщение игрока командой "
-            f"/duel &lt;ставка&gt; (минимум {DUEL_MIN_STAKE} 🪙).\n\n"
-            "Оба участника должны иметь достаточно монет. Заявка действует 10 минут. "
-            "После принятия каждый бросает кубик — у кого больше, тот забирает банк "
-            "(ставка × 2). При ничьей ставки возвращаются."
+            f"{DICE_MIN_BALANCE} 🪙. Кулдаун — 10 минут.\n\n"
+            "1 → −10 · 2 → −5 · 3 → ±0 · 4 → +5 · 5 → +10 · 6 → +15"
         ),
     },
     "profile": {
         "label": "👤 Профиль",
         "title": "👤 Профиль",
         "body": (
-            "Профиль показывает ваши карточки, монеты и стрик.\n\n"
-            "<b>Как открыть</b>\n"
-            "Кнопка «Профиль», команда /profile или «мряу профиль». "
-            "В группе можно ответить на сообщение игрока — откроется его профиль.\n\n"
-            "<b>Мои карточки</b>\n"
-            "Кнопка в профиле открывает коллекцию, сгруппированную по редкостям.\n\n"
-            "<b>Никнейм</b>\n"
-            f"Смена: /nick НовыйНик или «мряу ник НовыйНик» — стоит {NICKNAME_COST} 🪙.\n"
-            "Сброс: /nick reset — бесплатно, вернётся имя из Telegram.\n"
-            "Правила: 2–32 символа, без ссылок и @.\n\n"
-            "<b>Топ</b>\n"
-            "Команда /top или «мряу топ». Три режима: по монетам, по карточкам и по стрику."
+            "Профиль: карточки, монеты, стрик.\n\n"
+            f"Смена ника: /nick НовыйНик ({NICKNAME_COST} 🪙)\n"
+            "Сброс: /nick reset\n\n"
+            "Топ: /top или «мряу топ»."
         ),
     },
 }
@@ -1238,7 +1214,6 @@ async def get_card_handler(message: Message) -> None:
             streak, bonus, new_balance, streak_updated = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             time_str = fmt_remaining(remaining)
-
             text = (
                 "⏳ <b>Подождите немного</b>\n\n"
                 f"{bq(f'Следующую карточку можно получить через <b>{time_str}</b>.')}"
@@ -1281,7 +1256,7 @@ async def get_card_handler(message: Message) -> None:
         photo = _resolve_card_photo(card)
 
         effect = None
-        if card["rarity"] in ("mythical", "legendary") and message.chat.type == "private":
+        if card["rarity"] in ("super_valuable", "legendary") and message.chat.type == "private":
             effect = EFFECT_PARTY
 
         try:
@@ -1425,320 +1400,6 @@ async def dice_handler(message: Message) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DUELS
-# ═══════════════════════════════════════════════════════════════════════════
-async def expire_old_duels() -> None:
-    now = int(time.time())
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE duels SET status = 'expired' "
-            "WHERE status = 'pending' AND (? - created_at) >= ?",
-            (now, DUEL_EXPIRE_SECONDS),
-        )
-
-
-@router.message(Command("duel"))
-@router.message(F.text.regexp(DUEL_CMD_RE))
-async def duel_create(message: Message, command: CommandObject = None) -> None:
-    if not await check_not_banned(message):
-        return
-
-    if message.chat.type == "private":
-        await reply_ephemeral(
-            message,
-            "⚠️ <b>Только в группах</b>\n\n"
-            f"{bq('Дуэли доступны исключительно в групповых чатах.')}",
-        )
-        return
-
-    stake = None
-    if command and command.args:
-        try:
-            stake = int(command.args.strip().split()[0])
-        except (ValueError, IndexError):
-            pass
-
-    if stake is None and message.text:
-        m = DUEL_CMD_RE.match(message.text.strip())
-        if m:
-            stake = int(m.group(1))
-        else:
-            parts = message.text.strip().split()
-            if len(parts) >= 2 and parts[0].lower() in ("/duel", "мряу"):
-                try:
-                    stake = int(parts[-1])
-                except ValueError:
-                    pass
-
-    if stake is None or stake < DUEL_MIN_STAKE:
-        duel_hint = (
-            "Ответьте на сообщение игрока:\n"
-            f"<code>/duel {DUEL_MIN_STAKE}</code>"
-        )
-        await reply_ephemeral(
-            message,
-            "✏️ <b>Как вызвать</b>\n\n"
-            f"{bq(duel_hint)}",
-        )
-        return
-
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await reply_ephemeral(
-            message,
-            "⚠️ <b>Нужен ответ</b>\n\n"
-            f"{bq('Ответьте на сообщение игрока, которого хотите вызвать.')}",
-        )
-        return
-
-    opponent = message.reply_to_message.from_user
-    challenger = message.from_user
-
-    if opponent.is_bot:
-        await reply_ephemeral(
-            message,
-            "⚠️ <b>Нельзя</b>\n\n"
-            f"{bq('Бот — не соперник для дуэли.')}",
-        )
-        return
-    if opponent.id == challenger.id:
-        await reply_ephemeral(
-            message,
-            "⚠️ <b>Нельзя</b>\n\n"
-            f"{bq('Вызвать самого себя невозможно.')}",
-        )
-        return
-
-    if rate_limited(f"duel:{challenger.id}", limit=5, window=30):
-        await reply_ephemeral(
-            message,
-            "⏳ <b>Слишком часто</b>\n\n"
-            f"{bq('Подождите немного перед новым вызовом.')}",
-        )
-        return
-
-    await expire_old_duels()
-    await get_or_create_user(challenger.id, challenger.username, challenger.full_name)
-    await get_or_create_user(opponent.id, opponent.username, opponent.full_name)
-
-    async with get_db() as db:
-        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (challenger.id,))
-        ch_row = await cur.fetchone()
-        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (opponent.id,))
-        op_row = await cur.fetchone()
-        ch_coins = (ch_row["coins"] or 0) if ch_row else 0
-        op_coins = (op_row["coins"] or 0) if op_row else 0
-
-        if ch_coins < stake:
-            await reply_ephemeral(
-                message,
-                "⚠️ <b>Недостаточно монет</b>\n\n"
-                f"{bq(line('🪙', 'Нужно', f'<b>{fmt_num(stake)}</b>') + chr(10) + line('🪙', 'У вас', f'<b>{fmt_num(ch_coins)}</b>'))}",
-            )
-            return
-        if op_coins < stake:
-            await reply_ephemeral(
-                message,
-                "⚠️ <b>У соперника мало монет</b>\n\n"
-                f"{bq(line('🪙', 'Нужно', f'<b>{fmt_num(stake)}</b>') + chr(10) + line('🪙', 'У соперника', f'<b>{fmt_num(op_coins)}</b>'))}",
-            )
-            return
-
-        cur = await db.execute(
-            """
-            SELECT id FROM duels
-            WHERE status = 'pending'
-              AND ((challenger_id = ? AND opponent_id = ?)
-                OR (challenger_id = ? AND opponent_id = ?))
-            """,
-            (challenger.id, opponent.id, opponent.id, challenger.id),
-        )
-        if await cur.fetchone():
-            await reply_ephemeral(
-                message,
-                "⚠️ <b>Уже есть заявка</b>\n\n"
-                f"{bq('Между вами уже висит активный вызов.')}",
-            )
-            return
-
-        now = int(time.time())
-        cur = await db.execute(
-            """
-            INSERT INTO duels (challenger_id, opponent_id, stake, status, created_at, chat_id)
-            VALUES (?, ?, ?, 'pending', ?, ?)
-            """,
-            (challenger.id, opponent.id, stake, now, message.chat.id),
-        )
-        duel_id = cur.lastrowid
-
-    ch_name = await get_user_display(challenger.id, challenger.full_name)
-    op_name = await get_user_display(opponent.id, opponent.full_name)
-    bank = stake * 2
-
-    b = InlineKeyboardBuilder()
-    b.button(text="✅ Принять", callback_data=DuelAcceptCallback(duel_id=duel_id).pack())
-    b.button(text="✕ Отклонить", callback_data=DuelCancelCallback(duel_id=duel_id).pack())
-    b.adjust(2)
-
-    text = (
-        f"⚔️ <b>Вызов на дуэль</b>\n\n"
-        f"{bq(line('👤', 'Вызывающий', esc(ch_name)) + chr(10) + line('👤', 'Соперник', esc(op_name)))}\n\n"
-        f"{line('🪙', 'Ставка', f'<b>{fmt_num(stake)}</b>')}\n"
-        f"{line('🏦', 'Банк', f'<b>{fmt_num(bank)}</b>')}\n"
-        f"{line('⏱', 'Истекает', 'через 10 мин')}"
-    )
-    sent = await message.reply(text, reply_markup=b.as_markup())
-    async with get_db() as db:
-        await db.execute(
-            "UPDATE duels SET message_id = ? WHERE id = ?", (sent.message_id, duel_id)
-        )
-
-
-@router.callback_query(DuelCancelCallback.filter())
-async def duel_cancel(callback: CallbackQuery, callback_data: DuelCancelCallback) -> None:
-    if not await check_not_banned_cb(callback):
-        return
-
-    duel_id = callback_data.duel_id
-    user_id = callback.from_user.id
-
-    async with get_db() as db:
-        cur = await db.execute("SELECT * FROM duels WHERE id = ?", (duel_id,))
-        duel = await cur.fetchone()
-        if not duel:
-            await callback.answer("Заявка не найдена", show_alert=True)
-            return
-        if duel["status"] != "pending":
-            await callback.answer("Заявка уже закрыта", show_alert=True)
-            return
-        if user_id not in (duel["challenger_id"], duel["opponent_id"]):
-            await callback.answer("Это не ваша дуэль", show_alert=True)
-            return
-        await db.execute("UPDATE duels SET status = 'cancelled' WHERE id = ?", (duel_id,))
-
-    try:
-        await callback.message.edit_text(
-            f"✕ <b>Дуэль отменена</b>\n\n"
-            f"{bq(line('🆔', 'ID', str(duel_id)))}"
-        )
-    except TelegramBadRequest:
-        pass
-    await callback.answer("Отменено")
-
-
-@router.callback_query(DuelAcceptCallback.filter())
-async def duel_accept(callback: CallbackQuery, callback_data: DuelAcceptCallback) -> None:
-    if not await check_not_banned_cb(callback):
-        return
-
-    duel_id = callback_data.duel_id
-    user_id = callback.from_user.id
-    await expire_old_duels()
-
-    async with get_db() as db:
-        cur = await db.execute("SELECT * FROM duels WHERE id = ?", (duel_id,))
-        duel = await cur.fetchone()
-        if not duel:
-            await callback.answer("Заявка не найдена", show_alert=True)
-            return
-        if duel["status"] == "expired":
-            await callback.answer("Заявка истекла", show_alert=True)
-            return
-        if duel["status"] != "pending":
-            await callback.answer("Заявка уже закрыта", show_alert=True)
-            return
-        if user_id != duel["opponent_id"]:
-            await callback.answer("Принять может только вызванный игрок", show_alert=True)
-            return
-
-        stake = duel["stake"]
-        ch_id = duel["challenger_id"]
-        op_id = duel["opponent_id"]
-
-        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (ch_id,))
-        ch_coins = ((await cur.fetchone()) or {"coins": 0})["coins"] or 0
-        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (op_id,))
-        op_coins = ((await cur.fetchone()) or {"coins": 0})["coins"] or 0
-
-        if ch_coins < stake or op_coins < stake:
-            await db.execute("UPDATE duels SET status = 'cancelled' WHERE id = ?", (duel_id,))
-            await callback.answer("Недостаточно монет — дуэль отменена", show_alert=True)
-            try:
-                await callback.message.edit_text("✕ Дуэль отменена: недостаточно монет.")
-            except TelegramBadRequest:
-                pass
-            return
-
-        await db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (stake, ch_id))
-        await db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (stake, op_id))
-        await db.execute("UPDATE duels SET status = 'accepted' WHERE id = ?", (duel_id,))
-
-    await callback.answer("Дуэль началась!")
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except TelegramBadRequest:
-        pass
-
-    chat_id = callback.message.chat.id
-    bot = callback.bot
-
-    try:
-        d1 = await bot.send_dice(chat_id=chat_id, emoji="🎲")
-        await asyncio.sleep(DICE_SPIN_DELAY)
-        d2 = await bot.send_dice(chat_id=chat_id, emoji="🎲")
-        await asyncio.sleep(DICE_SPIN_DELAY)
-        v1 = int(d1.dice.value) if d1.dice else 1
-        v2 = int(d2.dice.value) if d2.dice else 1
-    except Exception as e:
-        logger.error("duel dice: %s", e)
-        async with get_db() as db:
-            await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, ch_id))
-            await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, op_id))
-            await db.execute("UPDATE duels SET status = 'cancelled' WHERE id = ?", (duel_id,))
-        await callback.message.answer("❌ Ошибка кубиков. Ставки возвращены.")
-        return
-
-    bank = stake * 2
-    ch_name = await get_user_display(ch_id)
-    op_name = await get_user_display(op_id)
-
-    if v1 > v2:
-        winner_id, winner_name = ch_id, ch_name
-        result_title = "🏆 Победа"
-    elif v2 > v1:
-        winner_id, winner_name = op_id, op_name
-        result_title = "🏆 Победа"
-    else:
-        winner_id = None
-        result_title = "🤝 Ничья"
-
-    async with get_db() as db:
-        if winner_id:
-            await db.execute(
-                "UPDATE users SET coins = coins + ? WHERE user_id = ?", (bank, winner_id)
-            )
-            await db.execute("UPDATE duels SET status = 'completed' WHERE id = ?", (duel_id,))
-            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (winner_id,))
-            new_bal = (await cur.fetchone())["coins"]
-            text = (
-                f"⚔️ <b>{result_title}</b>\n\n"
-                f"{bq(line('🎲', ch_name, f'<b>{v1}</b>') + chr(10) + line('🎲', op_name, f'<b>{v2}</b>'))}\n\n"
-                f"{line('🏆', 'Победитель', esc(winner_name))}\n"
-                f"{line('🪙', 'Банк', f'<b>+{fmt_num(bank)}</b> → {fmt_num(new_bal)}')}"
-            )
-        else:
-            await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, ch_id))
-            await db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (stake, op_id))
-            await db.execute("UPDATE duels SET status = 'completed' WHERE id = ?", (duel_id,))
-            text = (
-                f"⚔️ <b>{result_title}</b>\n\n"
-                f"{bq(line('🎲', ch_name, f'<b>{v1}</b>') + chr(10) + line('🎲', op_name, f'<b>{v2}</b>'))}\n\n"
-                f"{line('🪙', 'Ставки', 'возвращены')}"
-            )
-
-    await callback.message.answer(text)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # PROFILE
 # ═══════════════════════════════════════════════════════════════════════════
 @router.message(F.text == "👤 Профиль")
@@ -1815,7 +1476,7 @@ async def process_back_to_profile(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# NICKNAME  (/nick  ·  мряу ник)
+# NICKNAME
 # ═══════════════════════════════════════════════════════════════════════════
 @router.message(Command("nick"))
 @router.message(F.text.regexp(NICK_CMD_RE))
@@ -2147,7 +1808,7 @@ async def refresh_top(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# COLLECTION (только через callback из профиля)
+# COLLECTION
 # ═══════════════════════════════════════════════════════════════════════════
 async def get_collection_main_keyboard(user_id: int):
     async with get_db() as db:
@@ -2320,9 +1981,6 @@ async def ok_delete_callback(callback: CallbackQuery) -> None:
     await _try_delete(user_msg)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CARD ACTION (только «Мои карточки» после получения)
-# ═══════════════════════════════════════════════════════════════════════════
 @router.callback_query(CardActionCallback.filter())
 async def handle_card_action(
     callback: CallbackQuery,
@@ -2366,23 +2024,6 @@ async def handle_card_action(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TEST COMMAND (avatar sync)
-# ═══════════════════════════════════════════════════════════════════════════
-@router.message(Command("sync_my_avatar"))
-async def cmd_sync_default_avatar(message: Message) -> None:
-    """Тест: скачать дефолтный аватар на диск."""
-    if not ensure_default_avatar:
-        await message.reply("❌ Модуль card_photos недоступен.")
-        return
-    ok = await ensure_default_avatar(message.bot)
-    path = str(DEFAULT_AVATAR_PATH) if DEFAULT_AVATAR_PATH else "?"
-    if ok:
-        await message.reply(f"✅ Дефолтный аватар на диске:\n<code>{esc(path)}</code>")
-    else:
-        await message.reply("❌ Не удалось скачать. Проверьте file_id / права.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # STARTUP
 # ═══════════════════════════════════════════════════════════════════════════
 async def _run_api_server() -> None:
@@ -2410,6 +2051,10 @@ async def main() -> None:
 
         await init_db()
         logger.info("БД инициализирована")
+
+        # назначить superadmin из env при старте
+        async with get_db() as db:
+            await ensure_superadmin_from_env(db)
 
         try:
             ensure_photo_dir()
@@ -2443,22 +2088,17 @@ async def main() -> None:
         if admin_token:
             try:
                 from admin_bot import run_admin_bot
-
                 tasks.append(run_admin_bot(admin_token))
                 logger.info("🛡 Админ-бот будет запущен параллельно")
             except Exception as e:
                 logger.error("Не удалось подключить admin_bot: %s", e)
         else:
             logger.warning(
-                "ADMIN_BOT_TOKEN не задан — админ-бот не запущен. "
-                "Добавьте второй токен в .env для админ-панели."
+                "ADMIN_BOT_TOKEN не задан — админ-бот не запущен."
             )
 
         start_api = os.getenv("START_API", os.getenv("ENABLE_WEBAPP_API", "0")).strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
+            "1", "true", "yes", "on",
         )
         if start_api:
             tasks.append(_run_api_server())

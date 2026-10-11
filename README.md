@@ -1,91 +1,71 @@
-# API + фото для бота «Мряу» (v2)
+# API + боты «Мряу» (v2.1)
 
-FastAPI-бэкенд для Telegram Mini App. Работает с той же SQLite, что и бот.
+FastAPI-бэкенд и Telegram-боты (user + admin) с общей SQLite.
 
-## Что изменилось в v2
+## Что изменилось
 
-- Удалены маркет, кристаллы, обмен и покупка
-- Добавлен `POST /api/claim` — получение карточки из мини-приложения
-- Топ и коллекция считают **уникальные** карточки (не сумму `amount`)
-- Расширенная админка: CRUD карточек, просмотр/правка игроков, выдача карточек
-- `GET /api/help` — справка
+- **Дуэли удалены** из пользовательского бота и БД
+- **Новые редкости:** Обычная, Редкая, Необычная, Ценная, Сверхценная, Легендарная  
+  (веса 40/25/15/10/7/3, награды 8/20/40/70/110/200)
+- **Рамки** на фото карточек (цвет по редкости, Pillow)
+- **UUID-имена** файлов фото — нельзя перебрать по `card_id`
+- **Superadmin** только из `SUPERADMIN_IDS` в `.env` (не «первый пользователь»)
+- Админ: `/check`, `/balance_rarities`, `/rename_rarities`, `/frame_all`, `/migrate_uuid`
+- При добавлении карточки — рекомендация редкости по балансу
+- Упрощены API и схема (без `amount`, без `duels`, без gender)
 
 ## Файлы
 
-| Файл | Куда |
-|------|------|
-| `api.py` | **Корень репозитория бота** (заменить старый) |
-| `card_photos.py` | Корень репо бота (если ещё нет) |
-| `run_bot_and_api.py` | Корень репо бота (опционально, Bothost) |
-| `BOT_PHOTOS_INTEGRATION.md` | Документация по фото |
-| `requirements.txt` | Объединить с requirements бота |
+| Файл | Назначение |
+|------|------------|
+| `bot.py` | Пользовательский бот |
+| `admin_bot.py` | Админ-бот |
+| `api.py` | Mini App API |
+| `card_photos.py` | Фото, UUID, рамки |
+| `requirements.txt` | Зависимости |
+
+## Env
+
+```bash
+BOT_TOKEN=...
+ADMIN_BOT_TOKEN=...
+SUPERADMIN_IDS=123456789          # через запятую, если нужно несколько
+DB_NAME=/app/data/cards_game.db
+CARD_PHOTOS_DIR=/app/data/card_photos
+CORS_ORIGINS=https://your-front.vercel.app,https://web.telegram.org
+WEBAPP_URL=https://your-front.vercel.app
+API_BASE=https://api.example.com  # для /check
+START_API=1                       # поднять API вместе с ботом
+API_PORT=8080
+```
 
 ## Запуск
 
 ```bash
-pip install fastapi uvicorn[standard] aiosqlite pydantic
-
-export BOT_TOKEN="..."           # тот же, что у бота
-export DB_NAME="/app/data/cards_game.db"
-export CORS_ORIGINS="https://твой-фронт.vercel.app,https://web.telegram.org"
-export CARD_PHOTOS_DIR="/app/data/card_photos"   # опционально
-export API_PORT=8080             # или PORT на Bothost
-
+pip install -r requirements.txt
+export BOT_TOKEN=... ADMIN_BOT_TOKEN=... SUPERADMIN_IDS=...
+python bot.py          # user + admin + optional API
+# или отдельно:
 uvicorn api:app --host 0.0.0.0 --port 8080
+python admin_bot.py
 ```
 
-На Bothost: точка входа `run_bot_and_api.py`, включи домен, порт 8080.
+## Миграция со старой версии
 
-## Эндпоинты
+1. `/rename_rarities` — epic→uncommon, mythical→valuable  
+2. `/migrate_photos` — скачать file_id на диск  
+3. `/migrate_uuid` — переименовать `{id}.jpg` → `{uuid}.jpg`  
+4. `/frame_all` — наложить цветные рамки  
+5. `/balance_rarities` — подогнать доли редкостей под веса  
+6. `/check` — проверить БД, таблицы, API, Pillow
 
-| Метод | Путь | Auth | Описание |
-|-------|------|------|----------|
-| GET | `/health` | — | Проверка |
-| GET | `/api/me` | initData | Профиль |
-| GET | `/api/collection` | initData | Карточки (уникальные) |
-| GET | `/api/top?kind=` | initData | Топ coins/cards/streak |
-| POST | `/api/claim` | initData | Бесплатная карточка |
-| GET | `/api/card/{id}` | initData | Одна карточка |
-| GET | `/api/card/{id}/photo` | — | Фото |
-| GET | `/api/help` | — | Справка |
-| GET | `/api/admin/overview` | admin | Сводка |
-| GET/POST | `/api/admin/cards` | admin | Список / создать |
-| PATCH/DELETE | `/api/admin/cards/{id}` | admin | Изменить / удалить |
-| GET | `/api/admin/users` | admin | Список игроков |
-| GET/PATCH | `/api/admin/users/{id}` | admin | Детали / правка |
-| POST | `/api/admin/users/{id}/give-card` | admin | Выдать карточку |
+## Редкости
 
-## Логика claim
-
-1. Проверка кулдауна `last_claim` (4 часа)
-2. Взвешенный random редкости (common 50 … legendary 3)
-3. Случайная карточка этой редкости
-4. INSERT/UPDATE inventory, +монеты по редкости, обновление стрика
-5. Ответ с карточкой, стриком, новым кулдауном
-
-Стрик: +1 если claim был «вчера» (UTC-день), иначе сброс в 1.
-
-**Важно:** логика claim в API должна совпадать с ботом. Если в боте другие веса/награды — поправь константы `RARITIES` / `COOLDOWN_SECONDS` в `api.py` под бота.
-
-## Фото
-
-См. `BOT_PHOTOS_INTEGRATION.md` и `card_photos.py`:
-- при добавлении карточки в боте — `sync_card_photo`
-- одноразовая миграция — `/migrate_photos`
-- API отдаёт `/api/card/{id}/photo` с диска
-
-## Nginx (фрагмент)
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name api.example.com;
-    ssl_certificate     /etc/letsencrypt/live/api.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
+| Ключ | Название | Вес | Монеты | Цвет рамки |
+|------|----------|-----|--------|------------|
+| common | Обычная | 40 | 8 | серый |
+| rare | Редкая | 25 | 20 | синий |
+| uncommon | Необычная | 15 | 40 | зелёный |
+| valuable | Ценная | 10 | 70 | фиолетовый |
+| super_valuable | Сверхценная | 7 | 110 | оранжевый |
+| legendary | Легендарная | 3 | 200 | золотой |
