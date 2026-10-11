@@ -1,30 +1,25 @@
 """
 Общие игровые константы и загрузка rarity_config / settings из БД.
-
-DEFAULT_RARITIES — сбалансированный дефолт (вес / награда).
-negative — забирает монеты (reward < 0).
 """
 from __future__ import annotations
 
 import os
 from typing import Any, Optional
 
-# ── Дефолтные редкости (сумма weight = 100) ──
-# rare удалена; negative — негативная (штраф)
 DEFAULT_RARITIES: dict[str, dict[str, Any]] = {
-    "common":         {"icon": "⚪", "name": "Обычная",     "weight": 38, "reward": 10},
-    "uncommon":       {"icon": "🟢", "name": "Необычная",   "weight": 20, "reward": 40},
-    "valuable":       {"icon": "🟣", "name": "Ценная",      "weight": 12, "reward": 70},
-    "super_valuable": {"icon": "🟠", "name": "Сверхценная", "weight": 8,  "reward": 120},
-    "legendary":      {"icon": "🟡", "name": "Легендарная", "weight": 4,  "reward": 200},
-    "negative":       {"icon": "⬛", "name": "Негативная",  "weight": 18, "reward": -20},
+    "common":         {"icon": "⚪️", "name": "Обычная",     "weight": 45, "reward": 15},
+    "uncommon":       {"icon": "🟢", "name": "Необычная",   "weight": 25, "reward": 40},
+    "valuable":       {"icon": "🟣", "name": "Ценная",      "weight": 14, "reward": 80},
+    "super_valuable": {"icon": "🟠", "name": "Сверхценная", "weight": 7,  "reward": 150},
+    "legendary":      {"icon": "🟡", "name": "Легендарная", "weight": 2,  "reward": 300},
+    "negative":       {"icon": "⚫️", "name": "Негативная",  "weight": 7,  "reward": -15},
 }
 
 RARITY_ORDER = list(DEFAULT_RARITIES.keys())
 
 OLD_RARITY_MAP = {
     "common": "common",
-    "rare": "uncommon",  # при миграции rare → uncommon
+    "rare": "uncommon",
     "epic": "uncommon",
     "mythical": "valuable",
     "legendary": "legendary",
@@ -33,21 +28,21 @@ OLD_RARITY_MAP = {
 
 STREAK_BONUSES = [
     (2, 10),
-    (7, 15),
-    (14, 20),
-    (30, 30),
-    (60, 40),
-    (float("inf"), 40),
+    (7, 20),
+    (14, 30),
+    (30, 45),
+    (60, 60),
+    (float("inf"), 60),
 ]
 
 COOLDOWN_SECONDS = 3 * 3600
 API_COOLDOWN_SECONDS = 4 * 3600
-NICKNAME_COST = 120
+NICKNAME_COST = 150
 
 DICE_COOLDOWN_SECONDS = 10 * 60
-DICE_MIN_BALANCE = 20
+DICE_MIN_BALANCE = 30
 DICE_SPIN_DELAY = 3
-DICE_VALUE_MAP = {1: -15, 2: -8, 3: 0, 4: 8, 5: 15, 6: 25}
+DICE_VALUE_MAP = {1: -20, 2: -10, 3: 0, 4: 10, 5: 20, 6: 35}
 
 ROLES = {
     "user":       {"icon": "👤", "name": "Игрок"},
@@ -64,6 +59,12 @@ SUPERADMIN_IDS = {
 
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 
+APP_REVISION = "2.4.0"
+APP_REVISION_NOTES = (
+    "blur-fill карточек, /revision, rarity 45/25/14/7/2/7, "
+    "negative -15, economy rescale, Gemini, drop_legacy"
+)
+
 
 def streak_bonus_for(streak: int) -> int:
     if streak <= 1:
@@ -71,7 +72,7 @@ def streak_bonus_for(streak: int) -> int:
     for days, bonus in STREAK_BONUSES:
         if streak <= days:
             return bonus
-    return 40
+    return 60
 
 
 async def ensure_config_tables(db) -> None:
@@ -94,7 +95,6 @@ async def ensure_config_tables(db) -> None:
                VALUES (?, ?, ?)""",
             (key, info["weight"], info["reward"]),
         )
-    # удалить устаревший rare из конфига, если остался
     await db.execute("DELETE FROM rarity_config WHERE rarity_key = 'rare'")
     await db.execute(
         """INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('user_bot_enabled', '1')"""
@@ -120,9 +120,11 @@ async def load_rarities(db) -> dict[str, dict[str, Any]]:
 
 async def reset_rarities_to_default(db) -> None:
     await ensure_config_tables(db)
-    await db.execute("DELETE FROM rarity_config WHERE rarity_key NOT IN ({})".format(
-        ",".join(f"'{k}'" for k in DEFAULT_RARITIES)
-    ))
+    await db.execute(
+        "DELETE FROM rarity_config WHERE rarity_key NOT IN ({})".format(
+            ",".join(f"'{k}'" for k in DEFAULT_RARITIES)
+        )
+    )
     for key, info in DEFAULT_RARITIES.items():
         await db.execute(
             """INSERT INTO rarity_config (rarity_key, weight, reward) VALUES (?, ?, ?)
@@ -145,7 +147,6 @@ async def set_rarity_params(
     row = await cur.fetchone()
     w = weight if weight is not None else (row[0] if row else DEFAULT_RARITIES[key]["weight"])
     r = reward if reward is not None else (row[1] if row else DEFAULT_RARITIES[key]["reward"])
-    # negative может быть < 0; weight всегда >= 0
     if w < 0:
         return False
     await db.execute(

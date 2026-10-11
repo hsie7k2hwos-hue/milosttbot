@@ -154,27 +154,71 @@ def _draw_diamond(draw, cx: int, cy: int, size: int, fill, outline, width: int =
 
 
 
-def normalize_to_portrait(img):
-    """Привести изображение к единому вертикальному CARD_W×CARD_H.
-    - RGBA → RGB на FILL_BG
-    - горизонтальные: letterbox (поля сверху/снизу) или center-crop к 2:3
-    - вертикальные: scale + pad
-    """
-    from PIL import Image
-    if img.mode == "RGBA":
-        base = Image.new("RGB", img.size, FILL_BG)
-        base.paste(img, mask=img.split()[3])
-        img = base
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
+def _rgba_to_rgb(img):
+    """Прозрачность → мягкий градиент из средних цветов, не чёрный прямоугольник."""
+    from PIL import Image, ImageFilter, ImageDraw
+    if img.mode != "RGBA":
+        return img.convert("RGB") if img.mode != "RGB" else img
 
     w, h = img.size
-    target_ratio = CARD_W / CARD_H  # ~0.666
+    # фон: сильный blur уменьшенной копии + лёгкий градиент сверху/снизу
+    tiny = img.convert("RGB").resize(
+        (max(8, w // 16), max(8, h // 16)), Image.Resampling.BILINEAR
+    )
+    bg = tiny.resize((w, h), Image.Resampling.BILINEAR).filter(
+        ImageFilter.GaussianBlur(radius=12)
+    )
+    # затемнение краёв для «стеклянного» вида
+    overlay = Image.new("RGB", (w, h), (20, 20, 28))
+    bg = Image.blend(bg, overlay, 0.25)
+    bg.paste(img, mask=img.split()[3])
+    return bg
+
+
+def _blur_fill_canvas(resized, canvas_size=(CARD_W, CARD_H)):
+    """Letterbox: размытый zoom-фон (переливка) + чёткое фото по центру."""
+    from PIL import Image, ImageFilter, ImageEnhance
+    cw, ch = canvas_size
+    nw, nh = resized.size
+
+    # фон: cover-scale + сильный blur + чуть затемнить
+    cover = max(cw / max(1, nw), ch / max(1, nh)) * 1.15
+    bw, bh = max(1, int(nw * cover)), max(1, int(nh * cover))
+    bg = resized.resize((bw, bh), Image.Resampling.BILINEAR)
+    left, top = (bw - cw) // 2, (bh - ch) // 2
+    bg = bg.crop((left, top, left + cw, top + ch))
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=28))
+    bg = ImageEnhance.Brightness(bg).enhance(0.55)
+    bg = ImageEnhance.Color(bg).enhance(1.15)
+
+    # мягкий вертикальный виньет
+    vignette = Image.new("L", (cw, ch), 0)
+    from PIL import ImageDraw
+    vd = ImageDraw.Draw(vignette)
+    for y in range(ch):
+        # ярче в центре, темнее у краёв
+        t = abs(y - ch / 2) / (ch / 2)
+        alpha = int(40 + 80 * (t ** 1.5))
+        vd.line([(0, y), (cw, y)], fill=min(180, alpha))
+    dark = Image.new("RGB", (cw, ch), (12, 12, 18))
+    bg = Image.composite(dark, bg, vignette)
+
+    ox, oy = (cw - nw) // 2, (ch - nh) // 2
+    bg.paste(resized, (ox, oy))
+    return bg
+
+
+def normalize_to_portrait(img):
+    """Единый вертикальный CARD_W×CARD_H с красивой «переливкой» вместо чёрных полей."""
+    from PIL import Image
+    img = _rgba_to_rgb(img)
+
+    w, h = img.size
+    target_ratio = CARD_W / CARD_H
     src_ratio = w / h if h else 1
 
-    # Центрированный crop к 2:3, если почти подходит; иначе letterbox
+    # почти 2:3 — center crop
     if abs(src_ratio - target_ratio) < 0.08:
-        # близко к 2:3 — center crop
         if src_ratio > target_ratio:
             new_w = int(h * target_ratio)
             left = (w - new_w) // 2
@@ -185,13 +229,11 @@ def normalize_to_portrait(img):
             img = img.crop((0, top, w, top + new_h))
         return img.resize((CARD_W, CARD_H), Image.Resampling.LANCZOS)
 
-    # letterbox: вписать целиком, заполнить поля
+    # letterbox + blur fill
     scale = min(CARD_W / w, CARD_H / h)
     nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
     resized = img.resize((nw, nh), Image.Resampling.LANCZOS)
-    canvas = Image.new("RGB", (CARD_W, CARD_H), FILL_BG)
-    canvas.paste(resized, ((CARD_W - nw) // 2, (CARD_H - nh) // 2))
-    return canvas
+    return _blur_fill_canvas(resized, (CARD_W, CARD_H))
 
 
 def apply_rarity_frame(

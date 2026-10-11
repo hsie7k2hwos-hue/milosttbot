@@ -2056,6 +2056,89 @@ async def gemini_suggest_name(hint: str = "", old_name: str = "") -> str:
         raise RuntimeError(f"Неожиданный ответ Gemini: {e}")
 
 
+@router.message(Command("revision"), admin_filter)
+async def cmd_revision(message: Message):
+    """Сводка ревизии + мягкие миграции конфига."""
+    if not await _require_admin(message):
+        return
+    from game_config import (
+        APP_REVISION,
+        APP_REVISION_NOTES,
+        DEFAULT_RARITIES,
+        NICKNAME_COST,
+        DICE_VALUE_MAP,
+        DICE_MIN_BALANCE,
+        ensure_config_tables,
+        reset_rarities_to_default,
+    )
+
+    lines = [
+        f"<b>Ревизия {APP_REVISION}</b>",
+        esc(APP_REVISION_NOTES),
+        "",
+    ]
+    async with get_db() as db:
+        await ensure_config_tables(db)
+        cur = await db.execute("SELECT COUNT(*) FROM cards")
+        n_cards = (await cur.fetchone())[0]
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        n_users = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+        tables = {r[0] for r in await cur.fetchall()}
+        legacy = [t for t in LEGACY_TABLES if t in tables]
+        # rarity drift vs default
+        rar = await load_rarities(db) if False else None
+    try:
+        from game_config import load_rarities as _lr
+        async with get_db() as db:
+            rar = await _lr(db)
+    except Exception:
+        rar = dict(DEFAULT_RARITIES)
+
+    drift = []
+    for k, d in DEFAULT_RARITIES.items():
+        cur_w = rar.get(k, {}).get("weight")
+        cur_r = rar.get(k, {}).get("reward")
+        if cur_w != d["weight"] or cur_r != d["reward"]:
+            drift.append(
+                f"{d['icon']} {k}: БД {cur_w}/{cur_r} → дефолт {d['weight']}/{d['reward']}"
+            )
+
+    lines.append(f"👥 users: {n_users} · 🃏 cards: {n_cards}")
+    lines.append(f"🪙 nickname: {NICKNAME_COST} · dice min: {DICE_MIN_BALANCE}")
+    lines.append(
+        "🎲 dice: " + ", ".join(f"{k}:{v:+d}" for k, v in DICE_VALUE_MAP.items())
+    )
+    lines.append("")
+    lines.append("<b>Дефолт редкостей</b>")
+    for k, d in DEFAULT_RARITIES.items():
+        lines.append(
+            f"{d['icon']} {d['name']}: weight {d['weight']} · reward {d['reward']:+d}"
+        )
+    if drift:
+        lines.append("")
+        lines.append("⚠️ БД отличается от дефолта:")
+        lines.extend(drift)
+        lines.append("→ /resetrarities чтобы применить")
+    else:
+        lines.append("")
+        lines.append("✅ rarity_config = дефолт")
+    if legacy:
+        lines.append(f"⚠️ legacy tables: {', '.join(legacy)} → /drop_legacy")
+    else:
+        lines.append("✅ legacy-таблиц нет")
+
+    lines.append("")
+    lines.append(
+        "Рекомендуемый порядок: /drop_legacy → /resetrarities → "
+        "/balance_rarities → /redraw_cards → /check"
+    )
+    await message.reply("\n".join(lines))
+    logger.info("revision shown to %s", message.from_user.id)
+
+
 @router.message(Command("drop_legacy"), admin_filter)
 async def cmd_drop_legacy(message: Message):
     """Удалить устаревшие таблицы, не используемые кодом."""
@@ -2879,6 +2962,7 @@ ADMIN_COMMANDS = [
     BotCommand(command="drop_legacy", description="🗑 Удалить лишние таблицы"),
     BotCommand(command="ai", description="✨ Gemini: название"),
     BotCommand(command="renamecards", description="✨ Gemini: все названия"),
+    BotCommand(command="revision", description="📋 Ревизия / миграции"),
     BotCommand(command="cache_avatars", description="🖼 Кэш аватарок"),
 ]
 
