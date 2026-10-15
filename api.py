@@ -85,37 +85,111 @@ async def load_rarities(db: aiosqlite.Connection) -> dict:
 
 
 # ── Auth (Telegram initData) ────────────────────────────────────────────────
+def _parse_init_pairs(init_data: str) -> tuple[dict[str, str], str]:
+    """
+    Разбор initData вручную (без parse_qsl), чтобы значения совпадали
+    с тем, что подписывает Telegram.
+    Возвращает (pairs_without_hash, received_hash).
+    """
+    pairs: dict[str, str] = {}
+    received_hash = ""
+    for chunk in init_data.split("&"):
+        if not chunk or "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        if key == "hash":
+            received_hash = value
+            continue
+        if key == "signature":
+            # Bot API 8.0 — в HMAC-hash не участвует
+            continue
+        # Telegram кладёт URL-encoded значения; для data_check_string нужны decoded
+        pairs[key] = unquote(value)
+    return pairs, received_hash
+
+
 def validate_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_MAX_AGE) -> dict:
     """
-    Проверка initData по алгоритму Telegram Mini Apps.
-    secret = HMAC-SHA256(key=b"WebAppData", msg=bot_token)
-    hash = HMAC-SHA256(key=secret, msg=data_check_string)
+    Проверка initData по https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
+
+    secret_key = HMAC_SHA256(<bot_token>, "WebAppData")
+    calculated_hash = HMAC_SHA256(data_check_string, secret_key)
     """
-    if not init_data or not bot_token:
+    if not init_data or not str(init_data).strip():
         raise HTTPException(status_code=401, detail="missing_init_data")
+    if not bot_token:
+        raise HTTPException(status_code=500, detail="bot_token_not_configured")
 
-    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
-    received_hash = pairs.pop("hash", None)
-    pairs.pop("signature", None)  # Bot API 8.0 — не участвует в hash
+    init_data = str(init_data).strip()
+    # иногда клиент присылает уже-decoded строку или с префиксом
+    if init_data.lower().startswith("tma "):
+        init_data = init_data[4:].strip()
 
+    pairs, received_hash = _parse_init_pairs(init_data)
     if not received_hash:
         raise HTTPException(status_code=401, detail="missing_hash")
 
     data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
-    secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    calculated = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
+
+    # key = "WebAppData", message = bot_token  (как в официальной доке)
+    secret = hmac.new(
+        key=b"WebAppData",
+        msg=bot_token.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).digest()
+    calculated = hmac.new(
+        key=secret,
+        msg=data_check.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).hexdigest()
 
     if not hmac.compare_digest(calculated, received_hash):
-        raise HTTPException(status_code=401, detail="invalid_signature")
+        # fallback: попробовать без unquote (на случай уже-decoded initData)
+        pairs_raw: dict[str, str] = {}
+        rh2 = ""
+        for chunk in init_data.split("&"):
+            if not chunk or "=" not in chunk:
+                continue
+            key, value = chunk.split("=", 1)
+            if key == "hash":
+                rh2 = value
+                continue
+            if key == "signature":
+                continue
+            pairs_raw[key] = value
+        data_check2 = "\n".join(f"{k}={v}" for k, v in sorted(pairs_raw.items()))
+        calculated2 = hmac.new(secret, data_check2.encode("utf-8"), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calculated2, rh2 or received_hash):
+            pairs = pairs_raw
+            received_hash = rh2 or received_hash
+        else:
+            logger.warning(
+                "invalid_signature: init_len=%s auth_date=%s keys=%s token_prefix=%s…",
+                len(init_data),
+                pairs.get("auth_date"),
+                sorted(pairs.keys()),
+                bot_token[:8] if bot_token else "",
+            )
+            raise HTTPException(status_code=401, detail="invalid_signature")
 
     auth_date = int(pairs.get("auth_date") or 0)
     if max_age > 0 and auth_date > 0:
-        if time.time() - auth_date > max_age:
+        age = time.time() - auth_date
+        if age > max_age:
             raise HTTPException(status_code=401, detail="init_data_expired")
 
     user_raw = pairs.get("user")
-    user = json.loads(user_raw) if user_raw else None
-    if not user or "id" not in user:
+    if not user_raw:
+        raise HTTPException(status_code=401, detail="no_user")
+    try:
+        user = json.loads(user_raw)
+    except json.JSONDecodeError:
+        # user мог остаться percent-encoded
+        try:
+            user = json.loads(unquote(user_raw))
+        except Exception:
+            raise HTTPException(status_code=401, detail="bad_user_json")
+    if not isinstance(user, dict) or "id" not in user:
         raise HTTPException(status_code=401, detail="no_user")
 
     return {
@@ -126,21 +200,43 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_
     }
 
 
-async def get_current_user(
-    authorization: Optional[str] = Header(None),
-    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
-) -> dict:
-    """Authorization: tma <initData>  или  X-Telegram-Init-Data: <initData>"""
-    raw = None
-    if authorization and authorization.lower().startswith("tma "):
-        raw = authorization[4:].strip()
-    elif x_telegram_init_data:
-        raw = x_telegram_init_data.strip()
+async def _extract_init_data(request: Request) -> str:
+    """Достаём initData из заголовков / query / body."""
+    # 1) X-Telegram-Init-Data (предпочтительный — не ломается прокси)
+    h = request.headers.get("x-telegram-init-data") or request.headers.get("X-Telegram-Init-Data")
+    if h and h.strip():
+        return h.strip()
 
+    # 2) Authorization: tma <data>
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("tma "):
+        return auth[4:].strip()
+
+    # 3) query ?initData=
+    q = request.query_params.get("initData") or request.query_params.get("init_data")
+    if q:
+        return q
+
+    # 4) JSON body { "initData": "..." }
+    if request.method in ("POST", "PUT", "PATCH"):
+        try:
+            body = await request.json()
+            if isinstance(body, dict) and body.get("initData"):
+                return str(body["initData"])
+        except Exception:
+            pass
+
+    return ""
+
+
+async def get_current_user(request: Request) -> dict:
+    raw = await _extract_init_data(request)
     if not raw:
+        logger.warning("auth: no initData in headers/query/body")
         raise HTTPException(status_code=401, detail="unauthorized")
 
     if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is empty — cannot validate initData")
         raise HTTPException(status_code=500, detail="bot_token_not_configured")
 
     parsed = validate_init_data(raw, BOT_TOKEN)
@@ -201,7 +297,58 @@ app.add_middleware(
 # ── Health ──────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"ok": True, "ts": int(time.time())}
+    return {
+        "ok": True,
+        "ts": int(time.time()),
+        "bot_token_set": bool(BOT_TOKEN),
+        "bot_token_prefix": (BOT_TOKEN[:6] + "…") if BOT_TOKEN else None,
+    }
+
+
+@app.get("/api/auth-check")
+async def auth_check(request: Request):
+    """Диагностика: есть ли initData и проходит ли подпись (без доступа к БД)."""
+    raw = await _extract_init_data(request)
+    if not raw:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "ok": False,
+                "error": "no_init_data",
+                "hint": "Откройте мини-приложение из Telegram. Передайте Authorization: tma <initData> или X-Telegram-Init-Data.",
+            },
+        )
+    if not BOT_TOKEN:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "bot_token_not_configured"},
+        )
+    try:
+        parsed = validate_init_data(raw, BOT_TOKEN)
+        u = parsed["user"]
+        return {
+            "ok": True,
+            "user_id": u.get("id"),
+            "username": u.get("username"),
+            "auth_date": parsed.get("auth_date"),
+        }
+    except HTTPException as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={
+                "ok": False,
+                "error": e.detail,
+                "init_data_len": len(raw),
+                "has_hash": "hash=" in raw,
+                "bot_token_prefix": BOT_TOKEN[:6] + "…",
+                "hint": (
+                    "invalid_signature → BOT_TOKEN на API должен быть токеном ТОГО ЖЕ бота, "
+                    "к которому привязано мини-приложение (не admin-бот)."
+                    if e.detail == "invalid_signature"
+                    else None
+                ),
+            },
+        )
 
 
 @app.get("/api/rarities")
