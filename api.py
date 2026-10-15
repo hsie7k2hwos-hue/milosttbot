@@ -35,7 +35,27 @@ try:
 except ImportError:
     pass
 
-BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
+
+def _clean_token(raw: Optional[str]) -> str:
+    """Убрать кавычки/пробелы/BOM — частая причина invalid_signature на хостингах."""
+    if not raw:
+        return ""
+    t = str(raw).strip().strip("\ufeff")
+    if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+        t = t[1:-1].strip()
+    return t
+
+
+BOT_TOKEN = _clean_token(os.getenv("BOT_TOKEN"))
+ADMIN_BOT_TOKEN = _clean_token(
+    os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN")
+)
+_AUTH_TOKENS: list[tuple[str, str]] = []
+if BOT_TOKEN:
+    _AUTH_TOKENS.append(("BOT_TOKEN", BOT_TOKEN))
+if ADMIN_BOT_TOKEN and ADMIN_BOT_TOKEN != BOT_TOKEN:
+    _AUTH_TOKENS.append(("ADMIN_BOT_TOKEN", ADMIN_BOT_TOKEN))
+
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 CARD_PHOTOS_DIR = Path(os.getenv("CARD_PHOTOS_DIR", "/app/data/card_photos"))
 STREAK_EXPIRE_SECONDS = 24 * 3600
@@ -116,74 +136,100 @@ def _parse_init_pairs(init_data: str) -> tuple[dict[str, str], str]:
     return pairs, received_hash
 
 
-def validate_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_MAX_AGE) -> dict:
-    """
-    Проверка initData по https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
+def _calc_hash(bot_token: str, data_check: str) -> str:
+    secret = hmac.new(
+        key=b"WebAppData",
+        msg=bot_token.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).digest()
+    return hmac.new(
+        key=secret,
+        msg=data_check.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).hexdigest()
 
-    secret_key = HMAC_SHA256(<bot_token>, "WebAppData")
-    calculated_hash = HMAC_SHA256(data_check_string, secret_key)
+
+def validate_init_data(
+    init_data: str,
+    bot_token: str = "",
+    max_age: int = INIT_DATA_MAX_AGE,
+) -> dict:
+    """
+    Проверка initData:
+    https://core.telegram.org/bots/webapps#validating-data-received-via-the-web-app
+
+    Пробует BOT_TOKEN и ADMIN_BOT_TOKEN — WebApp в BotFather мог быть
+    привязан к любому из двух ботов.
     """
     if not init_data or not str(init_data).strip():
         raise HTTPException(status_code=401, detail="missing_init_data")
-    if not bot_token:
-        raise HTTPException(status_code=500, detail="bot_token_not_configured")
 
     init_data = str(init_data).strip()
-    # иногда клиент присылает уже-decoded строку или с префиксом
     if init_data.lower().startswith("tma "):
         init_data = init_data[4:].strip()
 
     pairs, received_hash = _parse_init_pairs(init_data)
     if not received_hash:
         raise HTTPException(status_code=401, detail="missing_hash")
+    received_hash = received_hash.lower().strip()
 
     data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
 
-    # key = "WebAppData", message = bot_token  (как в официальной доке)
-    secret = hmac.new(
-        key=b"WebAppData",
-        msg=bot_token.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).digest()
-    calculated = hmac.new(
-        key=secret,
-        msg=data_check.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).hexdigest()
+    # raw (без unquote) — запасной вариант
+    pairs_raw: dict[str, str] = {}
+    for chunk in init_data.split("&"):
+        if not chunk or "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        if key in ("hash", "signature"):
+            continue
+        pairs_raw[key] = value
+    data_check_raw = "\n".join(f"{k}={v}" for k, v in sorted(pairs_raw.items()))
 
-    if not hmac.compare_digest(calculated, received_hash):
-        # fallback: попробовать без unquote (на случай уже-decoded initData)
-        pairs_raw: dict[str, str] = {}
-        rh2 = ""
-        for chunk in init_data.split("&"):
-            if not chunk or "=" not in chunk:
-                continue
-            key, value = chunk.split("=", 1)
-            if key == "hash":
-                rh2 = value
-                continue
-            if key == "signature":
-                continue
-            pairs_raw[key] = value
-        data_check2 = "\n".join(f"{k}={v}" for k, v in sorted(pairs_raw.items()))
-        calculated2 = hmac.new(secret, data_check2.encode("utf-8"), hashlib.sha256).hexdigest()
-        if hmac.compare_digest(calculated2, rh2 or received_hash):
-            pairs = pairs_raw
-            received_hash = rh2 or received_hash
-        else:
-            logger.warning(
-                "invalid_signature: init_len=%s auth_date=%s keys=%s token_prefix=%s…",
-                len(init_data),
-                pairs.get("auth_date"),
-                sorted(pairs.keys()),
-                bot_token[:8] if bot_token else "",
-            )
-            raise HTTPException(status_code=401, detail="invalid_signature")
+    tokens = list(_AUTH_TOKENS)
+    if bot_token:
+        t = _clean_token(bot_token)
+        if t and not any(t == x[1] for x in tokens):
+            tokens.insert(0, ("explicit", t))
+    if not tokens:
+        raise HTTPException(status_code=500, detail="bot_token_not_configured")
+
+    matched_src = None
+    for src, token in tokens:
+        for label, dc in (("decoded", data_check), ("raw", data_check_raw)):
+            calc = _calc_hash(token, dc)
+            if hmac.compare_digest(calc, received_hash):
+                matched_src = f"{src}/{label}"
+                if label == "raw":
+                    pairs = pairs_raw
+                break
+        if matched_src:
+            break
+        logger.warning(
+            "sig miss %s: token_len=%s prefix=%s… calc=%s… recv=%s…",
+            src,
+            len(token),
+            token[:10],
+            calc[:12],
+            received_hash[:12],
+        )
+
+    if not matched_src:
+        logger.error(
+            "invalid_signature ALL tokens failed: init_len=%s keys=%s auth_date=%s "
+            "tokens_tried=%s",
+            len(init_data),
+            sorted(pairs.keys()),
+            pairs.get("auth_date"),
+            [s for s, _ in tokens],
+        )
+        raise HTTPException(status_code=401, detail="invalid_signature")
+
+    logger.info("initData OK via %s", matched_src)
 
     auth_date = int(pairs.get("auth_date") or 0)
     if max_age > 0 and auth_date > 0:
-        age = time.time() - auth_date
-        if age > max_age:
+        if time.time() - auth_date > max_age:
             raise HTTPException(status_code=401, detail="init_data_expired")
 
     user_raw = pairs.get("user")
@@ -192,7 +238,6 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_
     try:
         user = json.loads(user_raw)
     except json.JSONDecodeError:
-        # user мог остаться percent-encoded
         try:
             user = json.loads(unquote(user_raw))
         except Exception:
@@ -205,6 +250,7 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_
         "auth_date": auth_date,
         "query_id": pairs.get("query_id"),
         "start_param": pairs.get("start_param"),
+        "auth_source": matched_src,
     }
 
 
@@ -384,7 +430,11 @@ async def health():
         "ok": True,
         "ts": int(time.time()),
         "bot_token_set": bool(BOT_TOKEN),
-        "bot_token_prefix": (BOT_TOKEN[:6] + "…") if BOT_TOKEN else None,
+        "bot_token_len": len(BOT_TOKEN) if BOT_TOKEN else 0,
+        "bot_token_prefix": (BOT_TOKEN[:10] + "…") if BOT_TOKEN else None,
+        "admin_token_set": bool(ADMIN_BOT_TOKEN),
+        "admin_token_len": len(ADMIN_BOT_TOKEN) if ADMIN_BOT_TOKEN else 0,
+        "auth_tokens": [s for s, _ in _AUTH_TOKENS],
     }
 
 
@@ -416,7 +466,11 @@ async def api_auth(body: AuthBody):
     user = parsed["user"]
     uid = int(user["id"])
     token = make_session_token(uid)
-    logger.info("auth OK user_id=%s", uid)
+    logger.info(
+        "auth OK user_id=%s via %s",
+        uid,
+        parsed.get("auth_source"),
+    )
     return {
         "ok": True,
         "token": token,
@@ -424,6 +478,7 @@ async def api_auth(body: AuthBody):
         "username": user.get("username"),
         "first_name": user.get("first_name"),
         "expires_in": SESSION_TTL,
+        "auth_source": parsed.get("auth_source"),
     }
 
 
