@@ -6,6 +6,7 @@ Env: BOT_TOKEN, DB_NAME, CARD_PHOTOS_DIR, CORS_ORIGINS, WEBAPP_URL
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -15,17 +16,24 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qsl, unquote
+from urllib.parse import unquote
 
 import aiosqlite
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api")
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
@@ -200,47 +208,122 @@ def validate_init_data(init_data: str, bot_token: str, max_age: int = INIT_DATA_
     }
 
 
+# ── Session tokens (обход обрезки длинных заголовков на прокси) ─────────────
+# Формат: base64url(payload_json).base64url(hmac)
+# payload: {"uid": int, "exp": unix_ts}
+SESSION_TTL = int(os.getenv("SESSION_TTL", "86400"))  # 24h
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(s: str) -> bytes:
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def make_session_token(user_id: int, ttl: int = SESSION_TTL) -> str:
+    payload = json.dumps(
+        {"uid": int(user_id), "exp": int(time.time()) + ttl},
+        separators=(",", ":"),
+    ).encode()
+    sig = hmac.new(
+        (BOT_TOKEN or "x").encode(),
+        payload,
+        hashlib.sha256,
+    ).digest()
+    return f"{_b64url_encode(payload)}.{_b64url_encode(sig)}"
+
+
+def verify_session_token(token: str) -> Optional[int]:
+    try:
+        parts = token.split(".")
+        if len(parts) != 2:
+            return None
+        payload = _b64url_decode(parts[0])
+        sig = _b64url_decode(parts[1])
+        expected = hmac.new(
+            (BOT_TOKEN or "x").encode(),
+            payload,
+            hashlib.sha256,
+        ).digest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(payload)
+        if int(data.get("exp", 0)) < time.time():
+            return None
+        return int(data["uid"])
+    except Exception:
+        return None
+
+
 async def _extract_init_data(request: Request) -> str:
-    """Достаём initData из заголовков / query / body."""
-    # 1) X-Telegram-Init-Data (предпочтительный — не ломается прокси)
-    h = request.headers.get("x-telegram-init-data") or request.headers.get("X-Telegram-Init-Data")
-    if h and h.strip():
-        return h.strip()
-
-    # 2) Authorization: tma <data>
-    auth = request.headers.get("authorization") or ""
-    if auth.lower().startswith("tma "):
-        return auth[4:].strip()
-
-    # 3) query ?initData=
-    q = request.query_params.get("initData") or request.query_params.get("init_data")
-    if q:
-        return q
-
-    # 4) JSON body { "initData": "..." }
+    """Достаём initData из body / заголовков / query."""
+    # 1) JSON body — самый надёжный путь через прокси
     if request.method in ("POST", "PUT", "PATCH"):
         try:
             body = await request.json()
             if isinstance(body, dict) and body.get("initData"):
-                return str(body["initData"])
+                return str(body["initData"]).strip()
         except Exception:
             pass
+
+    # 2) X-Telegram-Init-Data
+    h = request.headers.get("x-telegram-init-data") or request.headers.get(
+        "X-Telegram-Init-Data"
+    )
+    if h and h.strip():
+        return h.strip()
+
+    # 3) Authorization: tma <data>
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("tma "):
+        return auth[4:].strip()
+
+    # 4) query
+    q = request.query_params.get("initData") or request.query_params.get("init_data")
+    if q:
+        return q.strip()
 
     return ""
 
 
 async def get_current_user(request: Request) -> dict:
+    """
+    Порядок:
+    1) Bearer <session_token>  — после POST /api/auth
+    2) initData в body/headers — прямая проверка
+    """
+    if not BOT_TOKEN:
+        logger.error("BOT_TOKEN is empty — cannot validate")
+        raise HTTPException(status_code=500, detail="bot_token_not_configured")
+
+    # Session token
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        uid = verify_session_token(auth[7:].strip())
+        if uid:
+            return {"id": uid}
+        raise HTTPException(status_code=401, detail="session_expired")
+
+    # Прямой initData
     raw = await _extract_init_data(request)
     if not raw:
-        logger.warning("auth: no initData in headers/query/body")
+        logger.warning(
+            "auth: no credentials (no Bearer, no initData). headers=%s",
+            [k for k in request.headers.keys() if k.lower() in (
+                "authorization", "x-telegram-init-data", "content-type"
+            )],
+        )
         raise HTTPException(status_code=401, detail="unauthorized")
-
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN is empty — cannot validate initData")
-        raise HTTPException(status_code=500, detail="bot_token_not_configured")
 
     parsed = validate_init_data(raw, BOT_TOKEN)
     return parsed["user"]
+
+
+class AuthBody(BaseModel):
+    initData: str = Field(..., min_length=10)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -305,18 +388,53 @@ async def health():
     }
 
 
-@app.get("/api/auth-check")
-async def auth_check(request: Request):
-    """Диагностика: есть ли initData и проходит ли подпись (без доступа к БД)."""
-    raw = await _extract_init_data(request)
+@app.post("/api/auth")
+async def api_auth(body: AuthBody):
+    """
+    Обмен initData → короткий session token.
+    initData идёт в JSON body — прокси его не обрезает (в отличие от заголовков).
+    """
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=500, detail="bot_token_not_configured")
+
+    raw = (body.initData or "").strip()
+    if not raw:
+        raise HTTPException(status_code=401, detail="missing_init_data")
+
+    try:
+        parsed = validate_init_data(raw, BOT_TOKEN)
+    except HTTPException as e:
+        logger.warning(
+            "POST /api/auth failed: %s init_len=%s has_hash=%s token_set=%s",
+            e.detail,
+            len(raw),
+            "hash=" in raw,
+            bool(BOT_TOKEN),
+        )
+        raise
+
+    user = parsed["user"]
+    uid = int(user["id"])
+    token = make_session_token(uid)
+    logger.info("auth OK user_id=%s", uid)
+    return {
+        "ok": True,
+        "token": token,
+        "user_id": uid,
+        "username": user.get("username"),
+        "first_name": user.get("first_name"),
+        "expires_in": SESSION_TTL,
+    }
+
+
+@app.post("/api/auth-check")
+async def auth_check(body: AuthBody):
+    """Диагностика подписи initData (POST body)."""
+    raw = (body.initData or "").strip()
     if not raw:
         return JSONResponse(
             status_code=401,
-            content={
-                "ok": False,
-                "error": "no_init_data",
-                "hint": "Откройте мини-приложение из Telegram. Передайте Authorization: tma <initData> или X-Telegram-Init-Data.",
-            },
+            content={"ok": False, "error": "no_init_data", "init_data_len": 0},
         )
     if not BOT_TOKEN:
         return JSONResponse(
@@ -331,6 +449,7 @@ async def auth_check(request: Request):
             "user_id": u.get("id"),
             "username": u.get("username"),
             "auth_date": parsed.get("auth_date"),
+            "init_data_len": len(raw),
         }
     except HTTPException as e:
         return JSONResponse(
@@ -340,10 +459,9 @@ async def auth_check(request: Request):
                 "error": e.detail,
                 "init_data_len": len(raw),
                 "has_hash": "hash=" in raw,
-                "bot_token_prefix": BOT_TOKEN[:6] + "…",
+                "bot_token_prefix": (BOT_TOKEN[:6] + "…") if BOT_TOKEN else None,
                 "hint": (
-                    "invalid_signature → BOT_TOKEN на API должен быть токеном ТОГО ЖЕ бота, "
-                    "к которому привязано мини-приложение (не admin-бот)."
+                    "BOT_TOKEN на API = токен user-бота, к которому привязан WebApp в BotFather"
                     if e.detail == "invalid_signature"
                     else None
                 ),
