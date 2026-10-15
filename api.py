@@ -33,8 +33,38 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
 CARD_PHOTOS_DIR = os.getenv("CARD_PHOTOS_DIR", "/app/data/card_photos")
-STATIC_DIR = os.getenv("WEBAPP_STATIC", os.path.join(os.path.dirname(__file__), "webapp"))
 INIT_DATA_MAX_AGE = int(os.getenv("INIT_DATA_MAX_AGE", "86400"))  # 24h
+
+
+def _resolve_static_dir() -> str:
+    """Ищем папку webapp: env → рядом с api.py → cwd → /app/webapp."""
+    candidates = []
+    env = (os.getenv("WEBAPP_STATIC") or "").strip()
+    if env:
+        candidates.append(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates.extend(
+        [
+            os.path.join(here, "webapp"),
+            os.path.join(here, "..", "webapp"),
+            os.path.join(os.getcwd(), "webapp"),
+            "/app/webapp",
+            "/app/data/webapp",
+        ]
+    )
+    for c in candidates:
+        path = os.path.abspath(c)
+        index = os.path.join(path, "index.html")
+        if os.path.isfile(index):
+            logger.info("WEBAPP_STATIC resolved: %s", path)
+            return path
+    # fallback — даже если index нет, вернём первый env/here
+    fallback = os.path.abspath(candidates[0] if candidates else os.path.join(here, "webapp"))
+    logger.warning("webapp/index.html not found, STATIC_DIR=%s (candidates tried)", fallback)
+    return fallback
+
+
+STATIC_DIR = _resolve_static_dir()
 
 # ── rarities (синхрон с game_config / bot) ──────────────────────────────────
 DEFAULT_RARITIES: dict[str, dict] = {
@@ -234,22 +264,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static mini-app
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=os.path.join(STATIC_DIR, "static")), name="static")
+# Static mini-app (CSS/JS)
+_static_files_dir = os.path.join(STATIC_DIR, "static")
+if os.path.isdir(_static_files_dir):
+    app.mount("/static", StaticFiles(directory=_static_files_dir), name="static")
+    logger.info("Mounted /static from %s", _static_files_dir)
+else:
+    logger.warning("No static dir at %s — CSS/JS will 404", _static_files_dir)
+
+
+def _index_response():
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path, media_type="text/html; charset=utf-8")
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": "index.html not found",
+            "static_dir": STATIC_DIR,
+            "hint": "Положите webapp/ рядом с api.py или задайте WEBAPP_STATIC",
+        },
+        status_code=503,
+    )
 
 
 @app.get("/")
 async def index():
-    index_path = os.path.join(STATIC_DIR, "index.html")
-    if os.path.isfile(index_path):
-        return FileResponse(index_path)
-    return JSONResponse({"ok": True, "service": "mryau-api"})
+    return _index_response()
+
+
+@app.get("/index.html")
+async def index_html():
+    return _index_response()
+
+
+@app.get("/app")
+@app.get("/webapp")
+async def index_aliases():
+    return _index_response()
 
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "ts": int(time.time())}
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    static_ok = os.path.isdir(_static_files_dir)
+    return {
+        "ok": True,
+        "ts": int(time.time()),
+        "static_dir": STATIC_DIR,
+        "index_exists": os.path.isfile(index_path),
+        "static_mounted": static_ok,
+        "bot_token_set": bool(BOT_TOKEN),
+        "db_name": DB_NAME,
+    }
 
 
 @app.get("/api/card-photo/{filename}")
