@@ -1,891 +1,595 @@
 """
-API для Telegram Mini App «Мряу».
+API мини-приложения «Мряу».
 
-    uvicorn api:app --host 0.0.0.0 --port 8080
-
-Env:
-    BOT_TOKEN, DB_NAME, CORS_ORIGINS, CARD_PHOTOS_DIR / CARDS_PHOTO_DIR
-    SUPERADMIN_IDS — через запятую
+Эндпоинты для Telegram WebApp: профиль, коллекция, топ, публичный профиль.
+Авторизация через initData (HMAC-SHA256).
+Общая БД с user-ботом.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
+import logging
 import os
-import random
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Any, Optional
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, unquote
 
 import aiosqlite
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DB_NAME = os.getenv("DB_NAME", "/app/data/cards_game.db")
-CORS_ORIGINS = [
-    o.strip()
-    for o in os.getenv(
-        "CORS_ORIGINS",
-        "https://web.telegram.org,http://localhost:3000,http://localhost:8080,http://127.0.0.1:8080",
-    ).split(",")
-    if o.strip()
-]
+CARD_PHOTOS_DIR = os.getenv("CARD_PHOTOS_DIR", "/app/data/card_photos")
+STATIC_DIR = os.getenv("WEBAPP_STATIC", os.path.join(os.path.dirname(__file__), "webapp"))
+INIT_DATA_MAX_AGE = int(os.getenv("INIT_DATA_MAX_AGE", "86400"))  # 24h
 
-SUPERADMIN_IDS = {
-    int(x.strip())
-    for x in (os.getenv("SUPERADMIN_IDS") or os.getenv("SUPERADMIN_ID") or "").split(",")
-    if x.strip().isdigit()
+# ── rarities (синхрон с game_config / bot) ──────────────────────────────────
+DEFAULT_RARITIES: dict[str, dict] = {
+    "common": {"name": "Обычная", "icon": "⬜", "weight": 50, "reward": 5},
+    "uncommon": {"name": "Необычная", "icon": "🟩", "weight": 25, "reward": 12},
+    "valuable": {"name": "Ценная", "icon": "🟪", "weight": 12, "reward": 25},
+    "super_valuable": {"name": "Сверхценная", "icon": "🟧", "weight": 7, "reward": 50},
+    "legendary": {"name": "Легендарная", "icon": "🟨", "weight": 4, "reward": 100},
+    "negative": {"name": "Негативная", "icon": "💀", "weight": 2, "reward": -20},
 }
 
-try:
-    from game_config import DEFAULT_RARITIES, API_COOLDOWN_SECONDS
-    RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
-    COOLDOWN_SECONDS = API_COOLDOWN_SECONDS
-except ImportError:
-    RARITIES = {
-        "common":         {"icon": "⚪", "name": "Обычная",     "reward": 10,  "weight": 40},
-        "rare":           {"icon": "🔵", "name": "Редкая",      "reward": 25,  "weight": 25},
-        "uncommon":       {"icon": "🟢", "name": "Необычная",   "reward": 45,  "weight": 15},
-        "valuable":       {"icon": "🟣", "name": "Ценная",      "reward": 75,  "weight": 10},
-        "super_valuable": {"icon": "🟠", "name": "Сверхценная", "reward": 120, "weight": 7},
-        "legendary":      {"icon": "🟡", "name": "Легендарная", "reward": 200, "weight": 3},
-    }
-    COOLDOWN_SECONDS = 4 * 3600
+RARITY_ORDER = list(DEFAULT_RARITIES.keys())
+STREAK_EXPIRE_SECONDS = 24 * 3600
 
-ROLES = {
-    "user":       {"icon": "👤", "name": "Пользователь"},
-    "admin":      {"icon": "🛡", "name": "Администратор"},
-    "superadmin": {"icon": "👑", "name": "Главный администратор"},
-    "banned":     {"icon": "🚫", "name": "Заблокирован"},
-}
 
-app = FastAPI(title="Мряу Mini App API", version="2.1")
+# ── DB ──────────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def get_db():
+    db = await aiosqlite.connect(DB_NAME)
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA foreign_keys = ON;")
+    await db.execute("PRAGMA journal_mode = WAL;")
+    await db.execute("PRAGMA busy_timeout = 5000;")
+    try:
+        yield db
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def load_rarities_from_db() -> dict:
+    try:
+        async with get_db() as db:
+            cur = await db.execute(
+                "SELECT rarity_key, name, icon, weight, reward FROM rarities"
+            )
+            rows = await cur.fetchall()
+            if not rows:
+                return {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
+            out = {}
+            for r in rows:
+                out[r["rarity_key"]] = {
+                    "name": r["name"],
+                    "icon": r["icon"] or "•",
+                    "weight": r["weight"] or 1,
+                    "reward": r["reward"] or 0,
+                }
+            return out if out else {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
+    except Exception:
+        return {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
+
+
+# ── Telegram initData validation ────────────────────────────────────────────
+def _parse_init_data(init_data: str) -> dict[str, str]:
+    return dict(parse_qsl(init_data, keep_blank_values=True))
+
+
+def validate_init_data(init_data: str, bot_token: str) -> dict[str, Any]:
+    """Проверка подписи Telegram WebApp initData. Возвращает user dict."""
+    if not init_data or not bot_token:
+        raise HTTPException(status_code=401, detail="Missing initData or token")
+
+    parsed = _parse_init_data(init_data)
+    received_hash = parsed.pop("hash", None)
+    if not received_hash:
+        raise HTTPException(status_code=401, detail="No hash in initData")
+
+    # auth_date freshness
+    auth_date = int(parsed.get("auth_date", "0") or 0)
+    if auth_date and (time.time() - auth_date) > INIT_DATA_MAX_AGE:
+        raise HTTPException(status_code=401, detail="initData expired")
+
+    data_check = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+    secret_key = hmac.new(
+        b"WebAppData", bot_token.encode(), hashlib.sha256
+    ).digest()
+    calculated = hmac.new(
+        secret_key, data_check.encode(), hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(calculated, received_hash):
+        raise HTTPException(status_code=401, detail="Invalid initData signature")
+
+    user_raw = parsed.get("user")
+    if not user_raw:
+        raise HTTPException(status_code=401, detail="No user in initData")
+
+    try:
+        user = json.loads(unquote(user_raw) if "%" in user_raw else user_raw)
+    except json.JSONDecodeError:
+        try:
+            user = json.loads(user_raw)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=401, detail=f"Bad user JSON: {e}")
+
+    if not user.get("id"):
+        raise HTTPException(status_code=401, detail="No user id")
+    return user
+
+
+async def get_auth_user(authorization: Optional[str] = None, x_init_data: Optional[str] = None) -> dict:
+    """Из заголовка Authorization: tma <initData> или X-Telegram-Init-Data."""
+    init_data = None
+    if authorization and authorization.startswith("tma "):
+        init_data = authorization[4:].strip()
+    elif x_init_data:
+        init_data = x_init_data.strip()
+    if not init_data:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return validate_init_data(init_data, BOT_TOKEN)
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+def display_name(nickname: Optional[str], user_id: int, fallback: Optional[str] = None) -> str:
+    if nickname and str(nickname).strip():
+        return str(nickname).strip()
+    if fallback and str(fallback).strip():
+        return str(fallback).strip()[:32]
+    return str(user_id)
+
+
+def fmt_num(n: Any) -> str:
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    return f"{n:,}".replace(",", "\u00a0")
+
+
+async def effective_streak(db, user_id: int) -> int:
+    now_ts = int(time.time())
+    cur = await db.execute(
+        "SELECT streak, last_claim FROM users WHERE user_id = ?", (user_id,)
+    )
+    row = await cur.fetchone()
+    if not row:
+        return 0
+    streak = row["streak"] or 0
+    last_claim = row["last_claim"] or 0
+    if streak > 0 and last_claim > 0 and (now_ts - last_claim) >= STREAK_EXPIRE_SECONDS:
+        return 0
+    return streak
+
+
+async def ensure_user(db, user_id: int, username: Optional[str] = None, full_name: Optional[str] = None):
+    cur = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if await cur.fetchone():
+        return
+    now = int(time.time())
+    await db.execute(
+        "INSERT OR IGNORE INTO users (user_id, nickname, registration, streak, last_streak_date, role) "
+        "VALUES (?, NULL, ?, 0, 0, 'user')",
+        (user_id, now),
+    )
+
+
+def photo_url_for_card(card_id: int, photo_path: Optional[str], photo_uuid: Optional[str]) -> Optional[str]:
+    """URL локального фото карточки (если есть файл)."""
+    base = "/api/card-photo"
+    if photo_uuid:
+        for ext in (".webp", ".jpg", ".png", ".jpeg"):
+            p = os.path.join(CARD_PHOTOS_DIR, f"{photo_uuid}{ext}")
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
+                return f"{base}/{photo_uuid}{ext}"
+    if photo_path:
+        name = os.path.basename(photo_path)
+        p = os.path.join(CARD_PHOTOS_DIR, name) if not os.path.isabs(photo_path) else photo_path
+        if not os.path.isfile(p):
+            p = os.path.join(CARD_PHOTOS_DIR, name)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return f"{base}/{name}"
+    # legacy by id
+    for ext in (".webp", ".jpg"):
+        p = os.path.join(CARD_PHOTOS_DIR, f"{card_id}{ext}")
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return f"{base}/{card_id}{ext}"
+    return None
+
+
+# ── FastAPI app ─────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("API mini-app starting, DB=%s", DB_NAME)
+    yield
+
+
+app = FastAPI(title="Мряу Mini-App API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS + ["*"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-def validate_init_data(init_data: str) -> dict[str, Any]:
-    if not BOT_TOKEN:
-        raise HTTPException(500, "BOT_TOKEN не задан на сервере")
-    if not init_data or not init_data.strip():
-        raise HTTPException(401, "Нет initData")
-
-    parsed = dict(parse_qsl(init_data, keep_blank_values=True))
-    received_hash = parsed.pop("hash", None)
-    if not received_hash:
-        raise HTTPException(401, "Нет hash в initData")
-
-    data_check = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-    secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
-    calculated = hmac.new(secret_key, data_check.encode(), hashlib.sha256).hexdigest()
-
-    if not hmac.compare_digest(calculated, received_hash):
-        raise HTTPException(401, "Неверная подпись initData")
-
-    auth_date = int(parsed.get("auth_date", 0))
-    if auth_date and time.time() - auth_date > 86400:
-        raise HTTPException(401, "initData устарел")
-
-    user_raw = parsed.get("user")
-    if not user_raw:
-        raise HTTPException(401, "Нет user в initData")
-
-    try:
-        user = json.loads(user_raw)
-    except json.JSONDecodeError:
-        raise HTTPException(401, "Некорректный user JSON")
-
-    if not user.get("id"):
-        raise HTTPException(401, "Нет user.id")
-
-    return {"user": user, "raw": parsed}
+# Static mini-app
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=os.path.join(STATIC_DIR, "static")), name="static")
 
 
-def get_user_from_header(x_telegram_init_data: Optional[str]) -> dict:
-    if not x_telegram_init_data:
-        raise HTTPException(401, "Заголовок X-Telegram-Init-Data обязателен")
-    return validate_init_data(x_telegram_init_data)["user"]
+@app.get("/")
+async def index():
+    index_path = os.path.join(STATIC_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return JSONResponse({"ok": True, "service": "mryau-api"})
 
 
-def card_photo_url(card_id: int) -> str:
-    return f"/api/card/{int(card_id)}/photo"
-
-
-def _photo_search_dirs() -> list[Path]:
-    dirs: list[Path] = []
-    env_dir = os.getenv("CARDS_PHOTO_DIR") or os.getenv("CARD_PHOTOS_DIR")
-    if env_dir:
-        dirs.append(Path(env_dir))
-    try:
-        db_parent = Path(DB_NAME).expanduser().resolve().parent
-        dirs.append(db_parent / "card_photos")
-    except Exception:
-        pass
-    dirs.extend(
-        [
-            Path("/app/data/card_photos"),
-            Path("/app/card_photos"),
-            Path("card_photos"),
-            Path("./card_photos"),
-        ]
-    )
-    seen: set[str] = set()
-    out: list[Path] = []
-    for d in dirs:
-        try:
-            key = str(d.resolve()) if d.exists() else str(d)
-        except Exception:
-            key = str(d)
-        if key not in seen:
-            seen.add(key)
-            out.append(d)
-    return out
-
-
-def resolve_card_photo_file(card_id: int, photo_path: str | None = None) -> Path | None:
-    """Только по photo_path из БД — не по card_id (защита от перебора)."""
-    if photo_path:
-        pp = Path(str(photo_path))
-        if pp.is_file() and pp.stat().st_size > 0:
-            return pp
-        name = pp.name
-        if name:
-            for d in _photo_search_dirs():
-                cand = d / name
-                if cand.is_file() and cand.stat().st_size > 0:
-                    return cand
-    return None
-
-
-async def get_db():
-    db = await aiosqlite.connect(DB_NAME)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA foreign_keys = ON;")
-    return db
-
-
-async def ensure_user(db: aiosqlite.Connection, tg_user: dict) -> aiosqlite.Row:
-    user_id = tg_user["id"]
-    cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    row = await cur.fetchone()
-    if row:
-        return row
-
-    nickname = (tg_user.get("first_name") or "") + (
-        f" {tg_user['last_name']}" if tg_user.get("last_name") else ""
-    )
-    nickname = (nickname.strip() or tg_user.get("username") or str(user_id))[:32]
-    now = int(time.time())
-    role = "superadmin" if user_id in SUPERADMIN_IDS else "user"
-
-    if role != "superadmin" and SUPERADMIN_IDS:
-        cur = await db.execute(
-            "SELECT COUNT(*) FROM users WHERE role = 'superadmin'"
-        )
-        if (await cur.fetchone())[0] == 0 and user_id in SUPERADMIN_IDS:
-            role = "superadmin"
-
-    await db.execute(
-        "INSERT INTO users (user_id, nickname, registration, streak, last_streak_date, role) "
-        "VALUES (?, ?, ?, 0, 0, ?)",
-        (user_id, nickname, now, role),
-    )
-    await db.commit()
-    cur = await db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-    return await cur.fetchone()
-
-
-async def require_admin(db: aiosqlite.Connection, tg_user: dict) -> aiosqlite.Row:
-    user = await ensure_user(db, tg_user)
-    role = user["role"] or "user"
-    if role not in ("admin", "superadmin"):
-        raise HTTPException(403, "Недостаточно прав")
-    return user
-
-
-async def ensure_photo_columns(db: aiosqlite.Connection) -> None:
-    for col in ("photo_path", "photo_uuid"):
-        try:
-            await db.execute(f"ALTER TABLE cards ADD COLUMN {col} TEXT")
-            await db.commit()
-        except Exception:
-            pass
-
-
-def _day_key(ts: int) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-
-
-def _calc_streak(last_streak_date: int, current_streak: int, now: int) -> tuple[int, int]:
-    today = _day_key(now)
-    if not last_streak_date:
-        return 1, now
-    last_day = _day_key(int(last_streak_date))
-    if last_day == today:
-        return max(current_streak, 1), last_streak_date
-    yesterday_ts = now - 86400
-    if _day_key(yesterday_ts) == last_day:
-        return (current_streak or 0) + 1, now
-    return 1, now
-
-
-@app.get("/api/card/{card_id}/photo")
-async def api_card_photo(card_id: int):
-    db = await get_db()
-    try:
-        await ensure_photo_columns(db)
-        cur = await db.execute(
-            "SELECT photo_path FROM cards WHERE id = ?", (card_id,)
-        )
-        row = await cur.fetchone()
-        if not row:
-            raise HTTPException(404, "Карточка не найдена")
-        photo_path = row["photo_path"] if row["photo_path"] else None
-        path = resolve_card_photo_file(card_id, photo_path)
-        if not path:
-            raise HTTPException(404, "photo_not_found")
-        media = "image/jpeg"
-        suf = path.suffix.lower()
-        if suf == ".png":
-            media = "image/png"
-        elif suf == ".webp":
-            media = "image/webp"
-        elif suf == ".gif":
-            media = "image/gif"
-        return FileResponse(
-            path,
-            media_type=media,
-            filename=path.name,
-            headers={"Cache-Control": "public, max-age=86400"},
-        )
-    finally:
-        await db.close()
-
-
-@app.get("/health")
+@app.get("/api/health")
 async def health():
-    return {"ok": True, "ts": int(time.time()), "version": "2.1"}
+    return {"ok": True, "ts": int(time.time())}
 
 
+@app.get("/api/card-photo/{filename}")
+async def serve_card_photo(filename: str):
+    """Отдача локальных фото карточек (только имя файла, без path traversal)."""
+    safe = os.path.basename(filename)
+    if not safe or ".." in safe or "/" in safe or "\\" in safe:
+        raise HTTPException(404)
+    path = os.path.join(CARD_PHOTOS_DIR, safe)
+    if not os.path.isfile(path):
+        raise HTTPException(404)
+    media = "image/webp" if safe.endswith(".webp") else "image/jpeg"
+    return FileResponse(path, media_type=media)
+
+
+# ── Me / Profile ────────────────────────────────────────────────────────────
 @app.get("/api/me")
-async def api_me(x_telegram_init_data: Optional[str] = Header(None)):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    user_id = tg_user["id"]
-    db = await get_db()
-    try:
-        user = await ensure_user(db, tg_user)
-        if (user["role"] or "user") == "banned":
-            raise HTTPException(403, "Вы заблокированы")
+async def api_me(
+    authorization: Optional[str] = Header(None),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+):
+    tg_user = await get_auth_user(authorization, x_telegram_init_data)
+    user_id = int(tg_user["id"])
+    full_name = tg_user.get("first_name", "")
+    if tg_user.get("last_name"):
+        full_name = f"{full_name} {tg_user['last_name']}".strip()
+    username = tg_user.get("username")
+
+    async with get_db() as db:
+        await ensure_user(db, user_id, username, full_name)
         cur = await db.execute(
-            "SELECT COUNT(DISTINCT card_id) FROM inventory WHERE user_id = ?",
+            """
+            SELECT u.user_id, u.nickname, u.coins, u.streak, u.last_claim, u.registration, u.role,
+                   (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards_count
+            FROM users u WHERE u.user_id = ?
+            """,
             (user_id,),
         )
-        cards_count = (await cur.fetchone())[0]
+        row = await cur.fetchone()
         cur = await db.execute("SELECT COUNT(*) FROM cards")
-        total_cards = (await cur.fetchone())[0]
-        role = user["role"] or "user"
-        r = ROLES.get(role, ROLES["user"])
-        reg = user["registration"] or 0
-        last_claim = user["last_claim"] or 0
-        now = int(time.time())
-        remaining_cd = max(0, COOLDOWN_SECONDS - (now - last_claim)) if last_claim else 0
-        return {
-            "user_id": user_id,
-            "nickname": user["nickname"] or f"User{user_id}",
-            "username": tg_user.get("username"),
-            "photo_url": tg_user.get("photo_url"),
-            "role": role,
-            "role_display": f"{r['icon']} {r['name']}",
-            "coins": user["coins"] or 0,
-            "streak": user["streak"] or 0,
-            "cards_count": cards_count,
-            "total_cards": total_cards,
-            "registration": reg,
-            "registration_str": datetime.fromtimestamp(reg).strftime("%d.%m.%Y") if reg else "—",
-            "days_with_us": max(0, (now - reg) // 86400) if reg else 0,
-            "last_claim": last_claim,
-            "cooldown_remaining": remaining_cd,
-            "cooldown_seconds": COOLDOWN_SECONDS,
-            "can_claim_free": remaining_cd <= 0,
-            "is_admin": role in ("admin", "superadmin"),
-            "is_superadmin": role == "superadmin",
-        }
-    finally:
-        await db.close()
+        total_cards = (await cur.fetchone())[0] or 0
+
+    if not row:
+        raise HTTPException(404, "User not found")
+
+    streak = await _streak_value(row)
+    nick = display_name(row["nickname"], user_id, full_name)
+
+    return {
+        "user_id": user_id,
+        "nickname": nick,
+        "coins": row["coins"] or 0,
+        "streak": streak,
+        "cards_count": row["cards_count"] or 0,
+        "total_cards": total_cards,
+        "registration": row["registration"] or 0,
+        "role": row["role"] or "user",
+        "username": username,
+        "is_own": True,
+    }
 
 
+async def _streak_value(row) -> int:
+    now_ts = int(time.time())
+    streak = row["streak"] or 0
+    last_claim = row["last_claim"] or 0
+    if streak > 0 and last_claim > 0 and (now_ts - last_claim) >= STREAK_EXPIRE_SECONDS:
+        return 0
+    return streak
+
+
+@app.get("/api/profile/{target_id}")
+async def api_profile(
+    target_id: int,
+    authorization: Optional[str] = Header(None),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+):
+    """Публичный профиль другого игрока (без списка карточек)."""
+    tg_user = await get_auth_user(authorization, x_telegram_init_data)
+    viewer_id = int(tg_user["id"])
+
+    async with get_db() as db:
+        cur = await db.execute(
+            """
+            SELECT u.user_id, u.nickname, u.coins, u.streak, u.last_claim, u.registration, u.role,
+                   (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS cards_count
+            FROM users u WHERE u.user_id = ? AND u.role != 'banned'
+            """,
+            (target_id,),
+        )
+        row = await cur.fetchone()
+        cur = await db.execute("SELECT COUNT(*) FROM cards")
+        total_cards = (await cur.fetchone())[0] or 0
+
+    if not row:
+        raise HTTPException(404, "Игрок не найден")
+
+    streak = await _streak_value(row)
+    nick = display_name(row["nickname"], target_id)
+
+    return {
+        "user_id": target_id,
+        "nickname": nick,
+        "coins": row["coins"] or 0,
+        "streak": streak,
+        "cards_count": row["cards_count"] or 0,
+        "total_cards": total_cards,
+        "registration": row["registration"] or 0,
+        "role": row["role"] or "user",
+        "is_own": target_id == viewer_id,
+        # карточки чужого пользователя не отдаём
+        "cards_hidden": target_id != viewer_id,
+    }
+
+
+# ── Collection ──────────────────────────────────────────────────────────────
 @app.get("/api/collection")
 async def api_collection(
     rarity: Optional[str] = Query(None),
-    x_telegram_init_data: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
 ):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    user_id = tg_user["id"]
-    db = await get_db()
-    try:
-        await ensure_user(db, tg_user)
-        await ensure_photo_columns(db)
+    """Список карточек текущего пользователя. rarity=all|common|..."""
+    tg_user = await get_auth_user(authorization, x_telegram_init_data)
+    user_id = int(tg_user["id"])
+    rarities = await load_rarities_from_db()
+
+    async with get_db() as db:
+        await ensure_user(db, user_id)
+        # stats by rarity
         cur = await db.execute(
-            """SELECT c.rarity, COUNT(DISTINCT i.card_id) AS cnt
-               FROM inventory i JOIN cards c ON i.card_id = c.id
-               WHERE i.user_id = ? GROUP BY c.rarity""",
+            """
+            SELECT c.rarity, COUNT(*) AS cnt
+            FROM inventory i JOIN cards c ON i.card_id = c.id
+            WHERE i.user_id = ?
+            GROUP BY c.rarity
+            """,
             (user_id,),
         )
-        stats = {row["rarity"]: row["cnt"] for row in await cur.fetchall()}
+        stats = {r["rarity"]: r["cnt"] for r in await cur.fetchall()}
+
         cur = await db.execute("SELECT COUNT(*) FROM cards")
-        total_in_game = (await cur.fetchone())[0]
+        total_in_game = (await cur.fetchone())[0] or 0
+
+        # totals per rarity in game
         cur = await db.execute(
-            "SELECT COUNT(DISTINCT card_id) FROM inventory WHERE user_id = ?",
-            (user_id,),
+            "SELECT rarity, COUNT(*) AS cnt FROM cards GROUP BY rarity"
         )
-        owned_unique = (await cur.fetchone())[0]
+        rarity_totals = {r["rarity"]: r["cnt"] for r in await cur.fetchall()}
+
         sql = """
-            SELECT c.id, c.name, c.rarity, c.photo_id, c.photo_path, i.claim_time
+            SELECT c.id, c.name, c.rarity, c.photo_id, c.photo_path, c.photo_uuid, i.claim_time
             FROM inventory i JOIN cards c ON i.card_id = c.id
             WHERE i.user_id = ?
         """
-        params: list = [user_id]
-        if rarity and rarity in RARITIES:
+        params: list[Any] = [user_id]
+        if rarity and rarity != "all" and rarity in rarities:
             sql += " AND c.rarity = ?"
             params.append(rarity)
         sql += " ORDER BY i.claim_time DESC"
+
         cur = await db.execute(sql, params)
         rows = await cur.fetchall()
-        cards = []
-        for row in rows:
-            r = RARITIES.get(row["rarity"], {})
-            cid = row["id"]
-            pp = row["photo_path"] if "photo_path" in row.keys() else None
-            has_photo = resolve_card_photo_file(cid, pp) is not None
-            cards.append({
-                "id": cid,
-                "name": row["name"],
-                "rarity": row["rarity"],
-                "rarity_icon": r.get("icon", ""),
-                "rarity_name": r.get("name", row["rarity"]),
-                "reward": r.get("reward", 0),
-                "photo_id": row["photo_id"],
-                "photo_url": card_photo_url(cid),
-                "has_photo": has_photo,
-                "claim_time": row["claim_time"],
-            })
-        rarity_totals = {}
-        for rk in RARITIES:
-            cur = await db.execute("SELECT COUNT(*) FROM cards WHERE rarity = ?", (rk,))
-            rarity_totals[rk] = (await cur.fetchone())[0]
-        return {
-            "owned_unique": owned_unique,
-            "total_in_game": total_in_game,
-            "stats": stats,
-            "rarity_totals": rarity_totals,
-            "cards": cards,
-        }
-    finally:
-        await db.close()
+
+    cards = []
+    for r in rows:
+        rkey = r["rarity"] or "common"
+        info = rarities.get(rkey, DEFAULT_RARITIES.get(rkey, {}))
+        cards.append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "rarity": rkey,
+                "rarity_name": info.get("name", rkey),
+                "rarity_icon": info.get("icon", "•"),
+                "reward": info.get("reward", 0),
+                "claim_time": r["claim_time"] or 0,
+                "photo_url": photo_url_for_card(r["id"], r["photo_path"], r["photo_uuid"]),
+            }
+        )
+
+    categories = []
+    for key in RARITY_ORDER:
+        if key not in rarities:
+            continue
+        info = rarities[key]
+        owned = stats.get(key, 0)
+        total_r = rarity_totals.get(key, 0)
+        if owned > 0 or total_r > 0:
+            categories.append(
+                {
+                    "key": key,
+                    "name": info.get("name", key),
+                    "icon": info.get("icon", "•"),
+                    "owned": owned,
+                    "total": total_r,
+                }
+            )
+
+    return {
+        "cards": cards,
+        "total_owned": sum(stats.values()),
+        "total_in_game": total_in_game,
+        "categories": categories,
+        "filter": rarity or "all",
+    }
 
 
+# ── Top ─────────────────────────────────────────────────────────────────────
 @app.get("/api/top")
 async def api_top(
-    kind: str = Query("coins"),
-    x_telegram_init_data: Optional[str] = Header(None),
+    kind: str = Query("coins", pattern="^(coins|cards|streak)$"),
+    limit: int = Query(20, ge=1, le=50),
+    authorization: Optional[str] = Header(None),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
 ):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    user_id = tg_user["id"]
-    limit = 10
-    if kind not in ("coins", "cards", "streak"):
-        kind = "coins"
-    db = await get_db()
-    try:
-        await ensure_user(db, tg_user)
+    tg_user = await get_auth_user(authorization, x_telegram_init_data)
+    current_user_id = int(tg_user["id"])
+    now_ts = int(time.time())
+
+    async with get_db() as db:
         if kind == "cards":
             cur = await db.execute(
-                """SELECT u.user_id, u.nickname,
-                          COALESCE(COUNT(DISTINCT i.card_id), 0) AS value
-                   FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
-                   WHERE u.role != 'banned'
-                   GROUP BY u.user_id ORDER BY value DESC, u.user_id ASC LIMIT ?""",
+                """
+                SELECT u.user_id, u.nickname,
+                       (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS value
+                FROM users u
+                WHERE u.role != 'banned'
+                ORDER BY value DESC, u.user_id ASC LIMIT ?
+                """,
                 (limit,),
             )
             top = await cur.fetchall()
             cur = await db.execute(
-                "SELECT COALESCE(COUNT(DISTINCT card_id), 0) FROM inventory WHERE user_id = ?",
-                (user_id,),
+                "SELECT COUNT(*) AS value FROM inventory WHERE user_id = ?",
+                (current_user_id,),
             )
-            my_value = (await cur.fetchone())[0]
+            my_value = (await cur.fetchone())["value"] or 0
             cur = await db.execute(
-                """SELECT COUNT(*) + 1 FROM (
-                     SELECT u.user_id, COALESCE(COUNT(DISTINCT i.card_id), 0) AS value
-                     FROM users u LEFT JOIN inventory i ON u.user_id = i.user_id
-                     WHERE u.role != 'banned' GROUP BY u.user_id
-                   ) WHERE value > ?""",
+                """
+                SELECT COUNT(*) + 1 FROM (
+                    SELECT u.user_id,
+                           (SELECT COUNT(*) FROM inventory i WHERE i.user_id = u.user_id) AS value
+                    FROM users u WHERE u.role != 'banned'
+                ) WHERE value > ?
+                """,
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
-            unit, title = "🃏", "🃏 Топ по карточкам"
+
         elif kind == "streak":
+            effective = (
+                "CASE WHEN last_claim > 0 AND (? - last_claim) >= ? "
+                "THEN 0 ELSE COALESCE(streak, 0) END"
+            )
             cur = await db.execute(
-                """SELECT user_id, nickname, streak AS value FROM users
-                   WHERE role != 'banned' ORDER BY value DESC, user_id ASC LIMIT ?""",
-                (limit,),
+                f"SELECT user_id, nickname, ({effective}) AS value FROM users "
+                f"WHERE role != 'banned' ORDER BY value DESC, user_id ASC LIMIT ?",
+                (now_ts, STREAK_EXPIRE_SECONDS, limit),
             )
             top = await cur.fetchall()
-            cur = await db.execute("SELECT streak FROM users WHERE user_id = ?", (user_id,))
-            row = await cur.fetchone()
-            my_value = (row["streak"] or 0) if row else 0
             cur = await db.execute(
-                "SELECT COUNT(*) + 1 FROM users WHERE streak > ? AND role != 'banned'",
-                (my_value,),
+                f"SELECT ({effective}) AS value FROM users WHERE user_id = ?",
+                (now_ts, STREAK_EXPIRE_SECONDS, current_user_id),
+            )
+            my_row = await cur.fetchone()
+            my_value = (my_row["value"] or 0) if my_row else 0
+            cur = await db.execute(
+                f"SELECT COUNT(*) + 1 FROM users WHERE ({effective}) > ? AND role != 'banned'",
+                (now_ts, STREAK_EXPIRE_SECONDS, my_value),
             )
             my_rank = (await cur.fetchone())[0]
-            unit, title = "🔥", "🔥 Топ по стрику"
-        else:
+
+        else:  # coins
             cur = await db.execute(
-                """SELECT user_id, nickname, coins AS value FROM users
-                   WHERE role != 'banned' ORDER BY value DESC, user_id ASC LIMIT ?""",
+                "SELECT user_id, nickname, coins AS value FROM users "
+                "WHERE role != 'banned' ORDER BY value DESC, user_id ASC LIMIT ?",
                 (limit,),
             )
             top = await cur.fetchall()
-            cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-            row = await cur.fetchone()
-            my_value = (row["coins"] or 0) if row else 0
+            cur = await db.execute(
+                "SELECT coins AS value FROM users WHERE user_id = ?", (current_user_id,)
+            )
+            my_row = await cur.fetchone()
+            my_value = my_row["value"] if my_row else 0
             cur = await db.execute(
                 "SELECT COUNT(*) + 1 FROM users WHERE coins > ? AND role != 'banned'",
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
-            unit, title = "🪙", "🪙 Топ по монетам"
-        items = [
+
+        cur = await db.execute(
+            "SELECT nickname FROM users WHERE user_id = ?", (current_user_id,)
+        )
+        my_row2 = await cur.fetchone()
+        my_nick = display_name(
+            my_row2["nickname"] if my_row2 else None, current_user_id
+        )
+
+    unit_map = {"coins": "🪙", "cards": "🃏", "streak": "🔥"}
+    title_map = {
+        "coins": "Топ по монетам",
+        "cards": "Топ по карточкам",
+        "streak": "Топ по стрику",
+    }
+
+    items = []
+    for i, row in enumerate(top, 1):
+        items.append(
             {
                 "rank": i,
                 "user_id": row["user_id"],
-                "nickname": row["nickname"] or f"User{row['user_id']}",
+                "nickname": display_name(row["nickname"], row["user_id"]),
                 "value": row["value"] or 0,
+                "is_me": row["user_id"] == current_user_id,
             }
-            for i, row in enumerate(top, 1)
-        ]
-        return {"kind": kind, "title": title, "unit": unit, "items": items, "me": {"rank": my_rank, "value": my_value}}
-    finally:
-        await db.close()
-
-
-@app.post("/api/claim")
-async def api_claim(x_telegram_init_data: Optional[str] = Header(None)):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    user_id = tg_user["id"]
-    now = int(time.time())
-    db = await get_db()
-    try:
-        user = await ensure_user(db, tg_user)
-        if (user["role"] or "user") == "banned":
-            raise HTTPException(403, "Вы заблокированы")
-        last_claim = user["last_claim"] or 0
-        if last_claim and (now - last_claim) < COOLDOWN_SECONDS:
-            remaining = COOLDOWN_SECONDS - (now - last_claim)
-            raise HTTPException(429, detail={"error": "cooldown", "remaining": remaining, "cooldown_seconds": COOLDOWN_SECONDS})
-        cur = await db.execute("SELECT COUNT(*) FROM cards")
-        total_cards = (await cur.fetchone())[0]
-        if total_cards == 0:
-            raise HTTPException(400, "no_cards")
-        cur = await db.execute("SELECT COUNT(*) FROM inventory WHERE user_id = ?", (user_id,))
-        owned = (await cur.fetchone())[0]
-        if owned >= total_cards:
-            raise HTTPException(400, "all_collected")
-        rarities_list = list(RARITIES.keys())
-        weights = [RARITIES[r]["weight"] for r in rarities_list]
-        card = None
-        selected_rarity = None
-        for _ in range(12):
-            selected_rarity = random.choices(rarities_list, weights=weights, k=1)[0]
-            cur = await db.execute(
-                """SELECT id, name, photo_id, photo_path, rarity FROM cards
-                   WHERE rarity = ? AND id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
-                   ORDER BY RANDOM() LIMIT 1""",
-                (selected_rarity, user_id),
-            )
-            card = await cur.fetchone()
-            if card:
-                break
-        if not card:
-            cur = await db.execute(
-                """SELECT id, name, photo_id, photo_path, rarity FROM cards
-                   WHERE id NOT IN (SELECT card_id FROM inventory WHERE user_id = ?)
-                   ORDER BY RANDOM() LIMIT 1""",
-                (user_id,),
-            )
-            card = await cur.fetchone()
-            if card:
-                selected_rarity = card["rarity"]
-        if not card:
-            raise HTTPException(400, "all_collected")
-        reward = RARITIES.get(selected_rarity, RARITIES["common"])["reward"]
-        new_streak, new_last = _calc_streak(user["last_streak_date"] or 0, user["streak"] or 0, now)
-        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-        old_bal = ((await cur.fetchone()) or {"coins": 0})["coins"] or 0
-        new_bal = max(0, old_bal + int(reward))
-        actual = new_bal - old_bal
-        await db.execute(
-            """UPDATE users SET last_claim = ?, coins = ?, streak = ?, last_streak_date = ?
-               WHERE user_id = ?""",
-            (now, new_bal, new_streak, new_last, user_id),
         )
-        reward = actual
-        await db.execute(
-            """INSERT INTO inventory (user_id, card_id, claim_time) VALUES (?, ?, ?)
-               ON CONFLICT(user_id, card_id) DO UPDATE SET claim_time = ?""",
-            (user_id, card["id"], now, now),
-        )
-        await db.commit()
-        cur = await db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,))
-        balance = (await cur.fetchone())["coins"]
-        r = RARITIES.get(selected_rarity, {})
-        return {
-            "ok": True,
-            "card": {
-                "id": card["id"],
-                "name": card["name"],
-                "rarity": selected_rarity,
-                "rarity_icon": r.get("icon", ""),
-                "rarity_name": r.get("name", selected_rarity),
-                "reward": reward,
-                "photo_url": card_photo_url(card["id"]),
-            },
-            "coins_earned": reward,
-            "balance": balance,
-            "streak": new_streak,
-            "cooldown_seconds": COOLDOWN_SECONDS,
-            "next_claim_at": now + COOLDOWN_SECONDS,
-        }
-    finally:
-        await db.close()
 
-
-@app.get("/api/card/{card_id}")
-async def api_card_one(card_id: int, x_telegram_init_data: Optional[str] = Header(None)):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        await ensure_user(db, tg_user)
-        cur = await db.execute(
-            "SELECT id, name, rarity, photo_id, photo_path FROM cards WHERE id = ?",
-            (card_id,),
-        )
-        row = await cur.fetchone()
-        if not row:
-            raise HTTPException(404, "Карточка не найдена")
-        r = RARITIES.get(row["rarity"], {})
-        pp = row["photo_path"] if "photo_path" in row.keys() else None
-        return {
-            "id": row["id"],
-            "name": row["name"],
-            "rarity": row["rarity"],
-            "rarity_icon": r.get("icon", ""),
-            "rarity_name": r.get("name", row["rarity"]),
-            "reward": r.get("reward", 0),
-            "photo_url": card_photo_url(row["id"]),
-            "has_photo": resolve_card_photo_file(row["id"], pp) is not None,
-        }
-    finally:
-        await db.close()
-
-
-@app.get("/api/admin/overview")
-async def api_admin_overview(x_telegram_init_data: Optional[str] = Header(None)):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        await require_admin(db, tg_user)
-        cur = await db.execute("SELECT COUNT(*) FROM users")
-        users = (await cur.fetchone())[0]
-        cur = await db.execute("SELECT COUNT(*) FROM cards")
-        cards = (await cur.fetchone())[0]
-        cur = await db.execute("SELECT COUNT(*) FROM inventory")
-        inv = (await cur.fetchone())[0]
-        cur = await db.execute("SELECT rarity, COUNT(*) FROM cards GROUP BY rarity")
-        by_r = {row[0]: row[1] for row in await cur.fetchall()}
-        return {"users": users, "cards": cards, "inventory_rows": inv, "by_rarity": by_r}
-    finally:
-        await db.close()
-
-
-class CardCreateBody(BaseModel):
-    name: str = Field(..., min_length=1, max_length=64)
-    rarity: str
-
-
-@app.get("/api/admin/cards")
-async def api_admin_cards(
-    page: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
-    rarity: Optional[str] = Query(None),
-    x_telegram_init_data: Optional[str] = Header(None),
-):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        await require_admin(db, tg_user)
-        where, params = "", []
-        if rarity and rarity in RARITIES:
-            where = "WHERE rarity = ?"
-            params.append(rarity)
-        cur = await db.execute(f"SELECT COUNT(*) FROM cards {where}", params)
-        total = (await cur.fetchone())[0]
-        params.extend([limit, page * limit])
-        cur = await db.execute(
-            f"SELECT id, name, rarity, photo_path FROM cards {where} ORDER BY id DESC LIMIT ? OFFSET ?",
-            params,
-        )
-        rows = await cur.fetchall()
-        return {
-            "total": total,
-            "page": page,
-            "limit": limit,
-            "cards": [
-                {"id": r["id"], "name": r["name"], "rarity": r["rarity"], "photo_url": card_photo_url(r["id"])}
-                for r in rows
-            ],
-        }
-    finally:
-        await db.close()
-
-
-@app.post("/api/admin/cards")
-async def api_admin_create_card(body: CardCreateBody, x_telegram_init_data: Optional[str] = Header(None)):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    if body.rarity not in RARITIES:
-        raise HTTPException(400, "Неизвестная редкость")
-    db = await get_db()
-    try:
-        await require_admin(db, tg_user)
-        cur = await db.execute(
-            "INSERT INTO cards (name, rarity) VALUES (?, ?)",
-            (body.name.strip()[:64], body.rarity),
-        )
-        await db.commit()
-        return {"ok": True, "id": cur.lastrowid}
-    finally:
-        await db.close()
-
-
-class CardPatchBody(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=64)
-    rarity: Optional[str] = None
-
-
-@app.patch("/api/admin/cards/{card_id}")
-async def api_admin_patch_card(
-    card_id: int, body: CardPatchBody, x_telegram_init_data: Optional[str] = Header(None)
-):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        await require_admin(db, tg_user)
-        updates, params = [], []
-        if body.name is not None:
-            updates.append("name = ?")
-            params.append(body.name.strip()[:64])
-        if body.rarity is not None:
-            if body.rarity not in RARITIES:
-                raise HTTPException(400, "Неизвестная редкость")
-            updates.append("rarity = ?")
-            params.append(body.rarity)
-        if not updates:
-            raise HTTPException(400, "Нечего обновлять")
-        params.append(card_id)
-        await db.execute(f"UPDATE cards SET {', '.join(updates)} WHERE id = ?", params)
-        await db.commit()
-        return {"ok": True}
-    finally:
-        await db.close()
-
-
-@app.delete("/api/admin/cards/{card_id}")
-async def api_admin_delete_card(card_id: int, x_telegram_init_data: Optional[str] = Header(None)):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        await require_admin(db, tg_user)
-        await db.execute("DELETE FROM inventory WHERE card_id = ?", (card_id,))
-        await db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-        await db.commit()
-        return {"ok": True}
-    finally:
-        await db.close()
-
-
-@app.get("/api/admin/users")
-async def api_admin_users(
-    page: int = Query(0, ge=0),
-    limit: int = Query(20, ge=1, le=100),
-    role: Optional[str] = Query(None),
-    x_telegram_init_data: Optional[str] = Header(None),
-):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        await require_admin(db, tg_user)
-        where, params = "", []
-        if role and role in ROLES:
-            where = "WHERE role = ?"
-            params.append(role)
-        cur = await db.execute(f"SELECT COUNT(*) FROM users {where}", params)
-        total = (await cur.fetchone())[0]
-        params.extend([limit, page * limit])
-        cur = await db.execute(
-            f"""SELECT user_id, nickname, role, coins, streak, registration, last_claim
-                FROM users {where} ORDER BY registration DESC LIMIT ? OFFSET ?""",
-            params,
-        )
-        rows = await cur.fetchall()
-        users = []
-        for row in rows:
-            r = ROLES.get(row["role"] or "user", ROLES["user"])
-            users.append({
-                "user_id": row["user_id"],
-                "nickname": row["nickname"] or f"User{row['user_id']}",
-                "role": row["role"] or "user",
-                "role_display": f"{r['icon']} {r['name']}",
-                "coins": row["coins"] or 0,
-                "streak": row["streak"] or 0,
-                "registration": row["registration"] or 0,
-                "last_claim": row["last_claim"] or 0,
-            })
-        return {"total": total, "page": page, "limit": limit, "users": users}
-    finally:
-        await db.close()
-
-
-class UserUpdateBody(BaseModel):
-    nickname: Optional[str] = Field(None, min_length=1, max_length=32)
-    role: Optional[str] = None
-    coins: Optional[int] = None
-    streak: Optional[int] = None
-    reset_cooldown: Optional[bool] = None
-
-
-@app.patch("/api/admin/users/{target_id}")
-async def api_admin_user_update(
-    target_id: int, body: UserUpdateBody, x_telegram_init_data: Optional[str] = Header(None)
-):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        admin = await require_admin(db, tg_user)
-        admin_role = admin["role"] or "user"
-        cur = await db.execute("SELECT user_id, role FROM users WHERE user_id = ?", (target_id,))
-        target = await cur.fetchone()
-        if not target:
-            raise HTTPException(404, "Пользователь не найден")
-        if body.role is not None:
-            if body.role not in ROLES:
-                raise HTTPException(400, "Неизвестная роль")
-            if admin_role != "superadmin":
-                raise HTTPException(403, "Только superadmin может менять роли")
-        updates, params = [], []
-        if body.nickname is not None:
-            updates.append("nickname = ?")
-            params.append(body.nickname.strip()[:32])
-        if body.role is not None:
-            updates.append("role = ?")
-            params.append(body.role)
-        if body.coins is not None:
-            if body.coins < 0:
-                raise HTTPException(400, "Монеты не могут быть отрицательными")
-            updates.append("coins = ?")
-            params.append(body.coins)
-        if body.streak is not None:
-            if body.streak < 0:
-                raise HTTPException(400, "Стрик не может быть отрицательным")
-            updates.append("streak = ?")
-            params.append(body.streak)
-        if body.reset_cooldown:
-            updates.append("last_claim = 0")
-        if not updates:
-            raise HTTPException(400, "Нечего обновлять")
-        params.append(target_id)
-        await db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?", params)
-        await db.commit()
-        return {"ok": True, "user_id": target_id}
-    finally:
-        await db.close()
-
-
-class GiveCardBody(BaseModel):
-    card_id: int
-
-
-@app.post("/api/admin/users/{target_id}/give-card")
-async def api_admin_give_card(
-    target_id: int, body: GiveCardBody, x_telegram_init_data: Optional[str] = Header(None)
-):
-    tg_user = get_user_from_header(x_telegram_init_data)
-    db = await get_db()
-    try:
-        await require_admin(db, tg_user)
-        cur = await db.execute("SELECT id, name, rarity FROM cards WHERE id = ?", (body.card_id,))
-        card = await cur.fetchone()
-        if not card:
-            raise HTTPException(404, "Карточка не найдена")
-        cur = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (target_id,))
-        if not await cur.fetchone():
-            raise HTTPException(404, "Пользователь не найден")
-        now = int(time.time())
-        await db.execute(
-            """INSERT INTO inventory (user_id, card_id, claim_time) VALUES (?, ?, ?)
-               ON CONFLICT(user_id, card_id) DO UPDATE SET claim_time = ?""",
-            (target_id, body.card_id, now, now),
-        )
-        await db.commit()
-        r = RARITIES.get(card["rarity"], {})
-        return {
-            "ok": True,
-            "card": {
-                "id": card["id"],
-                "name": card["name"],
-                "rarity": card["rarity"],
-                "rarity_icon": r.get("icon", ""),
-            },
-        }
-    finally:
-        await db.close()
-
-
-@app.get("/api/help")
-async def api_help():
     return {
-        "title": "Помощь — Мряу",
-        "sections": [
-            {
-                "title": "🃏 Как получить карточку",
-                "text": "Напиши «мряу» боту или нажми «Получить» в мини-приложении.",
-            },
-            {
-                "title": "🔥 Стрик",
-                "text": "Получай карточку каждый день. Пропуск > 24 ч — сброс.",
-            },
-            {
-                "title": "🪙 Монеты",
-                "text": "Обычная +8 · Редкая +20 · Необычная +40 · Ценная +70 · Сверхценная +110 · Легендарная +200",
-            },
-            {
-                "title": "📊 Редкости",
-                "text": "⚪ Обычная · 🔵 Редкая · 🟢 Необычная · 🟣 Ценная · 🟠 Сверхценная · 🟡 Легендарная",
-            },
-        ],
+        "kind": kind,
+        "title": title_map.get(kind, "Топ"),
+        "unit": unit_map.get(kind, ""),
+        "items": items,
+        "my_rank": my_rank,
+        "my_value": my_value,
+        "my_nickname": my_nick,
     }
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=int(os.getenv("API_PORT", "8080")), reload=False)
+@app.get("/api/rarities")
+async def api_rarities():
+    rarities = await load_rarities_from_db()
+    return {
+        "rarities": [
+            {
+                "key": k,
+                "name": v.get("name", k),
+                "icon": v.get("icon", "•"),
+                "reward": v.get("reward", 0),
+            }
+            for k, v in rarities.items()
+        ]
+    }
