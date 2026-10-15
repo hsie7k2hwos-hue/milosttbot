@@ -1,13 +1,3 @@
-"""
-Единая точка входа «Мряу».
-
-Запускает: user-bot, admin-bot, опционально API.
-Проверяет токены, БД, таблицы, настройки.
-
-  python main.py
-
-Env: BOT_TOKEN, ADMIN_BOT_TOKEN, SUPERADMIN_IDS, DB_NAME, START_API, ...
-"""
 from __future__ import annotations
 
 import asyncio
