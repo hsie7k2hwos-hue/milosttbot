@@ -8,7 +8,7 @@ import re
 import time
 from typing import Any, Optional
 
-from config import ROLES, NICKNAME_RE if False else None  # placeholder
+from config import ROLES
 
 NICKNAME_RE = re.compile(r"^[\w\-. ]{2,32}$", re.UNICODE)
 URL_RE = re.compile(r"(https?://|t\.me/|@\w+)", re.IGNORECASE)
