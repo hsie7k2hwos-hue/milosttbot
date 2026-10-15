@@ -135,9 +135,11 @@ def _card_caption(card: dict, rarities: dict) -> str:
         title = "✨ <b>Новая карточка</b>"
         reward_str = f"+<b>{fmt_num(earned)}</b> → {fmt_num(card['balance'])}"
         coin_label = "Награда"
+    name_str = f"<b>{esc(card['name'])}</b>"
+    rarity_line = line(r.get("icon", "•"), "Редкость", r.get("name", card["rarity"]))
     return (
         f"{title}\n\n"
-        f"{bq(line('🃏', 'Название', f'<b>{esc(card[\"name\"])}</b>') + chr(10) + line(r.get('icon', '•'), 'Редкость', r.get('name', card['rarity'])))}\n\n"
+        f"{bq(line('🃏', 'Название', name_str) + chr(10) + rarity_line)}\n\n"
         f"{line('🪙', coin_label, reward_str)}"
     )
 
@@ -388,8 +390,10 @@ async def view_rarity(callback: CallbackQuery, callback_data: CollectionCB) -> N
     rw = int(info.get("reward", 0))
     reward_str = f"−{fmt_num(abs(rw))}" if rw < 0 else f"+{fmt_num(rw)}"
 
+    name_str = f"<b>{esc(card['name'])}</b>"
+    rarity_line = line(info.get("icon", "•"), "Редкость", info.get("name", callback_data.rarity))
     caption = (
-        f"{bq(line('🃏', 'Название', f'<b>{esc(card[\"name\"])}</b>') + chr(10) + line(info.get('icon', '•'), 'Редкость', info.get('name', callback_data.rarity)))}\n\n"
+        f"{bq(line('🃏', 'Название', name_str) + chr(10) + rarity_line)}\n\n"
         f"{line('🪙', 'Награда' if rw >= 0 else 'Штраф', reward_str)}"
     )
 
@@ -621,10 +625,12 @@ async def dice_handler(message: Message) -> None:
     else:
         title, delta_str = "· Ничья", "±0"
 
+    bal = result["balance"]
+    bal_str = f"<b>{fmt_num(bal)}</b> {plural(bal, 'монета', 'монеты', 'монет')}"
     text = (
         f"🎲 <b>{title}</b>\n\n"
         f"{bq(line('🎲', 'Выпало', f'<b>{value}</b>') + chr(10) + line('🪙', 'Итог', f'<b>{delta_str}</b>'))}\n\n"
-        f"{line('🪙', 'У вас', f'<b>{fmt_num(result[\"balance\"])}</b> {plural(result[\"balance\"], \"монета\", \"монеты\", \"монет\")}')}"
+        f"{line('🪙', 'У вас', bal_str)}"
     )
     try:
         await spin.reply(text)
