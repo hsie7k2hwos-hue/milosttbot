@@ -49,6 +49,14 @@ ADMIN_BOT_TOKEN = (
 # Токен, которым валидируем initData (user-бот)
 AUTH_BOT_TOKEN = BOT_TOKEN or ADMIN_BOT_TOKEN
 
+# Публичный URL API (если за reverse-proxy request.base_url неверный)
+PUBLIC_API_BASE = (os.getenv("PUBLIC_API_BASE") or os.getenv("API_BASE") or "").rstrip("/")
+
+AVATARS_DIR = Path(os.getenv("AVATARS_DIR", "/app/data/user_avatars"))
+DEFAULT_AVATAR_PATH = Path(
+    os.getenv("DEFAULT_AVATAR_PATH", "/app/data/card_photos/default_avatar.jpg")
+)
+
 CORS_ORIGINS = [
     o.strip()
     for o in (os.getenv("CORS_ORIGINS") or "*").split(",")
@@ -245,9 +253,61 @@ def rarity_info(key: str, rarities: dict) -> dict:
     }
 
 
+def public_base(request: Request) -> str:
+    if PUBLIC_API_BASE:
+        return PUBLIC_API_BASE
+    # X-Forwarded-* если есть
+    proto = request.headers.get("x-forwarded-proto")
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    if proto and host:
+        return f"{proto}://{host}".rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
 def card_photo_url(card_id: int, request: Request) -> str:
-    base = str(request.base_url).rstrip("/")
-    return f"{base}/api/cards/{card_id}/photo"
+    return f"{public_base(request)}/api/cards/{card_id}/photo"
+
+
+def avatar_url(user_id: int, request: Request) -> str:
+    return f"{public_base(request)}/api/users/{user_id}/avatar"
+
+
+def photo_file_exists(photo_path: Optional[str]) -> bool:
+    if not photo_path:
+        return False
+    try:
+        p = Path(photo_path)
+        return p.is_file() and p.stat().st_size > 200
+    except Exception:
+        return False
+
+
+def resolve_card_photo_path(photo_path: Optional[str], photo_uuid: Optional[str] = None) -> Optional[Path]:
+    """Найти файл фото на диске (path из БД или по uuid в стандартной папке)."""
+    if photo_path:
+        p = Path(photo_path)
+        if p.is_file() and p.stat().st_size > 200:
+            return p
+        # иногда path устарел, а файл переименован в .webp
+        for ext in (".webp", ".jpg", ".jpeg", ".png"):
+            alt = p.with_suffix(ext)
+            if alt.is_file() and alt.stat().st_size > 200:
+                return alt
+    if photo_uuid:
+        photo_dir = Path(os.getenv("CARD_PHOTOS_DIR", "/app/data/card_photos"))
+        for ext in (".webp", ".jpg", ".jpeg", ".png"):
+            cand = photo_dir / f"{photo_uuid}{ext}"
+            if cand.is_file() and cand.stat().st_size > 200:
+                return cand
+    return None
+
+
+def resolve_avatar_path(user_id: int) -> Optional[Path]:
+    p = AVATARS_DIR / f"{user_id}.jpg"
+    if p.is_file() and p.stat().st_size > 0:
+        return p
+    # из таблицы user_avatars
+    return None
 
 
 async def effective_streak(db, user_id: int) -> int:
@@ -321,7 +381,7 @@ async def api_cards(
         total = (await cur.fetchone())[0]
         offset = page * limit
         cur = await db.execute(
-            f"""SELECT id, name, rarity, photo_path, photo_id
+            f"""SELECT id, name, rarity, photo_path, photo_id, photo_uuid
                 FROM cards{wh}
                 ORDER BY id DESC LIMIT ? OFFSET ?""",
             params + [limit, offset],
@@ -344,6 +404,7 @@ async def api_cards(
     items = []
     for r in rows:
         ri = rarity_info(r["rarity"], rarities)
+        has = resolve_card_photo_path(r["photo_path"], r["photo_uuid"] if "photo_uuid" in r.keys() else None) is not None
         items.append(
             {
                 "id": r["id"],
@@ -353,8 +414,8 @@ async def api_cards(
                 "rarity_name": ri["name"],
                 "reward": ri["reward"],
                 "owners": owners.get(r["id"], 0),
-                "has_photo": bool(r["photo_path"] or r["photo_id"]),
-                "photo_url": card_photo_url(r["id"], request),
+                "has_photo": has,
+                "photo_url": card_photo_url(r["id"], request) if has else None,
             }
         )
     return {
@@ -371,7 +432,7 @@ async def api_card_one(card_id: int, request: Request):
     async with get_db() as db:
         rarities = await load_rarities(db)
         cur = await db.execute(
-            "SELECT id, name, rarity, photo_path, photo_id FROM cards WHERE id = ?",
+            "SELECT id, name, rarity, photo_path, photo_id, photo_uuid FROM cards WHERE id = ?",
             (card_id,),
         )
         row = await cur.fetchone()
@@ -382,6 +443,9 @@ async def api_card_one(card_id: int, request: Request):
         )
         owners = (await cur.fetchone())[0]
     ri = rarity_info(row["rarity"], rarities)
+    has = resolve_card_photo_path(
+        row["photo_path"], row["photo_uuid"] if "photo_uuid" in row.keys() else None
+    ) is not None
     return {
         "id": row["id"],
         "name": row["name"],
@@ -390,8 +454,8 @@ async def api_card_one(card_id: int, request: Request):
         "rarity_name": ri["name"],
         "reward": ri["reward"],
         "owners": owners,
-        "has_photo": bool(row["photo_path"] or row["photo_id"]),
-        "photo_url": card_photo_url(row["id"], request),
+        "has_photo": has,
+        "photo_url": card_photo_url(row["id"], request) if has else None,
     }
 
 
@@ -399,27 +463,40 @@ async def api_card_one(card_id: int, request: Request):
 async def api_card_photo(card_id: int):
     async with get_db() as db:
         cur = await db.execute(
-            "SELECT photo_path, photo_id FROM cards WHERE id = ?", (card_id,)
+            "SELECT photo_path, photo_id, photo_uuid FROM cards WHERE id = ?",
+            (card_id,),
         )
         row = await cur.fetchone()
     if not row:
         raise HTTPException(404, "Нет карточки")
 
-    path = row["photo_path"]
-    if path and Path(path).is_file() and Path(path).stat().st_size > 0:
-        media = "image/webp" if path.lower().endswith(".webp") else "image/jpeg"
-        return FileResponse(
-            path,
-            media_type=media,
-            headers={"Cache-Control": "public, max-age=86400"},
-        )
+    path = resolve_card_photo_path(
+        row["photo_path"],
+        row["photo_uuid"] if "photo_uuid" in row.keys() else None,
+    )
+    if path is None:
+        raise HTTPException(404, "Фото отсутствует")
 
-    # placeholder 1×1 dark pixel if no file (frontend shows rarity frame)
-    raise HTTPException(404, "Фото отсутствует")
+    suffix = path.suffix.lower()
+    media = {
+        ".webp": "image/webp",
+        ".png": "image/png",
+        ".gif": "image/gif",
+    }.get(suffix, "image/jpeg")
+    return FileResponse(
+        path,
+        media_type=media,
+        headers={
+            "Cache-Control": "public, max-age=604800, immutable",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @app.get("/api/top")
 async def api_top(
+    request: Request,
     kind: str = Query("coins", pattern="^(coins|cards|streak)$"),
     limit: int = Query(20, ge=1, le=50),
 ):
@@ -467,12 +544,16 @@ async def api_top(
 
     items = []
     for i, r in enumerate(rows, 1):
+        uid = r["user_id"]
+        has_av = (AVATARS_DIR / f"{uid}.jpg").is_file()
         items.append(
             {
                 "rank": i,
-                "user_id": r["user_id"],
-                "name": display_name(r["nickname"], r["user_id"]),
+                "user_id": uid,
+                "name": display_name(r["nickname"], uid),
                 "value": int(r["value"] or 0),
+                "avatar_url": avatar_url(uid, request) if has_av else None,
+                "has_avatar": has_av,
             }
         )
     return {"kind": kind, "items": items}
@@ -590,6 +671,8 @@ async def api_me(request: Request, tg: dict = Depends(get_telegram_user)):
         "registration": user["registration"] or 0,
         "rarities": rarity_breakdown,
         "photo_url": tg_user.get("photo_url"),
+        "has_avatar": (AVATARS_DIR / f"{user_id}.jpg").is_file(),
+        "avatar_url": avatar_url(user_id, request),
         "username": tg_user.get("username"),
     }
 
@@ -621,7 +704,7 @@ async def api_me_collection(
         offset = page * limit
         cur = await db.execute(
             f"""
-            SELECT c.id, c.name, c.rarity, c.photo_path, c.photo_id, i.claim_time
+            SELECT c.id, c.name, c.rarity, c.photo_path, c.photo_id, c.photo_uuid, i.claim_time
             FROM inventory i
             JOIN cards c ON c.id = i.card_id
             WHERE {wh}
@@ -635,6 +718,9 @@ async def api_me_collection(
     items = []
     for r in rows:
         ri = rarity_info(r["rarity"], rarities)
+        has = resolve_card_photo_path(
+            r["photo_path"], r["photo_uuid"] if "photo_uuid" in r.keys() else None
+        ) is not None
         items.append(
             {
                 "id": r["id"],
@@ -644,8 +730,8 @@ async def api_me_collection(
                 "rarity_name": ri["name"],
                 "reward": ri["reward"],
                 "claim_time": r["claim_time"] or 0,
-                "has_photo": bool(r["photo_path"] or r["photo_id"]),
-                "photo_url": card_photo_url(r["id"], request),
+                "has_photo": has,
+                "photo_url": card_photo_url(r["id"], request) if has else None,
             }
         )
     return {
@@ -655,6 +741,113 @@ async def api_me_collection(
         "pages": max(1, (total + limit - 1) // limit) if total else 0,
         "items": items,
     }
+
+
+@app.get("/api/me/activity")
+async def api_me_activity(
+    tg: dict = Depends(get_telegram_user),
+    range: str = Query("week", pattern="^(week|month|all)$"),
+):
+    """Получения карточек по дням: week (7), month (30), all (до 90 точек / по дням)."""
+    user_id = tg["user_id"]
+    now = int(time.time())
+    if range == "week":
+        days = 7
+        since = now - days * 86400
+    elif range == "month":
+        days = 30
+        since = now - days * 86400
+    else:
+        days = 90
+        since = 0
+
+    async with get_db() as db:
+        if since:
+            cur = await db.execute(
+                """
+                SELECT date(claim_time, 'unixepoch', 'localtime') AS d, COUNT(*) AS cnt
+                FROM inventory
+                WHERE user_id = ? AND claim_time >= ?
+                GROUP BY d
+                ORDER BY d
+                """,
+                (user_id, since),
+            )
+        else:
+            cur = await db.execute(
+                """
+                SELECT date(claim_time, 'unixepoch', 'localtime') AS d, COUNT(*) AS cnt
+                FROM inventory
+                WHERE user_id = ? AND claim_time > 0
+                GROUP BY d
+                ORDER BY d DESC
+                LIMIT 90
+                """,
+                (user_id,),
+            )
+        rows = await cur.fetchall()
+
+    by_day = {r["d"]: int(r["cnt"]) for r in rows if r["d"]}
+
+    # заполнить непрерывный ряд для week/month
+    from datetime import datetime, timedelta, timezone
+
+    points = []
+    if range in ("week", "month"):
+        today = datetime.now().date()
+        for i in range(days - 1, -1, -1):
+            d = today - timedelta(days=i)
+            key = d.isoformat()
+            points.append({"date": key, "count": by_day.get(key, 0)})
+    else:
+        # all: последние 90 дней с данными, от старых к новым
+        keys = sorted(by_day.keys())[-90:]
+        for key in keys:
+            points.append({"date": key, "count": by_day[key]})
+
+    total = sum(p["count"] for p in points)
+    return {"range": range, "total": total, "points": points}
+
+
+@app.get("/api/users/{user_id}/avatar")
+async def api_user_avatar(user_id: int):
+    path = AVATARS_DIR / f"{user_id}.jpg"
+    if path.is_file() and path.stat().st_size > 0:
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "Cross-Origin-Resource-Policy": "cross-origin",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    # fallback default
+    if DEFAULT_AVATAR_PATH.is_file():
+        return FileResponse(
+            DEFAULT_AVATAR_PATH,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "Cross-Origin-Resource-Policy": "cross-origin",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
+    # 1x1 transparent PNG
+    import base64
+
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 @app.get("/api/users/{user_id}")
@@ -696,6 +889,7 @@ async def api_user_public(user_id: int, request: Request):
         ri = rarity_info(key, rarities)
         rarity_breakdown.append({**ri, "owned": int(by_rarity.get(key, 0))})
 
+    has_av = (AVATARS_DIR / f"{user_id}.jpg").is_file()
     return {
         "user_id": user_id,
         "name": display_name(user["nickname"], user_id),
@@ -705,6 +899,77 @@ async def api_user_public(user_id: int, request: Request):
         "total_cards": total_cards,
         "rank_coins": rank_coins,
         "rarities": rarity_breakdown,
+        "has_avatar": has_av,
+        "avatar_url": avatar_url(user_id, request),
+    }
+
+
+@app.get("/api/users/{user_id}/collection")
+async def api_user_collection(
+    user_id: int,
+    request: Request,
+    rarity: Optional[str] = Query(None),
+    page: int = Query(0, ge=0),
+    limit: int = Query(24, ge=1, le=100),
+):
+    async with get_db() as db:
+        cur = await db.execute(
+            "SELECT role FROM users WHERE user_id = ?", (user_id,)
+        )
+        u = await cur.fetchone()
+        if not u or (u["role"] or "") == "banned":
+            raise HTTPException(404, "Пользователь не найден")
+        rarities = await load_rarities(db)
+        where = ["i.user_id = ?"]
+        params: list[Any] = [user_id]
+        if rarity and rarity != "all":
+            where.append("c.rarity = ?")
+            params.append(rarity)
+        wh = " AND ".join(where)
+        cur = await db.execute(
+            f"""SELECT COUNT(*) FROM inventory i
+                JOIN cards c ON c.id = i.card_id WHERE {wh}""",
+            params,
+        )
+        total = (await cur.fetchone())[0]
+        offset = page * limit
+        cur = await db.execute(
+            f"""
+            SELECT c.id, c.name, c.rarity, c.photo_path, c.photo_id, c.photo_uuid, i.claim_time
+            FROM inventory i JOIN cards c ON c.id = i.card_id
+            WHERE {wh}
+            ORDER BY i.claim_time DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        )
+        rows = await cur.fetchall()
+
+    items = []
+    for r in rows:
+        ri = rarity_info(r["rarity"], rarities)
+        has = resolve_card_photo_path(
+            r["photo_path"], r["photo_uuid"] if "photo_uuid" in r.keys() else None
+        ) is not None
+        items.append(
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "rarity": r["rarity"],
+                "rarity_icon": ri["icon"],
+                "rarity_name": ri["name"],
+                "reward": ri["reward"],
+                "claim_time": r["claim_time"] or 0,
+                "has_photo": has,
+                "photo_url": card_photo_url(r["id"], request) if has else None,
+            }
+        )
+    return {
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "pages": max(1, (total + limit - 1) // limit) if total else 0,
+        "items": items,
     }
 
 

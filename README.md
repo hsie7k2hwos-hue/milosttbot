@@ -26,6 +26,10 @@ WEBAPP_URL=https://your-miniapp.vercel.app
 
 # Публичный URL этого API (для /check в админ-боте)
 API_BASE=https://your-bothost-public-url
+PUBLIC_API_BASE=https://your-bothost-public-url
+
+# Кэш аватаров (как в admin_bot)
+AVATARS_DIR=/app/data/user_avatars
 ```
 
 3. Убедитесь, что в `requirements.txt` есть:
