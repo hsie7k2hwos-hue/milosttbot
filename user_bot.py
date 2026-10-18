@@ -105,6 +105,9 @@ GROUP_AUTODELETE_SECONDS = 30
 STREAK_EXPIRE_SECONDS = 24 * 3600
 EFFECT_PARTY = "5046509860389126442"
 
+NEW_CARD_EMOJIS = ["✨", "🪄", "👏", "🎉", "🎊", "🥳"]
+NEGATIVE_CARD_EMOJIS = ["☠️", "⚰️", "💀", "😵", "🪦", "🔫"]
+
 RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
 ROLES = _GC_ROLES
 if _GC_SUPERADMIN_IDS:
@@ -597,20 +600,11 @@ async def render_profile(
     coins = row["coins"] or 0
     streak = row["streak"] or 0
 
-    if is_own:
-        cards_line = f"🃏 Вы собрали <b>{fmt_num(cards_count)}</b> из {fmt_num(total_cards)} карточек"
-        coins_line = f"🪙 У вас <b>{fmt_num(coins)}</b> {plural(coins, 'монета', 'монеты', 'монет')}"
-        streak_line = f"🔥 Стрик · <b>{fmt_days(streak)}</b>"
-    else:
-        cards_line = f"🃏 Собрано <b>{fmt_num(cards_count)}</b> из {fmt_num(total_cards)} карточек"
-        coins_line = f"🪙 Монеты · <b>{fmt_num(coins)}</b>"
-        streak_line = f"🔥 Стрик · <b>{fmt_days(streak)}</b>"
-
     caption = (
         f"👤 <b>{esc(nickname)}</b>\n\n"
-        f"{cards_line}\n"
-        f"{coins_line}\n"
-        f"{streak_line}"
+        f"🃏 Карточки · {fmt_num(cards_count)} / {fmt_num(total_cards)}\n"
+        f"🪙 Монеты · {fmt_num(coins)}\n"
+        f"🔥 Стрик · {fmt_days(streak)}"
     )
     return await get_user_photo(bot, user_id), caption, get_profile_kb(user_id)
 
@@ -621,11 +615,9 @@ async def render_collection(
     fallback_name: Optional[str] = None,
 ):
     keyboard, total, total_in_game = await get_collection_main_keyboard(user_id)
-    nickname = await get_user_display(user_id, fallback_name)
     photo = await get_user_photo(bot, user_id)
     caption = (
-        f"🃏 <b>Карточки {esc(nickname)}</b>\n\n"
-        f"{bq(f'Собрано <b>{fmt_num(total)}</b> из {fmt_num(total_in_game)}')}"
+        f"🃏 <b>Мои карточки</b> ({fmt_num(total)} / {fmt_num(total_in_game)})"
     )
     return photo, caption, keyboard, total
 
@@ -790,17 +782,18 @@ def _card_caption(card: dict) -> str:
     name_str = f"<b>{esc(card['name'])}</b>"
     earned = int(card["coins_earned"])
     if earned < 0:
-        reward_str = f"<b>−{fmt_num(abs(earned))}</b> → {fmt_num(card['balance'])}"
-        title = "💀 <b>Негативная карточка</b>"
-        coin_label = "Штраф"
+        title_emoji = random.choice(NEGATIVE_CARD_EMOJIS)
+        title = f"{title_emoji} <b>Негативная карточка!</b>"
+        reward_str = f"−{fmt_num(abs(earned))} 🪙 · всего {fmt_num(card['balance'])} 🪙"
     else:
-        reward_str = f"+<b>{fmt_num(earned)}</b> → {fmt_num(card['balance'])}"
-        title = "✨ <b>Новая карточка</b>"
-        coin_label = "Награда"
+        title_emoji = random.choice(NEW_CARD_EMOJIS)
+        title = f"{title_emoji} <b>Новая карточка!</b>"
+        reward_str = f"+{fmt_num(earned)} 🪙 · всего {fmt_num(card['balance'])} 🪙"
     return (
         f"{title}\n\n"
-        f"{bq(line('🃏', 'Название', name_str) + chr(10) + line(r['icon'], 'Редкость', r['name']))}\n\n"
-        f"{line('🪙', coin_label, reward_str)}"
+        f"🃏 {name_str}\n"
+        f"{r.get('icon', '•')} {r.get('name', card['rarity'])}\n\n"
+        f"{reward_str}"
     )
 
 
@@ -1913,10 +1906,14 @@ async def process_rarity_view(
         info = RARITIES.get(rarity, {})
         name_str = f"<b>{esc(card['name'])}</b>"
         rw = int(info.get("reward", 0))
-        reward_str = f"−{fmt_num(abs(rw))}" if rw < 0 else f"+{fmt_num(rw)}"
+        if rw < 0:
+            reward_str = f"−{fmt_num(abs(rw))} 🪙"
+        else:
+            reward_str = f"+{fmt_num(rw)} 🪙"
         caption = (
-            f"{bq(line('🃏', 'Название', name_str) + chr(10) + line(info.get('icon', '•'), 'Редкость', info.get('name', rarity)))}\n\n"
-            f"{line('🪙', 'Награда' if rw >= 0 else 'Штраф', reward_str)}"
+            f"🃏 {name_str}\n"
+            f"{info.get('icon', '•')} {info.get('name', rarity)}\n\n"
+            f"{reward_str}"
         )
 
         nav = []
