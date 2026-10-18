@@ -107,6 +107,7 @@ EFFECT_PARTY = "5046509860389126442"
 
 NEW_CARD_EMOJIS = ["✨", "🪄", "👏", "🎉", "🎊", "🥳"]
 NEGATIVE_CARD_EMOJIS = ["☠️", "⚰️", "💀", "😵", "🪦", "🔫"]
+WAIT_EMOJIS = ["⏳", "⌛️", "⏰", "🕓", "🕙", "🕒"]
 
 RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
 ROLES = _GC_ROLES
@@ -602,9 +603,9 @@ async def render_profile(
 
     caption = (
         f"👤 <b>{esc(nickname)}</b>\n\n"
-        f"🃏 Карточки · {fmt_num(cards_count)} / {fmt_num(total_cards)}\n"
-        f"🪙 Монеты · {fmt_num(coins)}\n"
-        f"🔥 Стрик · {fmt_days(streak)}"
+        f"🃏 Карточки · <b>{fmt_num(cards_count)}</b> / {fmt_num(total_cards)}\n"
+        f"🪙 Монеты · <b>{fmt_num(coins)}</b>\n"
+        f"🔥 Стрик · <b>{fmt_days(streak)}</b>"
     )
     return await get_user_photo(bot, user_id), caption, get_profile_kb(user_id)
 
@@ -617,7 +618,7 @@ async def render_collection(
     keyboard, total, total_in_game = await get_collection_main_keyboard(user_id)
     photo = await get_user_photo(bot, user_id)
     caption = (
-        f"🃏 <b>Мои карточки</b> ({fmt_num(total)} / {fmt_num(total_in_game)})"
+        f"🃏 <b>Мои карточки</b> (<b>{fmt_num(total)}</b> / {fmt_num(total_in_game)})"
     )
     return photo, caption, keyboard, total
 
@@ -784,15 +785,16 @@ def _card_caption(card: dict) -> str:
     if earned < 0:
         title_emoji = random.choice(NEGATIVE_CARD_EMOJIS)
         title = f"{title_emoji} <b>Негативная карточка!</b>"
-        reward_str = f"−{fmt_num(abs(earned))} 🪙 · всего {fmt_num(card['balance'])} 🪙"
+        reward_str = f"−<b>{fmt_num(abs(earned))}</b> 🪙 · всего <b>{fmt_num(card['balance'])}</b> 🪙"
     else:
         title_emoji = random.choice(NEW_CARD_EMOJIS)
         title = f"{title_emoji} <b>Новая карточка!</b>"
-        reward_str = f"+{fmt_num(earned)} 🪙 · всего {fmt_num(card['balance'])} 🪙"
+        reward_str = f"+<b>{fmt_num(earned)}</b> 🪙 · всего <b>{fmt_num(card['balance'])}</b> 🪙"
+    rarity_line = f"💎{r.get('icon', '•')} {r.get('name', card['rarity'])}"
     return (
         f"{title}\n\n"
         f"🃏 {name_str}\n"
-        f"{r.get('icon', '•')} {r.get('name', card['rarity'])}\n\n"
+        f"{rarity_line}\n\n"
         f"{reward_str}"
     )
 
@@ -886,16 +888,13 @@ def _streak_message_text(streak: int, bonus: int, new_balance: int) -> str:
         return ""
     if streak == 1:
         return (
-            "🔥 <b>Стрик начат</b>\n\n"
-            f"{bq('Получайте карточку каждый день — серия будет расти, а вместе с ней и бонус.')}"
+            f"🔥 <b>Стрик · {fmt_days(streak)}</b>\n"
+            f"💡 Зайдите завтра, чтобы получить первый бонус"
         )
-    text = (
-        f"🔥 <b>Стрик</b>\n\n"
-        f"{bq(line('📅', 'Дней подряд', f'<b>{fmt_days(streak)}</b>'))}"
-    )
+    text = f"🔥 <b>Стрик · {fmt_days(streak)}</b>\n"
+    text += "💡 Заходите каждый день, чтобы получать бонусы"
     if bonus > 0:
-        text += f"\n\n{line('🪙', 'Бонус', f'<b>+{fmt_num(bonus)}</b> → {fmt_num(new_balance)}')}"
-    text += f"\n\n{line('💡', 'Подсказка', 'Не пропускайте день, чтобы не сбросить серию.')}"
+        text += f"\n\n+{fmt_num(bonus)} 🪙 · всего {fmt_num(new_balance)} 🪙"
     return text
 
 
@@ -975,7 +974,7 @@ async def check_not_banned(message: Message) -> bool:
         await reply_ephemeral(
             message,
             "🚫 <b>Доступ ограничен</b>\n\n"
-            f"{bq('Вы заблокированы. Обратитесь к администрации.')}",
+            "Вы заблокированы. Обратитесь к администрации.",
         )
         return False
     return True
@@ -1025,10 +1024,10 @@ async def cmd_start(message: Message) -> None:
             pass
 
         welcome = (
-            "👋 <b>Добро пожаловать</b>\n\n"
-            f"{bq('Собирайте коллекцию карточек, копите монеты и соревнуйтесь в топе.')}\n\n"
-            f"{line('🃏', 'Карточка', '«мряу» или кнопка ниже')}\n"
-            f"{line('⏱', 'Кулдаун', 'раз в 3 часа')}"
+            "👋 <b>Добро пожаловать!</b>\n\n"
+            "Собирайте коллекцию карточек, копите монеты и соревнуйтесь в топе.\n\n"
+            "🃏 Карточка · «мряу» или кнопка ниже\n"
+            "⏱ Кулдаун · раз в 3 часа"
         )
         await message.reply(welcome, reply_markup=get_main_km())
     except Exception as e:
@@ -1172,12 +1171,12 @@ async def cmd_miniapp(message: Message) -> None:
     if not app_kb:
         await message.reply(
             "📱 <b>Мини-приложение</b>\n\n"
-            f"{bq('Пока недоступно. Загляните позже.')}"
+            "Пока недоступно. Загляните позже."
         )
         return
     await message.reply(
         "📱 <b>Мини-приложение</b>\n\n"
-        f"{bq('Откройте прямо в Telegram — удобнее и быстрее.')}",
+        "Откройте прямо в Telegram — удобнее и быстрее.",
         reply_markup=app_kb,
     )
 
@@ -1219,10 +1218,8 @@ async def get_card_handler(message: Message) -> None:
             streak, bonus, new_balance, streak_updated = await check_and_update_streak(user_id)
             remaining = int(COOLDOWN_SECONDS - time_passed)
             time_str = fmt_remaining(remaining)
-            text = (
-                "⏳ <b>Подождите немного</b>\n\n"
-                f"{bq(f'Следующую карточку можно получить через <b>{time_str}</b>.')}"
-            )
+            wait_emoji = random.choice(WAIT_EMOJIS)
+            text = f"{wait_emoji} <b>Подождите {time_str}</b> для получения следующей карточки"
             await reply_ephemeral(message, text)
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
             return
@@ -1234,7 +1231,7 @@ async def get_card_handler(message: Message) -> None:
             await reply_ephemeral(
                 message,
                 "❌ <b>Карточек пока нет</b>\n\n"
-                f"{bq('Обратитесь к администрации — база ещё пуста.')}",
+                "Обратитесь к администрации — база ещё пуста.",
             )
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
             return
@@ -1243,7 +1240,7 @@ async def get_card_handler(message: Message) -> None:
             await reply_ephemeral(
                 message,
                 "🎉 <b>Коллекция полная</b>\n\n"
-                f"{bq('Вы собрали все карточки. Новые появятся позже.')}",
+                "Вы собрали все карточки. Новые появятся позже.",
             )
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
             return
@@ -1252,7 +1249,7 @@ async def get_card_handler(message: Message) -> None:
             await reply_ephemeral(
                 message,
                 "❌ <b>Что-то пошло не так</b>\n\n"
-                f"{bq('Попробуйте ещё раз чуть позже.')}",
+                "Попробуйте ещё раз чуть позже.",
             )
             return
 
@@ -1293,7 +1290,7 @@ async def get_card_handler(message: Message) -> None:
         await reply_ephemeral(
             message,
             "❌ <b>Что-то пошло не так</b>\n\n"
-            f"{bq('Попробуйте ещё раз чуть позже.')}",
+            "Попробуйте ещё раз чуть позже.",
         )
 
 
@@ -1311,8 +1308,8 @@ async def dice_handler(message: Message) -> None:
     if rate_limited(f"dice:{user_id}", limit=6, window=15):
         await reply_ephemeral(
             message,
-            "⏳ <b>Слишком часто</b>\n\n"
-            f"{bq('Подождите немного перед следующей попыткой.')}",
+            f"{random.choice(WAIT_EMOJIS)} <b>Слишком часто</b>\n\n"
+            "Подождите немного перед следующей попыткой.",
         )
         return
     if message.chat.type != "private":
@@ -1337,7 +1334,8 @@ async def dice_handler(message: Message) -> None:
                 await reply_ephemeral(
                     message,
                     "⚠️ <b>Недостаточно монет</b>\n\n"
-                    f"{bq(line('🪙', 'Нужно', f'<b>{fmt_num(DICE_MIN_BALANCE)}</b>') + chr(10) + line('🪙', 'У вас', f'<b>{fmt_num(balance)}</b>'))}",
+                    f"🪙 Нужно · <b>{fmt_num(DICE_MIN_BALANCE)}</b>\n"
+                    f"🪙 У вас · <b>{fmt_num(balance)}</b>",
                 )
                 return
 
@@ -1345,10 +1343,11 @@ async def dice_handler(message: Message) -> None:
             if last_dice > 0 and time_passed < DICE_COOLDOWN_SECONDS:
                 remaining = DICE_COOLDOWN_SECONDS - time_passed
                 time_str = fmt_remaining(remaining)
+                wait_emoji = random.choice(WAIT_EMOJIS)
                 await reply_ephemeral(
                     message,
-                    "⏳ <b>Кубик пока недоступен</b>\n\n"
-                    f"{bq(f'Следующий бросок через <b>{time_str}</b>.')}",
+                    f"{wait_emoji} <b>Кубик недоступен</b>\n\n"
+                    f"Следующий бросок через <b>{time_str}</b>.",
                 )
                 return
 
@@ -1383,13 +1382,13 @@ async def dice_handler(message: Message) -> None:
             title = "😔 Проигрыш"
         else:
             delta_str = "±0"
-            title = "· Ничья"
+            title = "Ничья"
 
-        coins_word = plural(new_balance, "монета", "монеты", "монет")
         result = (
             f"🎲 <b>{title}</b>\n\n"
-            f"{bq(line('🎲', 'Выпало', f'<b>{dice_value}</b>') + chr(10) + line('🪙', 'Итог', f'<b>{delta_str}</b>'))}\n\n"
-            f"{line('🪙', 'У вас', f'<b>{fmt_num(new_balance)}</b> {coins_word}')}"
+            f"🎲 Выпало · <b>{dice_value}</b>\n"
+            f"🪙 Итог · <b>{delta_str}</b>\n\n"
+            f"🪙 У вас · <b>{fmt_num(new_balance)}</b> {plural(new_balance, 'монета', 'монеты', 'монет')}"
         )
         try:
             await spin_msg.reply(result)
@@ -1400,7 +1399,7 @@ async def dice_handler(message: Message) -> None:
         await reply_ephemeral(
             message,
             "❌ <b>Ошибка</b>\n\n"
-            f"{bq('Попробуйте ещё раз чуть позже.')}",
+            "Попробуйте ещё раз чуть позже.",
         )
 
 
@@ -1515,7 +1514,8 @@ async def nickname_cmd(
         await state.update_data(pending_nick=None, pending_action="reset")
         await message.reply(
             "♻️ <b>Сбросить никнейм?</b>\n\n"
-            f"{bq(line('ℹ️', 'Результат', 'имя из Telegram') + chr(10) + line('🪙', 'Стоимость', 'бесплатно'))}",
+            "ℹ️ Результат · имя из Telegram\n"
+            "🪙 Стоимость · бесплатно",
             reply_markup=b.as_markup(),
         )
         return
@@ -1523,8 +1523,8 @@ async def nickname_cmd(
     if not arg:
         await message.reply(
             "✏️ <b>Смена никнейма</b>\n\n"
-            f"{bq(f'<code>/nick НовыйНик</code> · {NICKNAME_COST} 🪙')}\n\n"
-            f"{line('♻️', 'Сброс', '/nick reset · бесплатно')}"
+            f"<code>/nick НовыйНик</code> · {NICKNAME_COST} 🪙\n\n"
+            "♻️ Сброс · /nick reset · бесплатно"
         )
         return
 
@@ -1532,7 +1532,7 @@ async def nickname_cmd(
     if not new_nick:
         await message.reply(
             "❌ <b>Неверный никнейм</b>\n\n"
-            f"{bq('2–32 символа, без ссылок и @.')}"
+            "2–32 символа, без ссылок и @."
         )
         return
 
@@ -1541,7 +1541,8 @@ async def nickname_cmd(
     if balance < NICKNAME_COST:
         await message.reply(
             "⚠️ <b>Недостаточно монет</b>\n\n"
-            f"{bq(line('🪙', 'Нужно', f'<b>{fmt_num(NICKNAME_COST)}</b>') + chr(10) + line('🪙', 'У вас', f'<b>{fmt_num(balance)}</b>'))}"
+            f"🪙 Нужно · <b>{fmt_num(NICKNAME_COST)}</b>\n"
+            f"🪙 У вас · <b>{fmt_num(balance)}</b>"
         )
         return
 
@@ -1553,8 +1554,9 @@ async def nickname_cmd(
     await state.update_data(pending_nick=new_nick, pending_action="apply")
     await message.reply(
         "✏️ <b>Сменить никнейм?</b>\n\n"
-        f"{bq(line('👤', 'Новый ник', f'<b>{esc(new_nick)}</b>') + chr(10) + line('🪙', 'Стоимость', f'<b>{NICKNAME_COST}</b>'))}\n\n"
-        f"{line('🪙', 'У вас', fmt_num(balance))}",
+        f"👤 Новый ник · <b>{esc(new_nick)}</b>\n"
+        f"🪙 Стоимость · <b>{NICKNAME_COST}</b>\n\n"
+        f"🪙 У вас · {fmt_num(balance)}",
         reply_markup=b.as_markup(),
     )
 
@@ -1591,7 +1593,7 @@ async def nickname_confirm(
         shown = display_name(None, user_id, callback.from_user.full_name)
         await callback.message.edit_text(
             "✓ <b>Никнейм сброшен</b>\n\n"
-            f"{bq(line('👤', 'Отображение', esc(shown)))}",
+            f"👤 Отображение · {esc(shown)}",
             reply_markup=get_ok_kb(),
         )
         await callback.answer()
@@ -1624,7 +1626,8 @@ async def nickname_confirm(
         await state.clear()
         await callback.message.edit_text(
             "✓ <b>Никнейм изменён</b>\n\n"
-            f"{bq(line('👤', 'Ник', esc(new_nick)) + chr(10) + line('🪙', 'Списано', str(NICKNAME_COST)))}",
+            f"👤 Ник · <b>{esc(new_nick)}</b>\n"
+            f"🪙 Списано · {NICKNAME_COST}",
             reply_markup=get_ok_kb(),
         )
         await callback.answer()
@@ -1730,10 +1733,11 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
         lines.append(f"{medal} {esc(nick)} · <b>{fmt_num(row['value'])}</b> {unit}")
 
     text = (
-        f"<b>{title}</b>\n{'─' * 18}\n\n"
-        f"{bq(chr(10).join(lines))}\n\n"
-        f"{line('📌', 'Ваше место', f'<b>#{fmt_num(my_rank)}</b>')}\n"
-        f"{line('👤', esc(my_nick), f'<b>{fmt_num(my_value)}</b> {unit}')}"
+        f"<b>{title}</b>\n"
+        f"{'─' * 18}\n\n"
+        f"{chr(10).join(lines)}\n\n"
+        f"📌 Ваше место · <b>#{fmt_num(my_rank)}</b>\n"
+        f"👤 {esc(my_nick)} · <b>{fmt_num(my_value)}</b> {unit}"
     )
     return text
 
@@ -1907,12 +1911,13 @@ async def process_rarity_view(
         name_str = f"<b>{esc(card['name'])}</b>"
         rw = int(info.get("reward", 0))
         if rw < 0:
-            reward_str = f"−{fmt_num(abs(rw))} 🪙"
+            reward_str = f"−<b>{fmt_num(abs(rw))}</b> 🪙"
         else:
-            reward_str = f"+{fmt_num(rw)} 🪙"
+            reward_str = f"+<b>{fmt_num(rw)}</b> 🪙"
+        rarity_line = f"💎{info.get('icon', '•')} {info.get('name', rarity)}"
         caption = (
             f"🃏 {name_str}\n"
-            f"{info.get('icon', '•')} {info.get('name', rarity)}\n\n"
+            f"{rarity_line}\n\n"
             f"{reward_str}"
         )
 
