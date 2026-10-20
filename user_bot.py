@@ -23,7 +23,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand,
-    BotCommandScopeAllPrivateChats,
     BotCommandScopeDefault,
     CallbackQuery,
     InlineKeyboardButton,
@@ -106,46 +105,58 @@ GROUP_AUTODELETE_SECONDS = 30
 STREAK_EXPIRE_SECONDS = 24 * 3600
 EFFECT_PARTY = "5046509860389126442"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PREMIUM EMOJI IDs (Bot API 9.4+, октябрь 2026)
+# Требуется Telegram Premium у владельца бота — иначе иконки молча игнорируются.
+# Источники: emoji.wivvi.net (tgiosicons), Habr Bot API 9.4, каталоги 2026.
+# ═══════════════════════════════════════════════════════════════════════════
+class PE:
+    """Premium / custom emoji IDs for buttons (icon_custom_emoji_id) and HTML."""
+
+    # UI actions
+    CHECK = "5774022692642492953"       # ✅
+    CROSS = "5774077015388852135"       # ❌
+    BACK = "5960671702059848143"        # ⬅️
+    REFRESH = "6030657343744644592"     # 🔁
+    EDIT = "6039779802741739617"        # ✏️
+    INFO = "6028435952299413210"        # ℹ
+    QUESTION = "6030848053177486888"    # ❓
+    TRASH = "6039522349517115015"       # 🗑
+    LINK = "6028171274939797252"        # 🔗
+    SETTINGS = "6032742198179532882"    # ⚙️
+
+    # Game / profile
+    STAR = "6028338546736107668"        # ⭐
+    STAR_ALT = "5453969572354878595"    # ⭐
+    FIRE = "5424972470023104089"        # 🔥
+    PROFILE = "6035084557378654059"     # 👤
+    AVATAR = "6032693626394382504"      # 👤
+    MEDAL = "6037428784888549034"       # 🥇
+    CLOCK = "5983150113483134607"       # ⏰️
+    GIFT = "5773677501825945508"        # 🎁
+    BOT = "6030400221232501136"         # 🤖
+    MESSAGE = "6030784887093464891"     # 💬
+    SPARKLE = "5767244474040192942"     # ✨ message sparkles
+    THUMBS = "5285430309720966085"      # 👍 (Habr example)
+    SUCCESS_ICON = "5310076249404621168"
+    DANGER_ICON = "5310169226856644648"
+    PRIMARY_ICON = "5285430309720966085"
+    FOLDER = "6039630677182254664"      # 📂
+    LIST = "5766994197705921104"        # 🗂
+
+    # Coins / cards (fallback unicode in text; premium where available)
+    # Card / collection feel
+    CARD = "5927169041595634481"        # card-like
+
+
+def pe(emoji_id: str, fallback: str) -> str:
+    """HTML premium emoji tag. Fallback shown if custom emoji unavailable."""
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
+
 NEW_CARD_EMOJIS = ["✨", "🪄", "👏", "🎉", "🎊", "🥳"]
 NEGATIVE_CARD_EMOJIS = ["☠️", "⚰️", "💀", "😵", "🪦", "🔫"]
 WAIT_EMOJIS = ["⏳", "⌛️", "⏰", "🕓", "🕙", "🕒"]
-
-# ── Premium custom emoji IDs (Bot API 9.4+, pack tgiosicons & common) ──────
-# Требуется Premium у владельца бота (или Fragment username).
-# HTML: <tg-emoji emoji-id="ID">fallback</tg-emoji>
-# Кнопки: icon_custom_emoji_id="ID", style="primary|success|danger"
-PE = {
-    "star": "6028338546736107668",
-    "star_lock": "5767199127775481841",
-    "gift": "5773677501825945508",
-    "check": "5774022692642492953",
-    "cross": "5774077015388852135",
-    "info": "6028435952299413210",
-    "question": "6030848053177486888",
-    "back": "5960671702059848143",
-    "settings": "6032742198179532882",
-    "edit": "6039779802741739617",
-    "trash": "6039522349517115015",
-    "bell": "6039486778597970865",
-    "link": "6028171274939797252",
-    "bot": "6030400221232501136",
-    "msg": "6030784887093464891",
-    "idea": "5891120964468480450",
-    "clock": "5983150113483134607",
-    "zap": "5884428842780594914",
-    "sparkle": "5767244474040192942",
-    "trophy": "6037428784888549034",
-    "folder": "6039630677182254664",
-    "photo": "6030466823290360017",
-    "user": "5368324170671202286",
-    "megaphone": "6039422865189638057",
-}
-
-
-def pe(emoji_id: str, fallback: str = "•") -> str:
-    """HTML-тег премиум-эмодзи. Fallback виден без Premium."""
-    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
-
 
 RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
 ROLES = _GC_ROLES
@@ -224,6 +235,10 @@ def line(emoji: str, label: str, value: Any) -> str:
 
 def bq(text: str) -> str:
     return f"<blockquote>{text}</blockquote>"
+
+
+def sep(char: str = "─", n: int = 18) -> str:
+    return char * n
 
 
 def dice_delta(value: int) -> int:
@@ -402,7 +417,6 @@ async def init_db() -> None:
             except aiosqlite.OperationalError:
                 pass
 
-        # Удаляем устаревшую таблицу дуэлей, если осталась
         try:
             await db.execute("DROP TABLE IF EXISTS duels")
         except Exception:
@@ -447,7 +461,6 @@ async def ensure_superadmin_from_env(db: aiosqlite.Connection) -> None:
             )
             logger.info("SUPERADMIN_IDS: %s → superadmin", sid)
         else:
-            # создаём запись, чтобы роль сохранилась до первого /start
             now = int(time.time())
             await db.execute(
                 "INSERT OR IGNORE INTO users (user_id, registration, role) VALUES (?, ?, 'superadmin')",
@@ -518,7 +531,8 @@ router = Router()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# KEYBOARDS
+# KEYBOARDS  (style + icon_custom_emoji_id — Bot API 9.4 / октябрь 2026)
+# style: "primary" (синий), "success" (зелёный), "danger" (красный)
 # ═══════════════════════════════════════════════════════════════════════════
 def get_app_kb(is_short: bool = False) -> Optional[InlineKeyboardMarkup]:
     app_url = get_app_url()
@@ -531,7 +545,7 @@ def get_app_kb(is_short: bool = False) -> Optional[InlineKeyboardMarkup]:
                 text=text,
                 url=app_url,
                 style="primary",
-                icon_custom_emoji_id=PE["link"],
+                icon_custom_emoji_id=PE.BOT,
             )
         ]]
     )
@@ -543,22 +557,37 @@ def get_profile_kb(owner_id: int) -> InlineKeyboardMarkup:
         text="Мои карточки",
         callback_data=MainMenuCallback(user_id=owner_id).pack(),
         style="primary",
-        icon_custom_emoji_id=PE["photo"],
+        icon_custom_emoji_id=PE.LIST,
     )
     b.adjust(1)
     return b.as_markup()
 
 
 def get_main_km() -> ReplyKeyboardMarkup:
+    """Reply-клавиатура. style/icon работают с API 9.4+."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="🃏 Получить карточку"),
-                KeyboardButton(text="👤 Профиль"),
+                KeyboardButton(
+                    text="🃏 Получить карточку",
+                    style="primary",
+                    icon_custom_emoji_id=PE.STAR,
+                ),
+                KeyboardButton(
+                    text="👤 Профиль",
+                    icon_custom_emoji_id=PE.PROFILE,
+                ),
             ],
             [
-                KeyboardButton(text="🏆 Топ"),
-                KeyboardButton(text="📱 Мини-приложение"),
+                KeyboardButton(
+                    text="🏆 Топ",
+                    icon_custom_emoji_id=PE.MEDAL,
+                ),
+                KeyboardButton(
+                    text="📱 Мини-приложение",
+                    style="primary",
+                    icon_custom_emoji_id=PE.BOT,
+                ),
             ],
         ],
         resize_keyboard=True,
@@ -572,7 +601,7 @@ def get_ok_kb() -> InlineKeyboardMarkup:
         text="Понятно",
         callback_data=OkDeleteCallback().pack(),
         style="success",
-        icon_custom_emoji_id=PE["check"],
+        icon_custom_emoji_id=PE.CHECK,
     )
     return b.as_markup()
 
@@ -584,14 +613,14 @@ def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
         text="Мои карточки",
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
         style="primary",
-        icon_custom_emoji_id=PE["photo"],
+        icon_custom_emoji_id=PE.LIST,
     )
     if app_url:
         builder.button(
             text="Мини-приложение",
             url=app_url,
-            style="success",
-            icon_custom_emoji_id=PE["link"],
+            style="primary",
+            icon_custom_emoji_id=PE.BOT,
         )
         builder.adjust(2)
     else:
@@ -601,29 +630,28 @@ def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    # style=primary для активного таба
     b.button(
         text=("● " if kind == "coins" else "○ ") + "Монеты",
         callback_data=TopCallback(kind="coins").pack(),
         style="primary" if kind == "coins" else None,
-        icon_custom_emoji_id=PE["star"] if kind == "coins" else None,
+        icon_custom_emoji_id=PE.STAR if kind == "coins" else None,
     )
     b.button(
-        text=("● " if kind == "cards" else "○ ") + "Карты",
+        text=("● " if kind == "cards" else "○ ") + "Карточки",
         callback_data=TopCallback(kind="cards").pack(),
         style="primary" if kind == "cards" else None,
-        icon_custom_emoji_id=PE["photo"] if kind == "cards" else None,
+        icon_custom_emoji_id=PE.LIST if kind == "cards" else None,
     )
     b.button(
         text=("● " if kind == "streak" else "○ ") + "Стрик",
         callback_data=TopCallback(kind="streak").pack(),
         style="primary" if kind == "streak" else None,
-        icon_custom_emoji_id=PE["zap"] if kind == "streak" else None,
+        icon_custom_emoji_id=PE.FIRE if kind == "streak" else None,
     )
     b.button(
         text="Обновить",
         callback_data=TopRefreshCallback(kind=kind).pack(),
-        icon_custom_emoji_id=PE["clock"],
+        icon_custom_emoji_id=PE.REFRESH,
     )
     b.adjust(3, 1)
     return b.as_markup()
@@ -678,10 +706,11 @@ async def render_profile(
     streak = row["streak"] or 0
 
     caption = (
-        f"{pe(PE['user'], '👤')} <b>{esc(nickname)}</b>\n\n"
-        f"{pe(PE['photo'], '🃏')} Карточки · <b>{fmt_num(cards_count)}</b> / {fmt_num(total_cards)}\n"
-        f"{pe(PE['star'], '🪙')} Монеты · <b>{fmt_num(coins)}</b>\n"
-        f"{pe(PE['zap'], '🔥')} Стрик · <b>{fmt_days(streak)}</b>"
+        f"{pe(PE.PROFILE, '👤')} <b>{esc(nickname)}</b>\n"
+        f"{sep()}\n\n"
+        f"{pe(PE.LIST, '🃏')} Карточки · <b>{fmt_num(cards_count)}</b> / {fmt_num(total_cards)}\n"
+        f"{pe(PE.STAR, '🪙')} Монеты · <b>{fmt_num(coins)}</b>\n"
+        f"{pe(PE.FIRE, '🔥')} Стрик · <b>{fmt_days(streak)}</b>"
     )
     return await get_user_photo(bot, user_id), caption, get_profile_kb(user_id)
 
@@ -694,8 +723,9 @@ async def render_collection(
     keyboard, total, total_in_game = await get_collection_main_keyboard(user_id)
     photo = await get_user_photo(bot, user_id)
     caption = (
-        f"{pe(PE['photo'], '🃏')} <b>Мои карточки</b>\n"
-        f"<blockquote>{fmt_num(total)} / {fmt_num(total_in_game)}</blockquote>"
+        f"{pe(PE.LIST, '🃏')} <b>Мои карточки</b>\n"
+        f"{sep()}\n\n"
+        f"<b>{fmt_num(total)}</b> / {fmt_num(total_in_game)}"
     )
     return photo, caption, keyboard, total
 
@@ -803,7 +833,6 @@ async def issue_card(
             coins_earned = int(base_coins)
             now = int(time.time())
 
-            # negative: coins = max(0, coins + reward)
             cur = await db.execute(
                 "SELECT coins FROM users WHERE user_id = ?", (user_id,)
             )
@@ -861,24 +890,25 @@ def _card_caption(card: dict) -> str:
     earned = int(card["coins_earned"])
     if earned < 0:
         title_emoji = random.choice(NEGATIVE_CARD_EMOJIS)
-        title = f"{title_emoji} <b>Негативная карточка</b>"
+        title = f"{title_emoji} <b>Негативная карточка!</b>"
         reward_str = (
-            f"{pe(PE['cross'], '−')}<b>{fmt_num(abs(earned))}</b> 🪙"
-            f" · всего <b>{fmt_num(card['balance'])}</b>"
+            f"−<b>{fmt_num(abs(earned))}</b> 🪙 · "
+            f"всего <b>{fmt_num(card['balance'])}</b> 🪙"
         )
     else:
         title_emoji = random.choice(NEW_CARD_EMOJIS)
-        title = f"{pe(PE['sparkle'], title_emoji)} <b>Новая карточка</b>"
+        title = f"{title_emoji} <b>Новая карточка!</b>"
         reward_str = (
-            f"{pe(PE['star'], '+')}<b>{fmt_num(earned)}</b> 🪙"
-            f" · всего <b>{fmt_num(card['balance'])}</b>"
+            f"+<b>{fmt_num(earned)}</b> 🪙 · "
+            f"всего <b>{fmt_num(card['balance'])}</b> 🪙"
         )
-    rarity_line = f"{r.get('icon', '•')} <b>{r.get('name', card['rarity'])}</b>"
+    rarity_line = f"💎{r.get('icon', '•')} {r.get('name', card['rarity'])}"
     return (
-        f"{title}\n\n"
-        f"{pe(PE['photo'], '🃏')} {name_str}\n"
+        f"{title}\n"
+        f"{sep()}\n\n"
+        f"🃏 {name_str}\n"
         f"{rarity_line}\n\n"
-        f"<blockquote>{reward_str}</blockquote>"
+        f"{bq(reward_str)}"
     )
 
 
@@ -969,21 +999,20 @@ async def check_and_update_streak(user_id: int) -> tuple[int, int, int, bool]:
 def _streak_message_text(streak: int, bonus: int, new_balance: int) -> str:
     if streak <= 0:
         return ""
+    fire = pe(PE.FIRE, "🔥")
     if streak == 1:
         return (
-            f"{pe(PE['zap'], '🔥')} <b>Стрик · {fmt_days(streak)}</b>\n"
-            f"{pe(PE['idea'], '💡')} Зайдите завтра — получите первый бонус"
+            f"{fire} <b>Стрик · {fmt_days(streak)}</b>\n"
+            f"{sep()}\n\n"
+            f"💡 Зайдите завтра, чтобы получить первый бонус"
         )
     text = (
-        f"{pe(PE['zap'], '🔥')} <b>Стрик · {fmt_days(streak)}</b>\n"
-        f"{pe(PE['idea'], '💡')} Заходите каждый день за бонусами"
+        f"{fire} <b>Стрик · {fmt_days(streak)}</b>\n"
+        f"{sep()}\n\n"
+        f"💡 Заходите каждый день, чтобы получать бонусы"
     )
     if bonus > 0:
-        text += (
-            f"\n\n<blockquote>"
-            f"{pe(PE['star'], '+')}{fmt_num(bonus)} 🪙 · всего {fmt_num(new_balance)}"
-            f"</blockquote>"
-        )
+        text += f"\n\n{bq(f'+{fmt_num(bonus)} 🪙 · всего {fmt_num(new_balance)} 🪙')}"
     return text
 
 
@@ -1062,7 +1091,8 @@ async def check_not_banned(message: Message) -> bool:
     if await is_banned(message.from_user.id):
         await reply_ephemeral(
             message,
-            f"{pe(PE['cross'], '🚫')} <b>Доступ ограничен</b>\n\n"
+            f"{pe(PE.CROSS, '🚫')} <b>Доступ ограничен</b>\n"
+            f"{sep()}\n\n"
             "Вы заблокированы. Обратитесь к администрации.",
         )
         return False
@@ -1077,17 +1107,17 @@ async def check_not_banned_cb(callback: CallbackQuery) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# COMMANDS LIST
+# COMMANDS LIST (Menu /)
 # ═══════════════════════════════════════════════════════════════════════════
 USER_COMMANDS = [
-    BotCommand(command="start", description="Начать"),
-    BotCommand(command="meow", description="Получить карточку"),
-    BotCommand(command="profile", description="Профиль"),
-    BotCommand(command="top", description="Топ игроков"),
-    BotCommand(command="dice", description="Кубик"),
-    BotCommand(command="nick", description="Сменить ник"),
-    BotCommand(command="help", description="Справка"),
-    BotCommand(command="miniapp", description="Мини-приложение"),
+    BotCommand(command="start", description="👋 Начать"),
+    BotCommand(command="meow", description="🃏 Получить карточку"),
+    BotCommand(command="profile", description="👤 Профиль"),
+    BotCommand(command="top", description="🏆 Топ игроков"),
+    BotCommand(command="dice", description="🎲 Кубик"),
+    BotCommand(command="nick", description="✏️ Сменить ник"),
+    BotCommand(command="help", description="❓ Справка"),
+    BotCommand(command="miniapp", description="📱 Мини-приложение"),
 ]
 
 
@@ -1113,12 +1143,12 @@ async def cmd_start(message: Message) -> None:
             pass
 
         welcome = (
-            f"{pe(PE['sparkle'], '👋')} <b>Добро пожаловать!</b>\n\n"
+            f"{pe(PE.SPARKLE, '✨')} <b>Добро пожаловать!</b>\n"
+            f"{sep()}\n\n"
             "Собирайте коллекцию карточек, копите монеты и соревнуйтесь в топе.\n\n"
-            f"<blockquote>"
-            f"{pe(PE['photo'], '🃏')} Карточка · «мряу» или кнопка ниже\n"
-            f"{pe(PE['clock'], '⏱')} Кулдаун · раз в 3 часа"
-            f"</blockquote>"
+            f"{bq('🃏 Карточка · «мряу» или кнопка ниже')}\n"
+            f"{bq('⏱ Кулдаун · раз в 3 часа')}\n\n"
+            f"{pe(PE.QUESTION, '❓')} Справка · /help"
         )
         await message.reply(welcome, reply_markup=get_main_km())
     except Exception as e:
@@ -1130,7 +1160,7 @@ async def cmd_start(message: Message) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 HELP_TABS = {
     "cards": {
-        "label": "🃏 Карточки",
+        "label": "Карточки",
         "title": "🃏 Карточки",
         "body": (
             "Карточки — основа игры. Каждая имеет название, редкость и награду в монетах.\n\n"
@@ -1150,7 +1180,7 @@ HELP_TABS = {
         ),
     },
     "coins": {
-        "label": "🪙 Монеты",
+        "label": "Монеты",
         "title": "🪙 Монеты",
         "body": (
             "Монеты — внутриигровая валюта.\n\n"
@@ -1164,7 +1194,7 @@ HELP_TABS = {
         ),
     },
     "streak": {
-        "label": "🔥 Стрик",
+        "label": "Стрик",
         "title": "🔥 Стрик",
         "body": (
             "Стрик — серия дней подряд с хотя бы одной карточкой.\n\n"
@@ -1178,7 +1208,7 @@ HELP_TABS = {
         ),
     },
     "games": {
-        "label": "🎲 Кубик",
+        "label": "Кубик",
         "title": "🎲 Кубик",
         "body": (
             "Команда /dice или «мряу кубик». Нужно минимум "
@@ -1187,7 +1217,7 @@ HELP_TABS = {
         ),
     },
     "profile": {
-        "label": "👤 Профиль",
+        "label": "Профиль",
         "title": "👤 Профиль",
         "body": (
             "Профиль: карточки, монеты, стрик.\n\n"
@@ -1200,19 +1230,26 @@ HELP_TABS = {
 
 HELP_TAB_ORDER = ["cards", "coins", "streak", "games", "profile"]
 
+HELP_TAB_ICONS = {
+    "cards": PE.LIST,
+    "coins": PE.STAR,
+    "streak": PE.FIRE,
+    "games": PE.STAR_ALT,
+    "profile": PE.PROFILE,
+}
+
 
 def get_help_keyboard(active: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for key in HELP_TAB_ORDER:
         label = HELP_TABS[key]["label"]
         mark = "✓ " if key == active else ""
-        kwargs: dict[str, Any] = {
-            "text": f"{mark}{label}",
-            "callback_data": HelpCallback(tab=key).pack(),
-        }
-        if key == active:
-            kwargs["style"] = "primary"
-        b.button(**kwargs)
+        b.button(
+            text=f"{mark}{label}",
+            callback_data=HelpCallback(tab=key).pack(),
+            style="primary" if key == active else None,
+            icon_custom_emoji_id=HELP_TAB_ICONS.get(key),
+        )
     b.adjust(2, 2, 1)
     return b.as_markup()
 
@@ -1221,11 +1258,7 @@ def build_help_text(tab: str) -> str:
     if tab not in HELP_TABS:
         tab = "cards"
     p = HELP_TABS[tab]
-    return (
-        f"{pe(PE['info'], 'ℹ️')} <b>{p['title']}</b>\n"
-        f"{'─' * 18}\n\n"
-        f"{p['body']}"
-    )
+    return f"<b>{p['title']}</b>\n{sep()}\n\n{p['body']}"
 
 
 @router.message(Command("help"))
@@ -1268,12 +1301,14 @@ async def cmd_miniapp(message: Message) -> None:
     app_kb = get_app_kb(is_short=True)
     if not app_kb:
         await message.reply(
-            "📱 <b>Мини-приложение</b>\n\n"
+            f"{pe(PE.BOT, '📱')} <b>Мини-приложение</b>\n"
+            f"{sep()}\n\n"
             "Пока недоступно. Загляните позже."
         )
         return
     await message.reply(
-        f"{pe(PE['link'], '📱')} <b>Мини-приложение</b>\n\n"
+        f"{pe(PE.BOT, '📱')} <b>Мини-приложение</b>\n"
+        f"{sep()}\n\n"
         "Откройте прямо в Telegram — удобнее и быстрее.",
         reply_markup=app_kb,
     )
@@ -1318,8 +1353,9 @@ async def get_card_handler(message: Message) -> None:
             time_str = fmt_remaining(remaining)
             wait_emoji = random.choice(WAIT_EMOJIS)
             text = (
-                f"{pe(PE['clock'], wait_emoji)} <b>Подождите {time_str}</b>\n"
-                f"для следующей карточки"
+                f"{wait_emoji} <b>Подождите {time_str}</b>\n"
+                f"{sep()}\n\n"
+                "для получения следующей карточки"
             )
             await reply_ephemeral(message, text)
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
@@ -1331,7 +1367,8 @@ async def get_card_handler(message: Message) -> None:
         if status == "no_cards":
             await reply_ephemeral(
                 message,
-                f"{pe(PE['cross'], '❌')} <b>Карточек пока нет</b>\n\n"
+                f"{pe(PE.CROSS, '❌')} <b>Карточек пока нет</b>\n"
+                f"{sep()}\n\n"
                 "Обратитесь к администрации — база ещё пуста.",
             )
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
@@ -1340,7 +1377,8 @@ async def get_card_handler(message: Message) -> None:
         if status == "all_collected":
             await reply_ephemeral(
                 message,
-                f"{pe(PE['trophy'], '🎉')} <b>Коллекция полная</b>\n\n"
+                f"{pe(PE.STAR, '🎉')} <b>Коллекция полная</b>\n"
+                f"{sep()}\n\n"
                 "Вы собрали все карточки. Новые появятся позже.",
             )
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
@@ -1349,7 +1387,8 @@ async def get_card_handler(message: Message) -> None:
         if status != "success" or card is None:
             await reply_ephemeral(
                 message,
-                f"{pe(PE['cross'], '❌')} <b>Что-то пошло не так</b>\n\n"
+                f"{pe(PE.CROSS, '❌')} <b>Что-то пошло не так</b>\n"
+                f"{sep()}\n\n"
                 "Попробуйте ещё раз чуть позже.",
             )
             return
@@ -1390,7 +1429,8 @@ async def get_card_handler(message: Message) -> None:
         logger.error("get_card_handler: %s", e)
         await reply_ephemeral(
             message,
-            "❌ <b>Что-то пошло не так</b>\n\n"
+            f"{pe(PE.CROSS, '❌')} <b>Что-то пошло не так</b>\n"
+            f"{sep()}\n\n"
             "Попробуйте ещё раз чуть позже.",
         )
 
@@ -1409,7 +1449,8 @@ async def dice_handler(message: Message) -> None:
     if rate_limited(f"dice:{user_id}", limit=6, window=15):
         await reply_ephemeral(
             message,
-            f"{random.choice(WAIT_EMOJIS)} <b>Слишком часто</b>\n\n"
+            f"{random.choice(WAIT_EMOJIS)} <b>Слишком часто</b>\n"
+            f"{sep()}\n\n"
             "Подождите немного перед следующей попыткой.",
         )
         return
@@ -1434,7 +1475,8 @@ async def dice_handler(message: Message) -> None:
             if balance < DICE_MIN_BALANCE:
                 await reply_ephemeral(
                     message,
-                    "⚠️ <b>Недостаточно монет</b>\n\n"
+                    f"{pe(PE.CROSS, '⚠️')} <b>Недостаточно монет</b>\n"
+                    f"{sep()}\n\n"
                     f"🪙 Нужно · <b>{fmt_num(DICE_MIN_BALANCE)}</b>\n"
                     f"🪙 У вас · <b>{fmt_num(balance)}</b>",
                 )
@@ -1447,7 +1489,8 @@ async def dice_handler(message: Message) -> None:
                 wait_emoji = random.choice(WAIT_EMOJIS)
                 await reply_ephemeral(
                     message,
-                    f"{wait_emoji} <b>Кубик недоступен</b>\n\n"
+                    f"{wait_emoji} <b>Кубик недоступен</b>\n"
+                    f"{sep()}\n\n"
                     f"Следующий бросок через <b>{time_str}</b>.",
                 )
                 return
@@ -1477,22 +1520,20 @@ async def dice_handler(message: Message) -> None:
 
         if delta > 0:
             delta_str = f"+{fmt_num(delta)}"
-            title = f"{pe(PE['check'], '🎉')} <b>Выигрыш</b>"
+            title = f"{pe(PE.CHECK, '🎉')} Выигрыш"
         elif delta < 0:
             delta_str = f"−{fmt_num(abs(delta))}"
-            title = f"{pe(PE['cross'], '😔')} <b>Проигрыш</b>"
+            title = f"{pe(PE.CROSS, '😔')} Проигрыш"
         else:
             delta_str = "±0"
-            title = f"{pe(PE['info'], '·')} <b>Ничья</b>"
+            title = "Ничья"
 
         result = (
-            f"{title}\n\n"
-            f"<blockquote>"
+            f"🎲 <b>{title}</b>\n"
+            f"{sep()}\n\n"
             f"🎲 Выпало · <b>{dice_value}</b>\n"
-            f"{pe(PE['star'], '🪙')} Итог · <b>{delta_str}</b>\n"
-            f"Баланс · <b>{fmt_num(new_balance)}</b> "
-            f"{plural(new_balance, 'монета', 'монеты', 'монет')}"
-            f"</blockquote>"
+            f"🪙 Итог · <b>{delta_str}</b>\n\n"
+            f"{bq(f'🪙 У вас · <b>{fmt_num(new_balance)}</b> {plural(new_balance, \"монета\", \"монеты\", \"монет\")}')}"
         )
         try:
             await spin_msg.reply(result)
@@ -1502,7 +1543,8 @@ async def dice_handler(message: Message) -> None:
         logger.error("dice: %s", e)
         await reply_ephemeral(
             message,
-            "❌ <b>Ошибка</b>\n\n"
+            f"{pe(PE.CROSS, '❌')} <b>Ошибка</b>\n"
+            f"{sep()}\n\n"
             "Попробуйте ещё раз чуть позже.",
         )
 
@@ -1615,39 +1657,40 @@ async def nickname_cmd(
             text="Подтвердить",
             callback_data=NickConfirmCallback(action="reset").pack(),
             style="success",
-            icon_custom_emoji_id=PE["check"],
+            icon_custom_emoji_id=PE.CHECK,
         )
         b.button(
             text="Отмена",
             callback_data=NickConfirmCallback(action="cancel").pack(),
             style="danger",
-            icon_custom_emoji_id=PE["cross"],
+            icon_custom_emoji_id=PE.CROSS,
         )
         b.adjust(2)
         await state.set_state(NicknameSG.pending)
         await state.update_data(pending_nick=None, pending_action="reset")
         await message.reply(
-            f"{pe(PE['trash'], '♻️')} <b>Сбросить никнейм?</b>\n\n"
-            f"<blockquote>"
-            f"{pe(PE['info'], 'ℹ️')} Результат · имя из Telegram\n"
-            f"{pe(PE['star'], '🪙')} Стоимость · бесплатно"
-            f"</blockquote>",
+            f"{pe(PE.REFRESH, '♻️')} <b>Сбросить никнейм?</b>\n"
+            f"{sep()}\n\n"
+            "ℹ️ Результат · имя из Telegram\n"
+            "🪙 Стоимость · бесплатно",
             reply_markup=b.as_markup(),
         )
         return
 
     if not arg:
         await message.reply(
-            f"{pe(PE['edit'], '✏️')} <b>Смена никнейма</b>\n\n"
+            f"{pe(PE.EDIT, '✏️')} <b>Смена никнейма</b>\n"
+            f"{sep()}\n\n"
             f"<code>/nick НовыйНик</code> · {NICKNAME_COST} 🪙\n\n"
-            f"{pe(PE['trash'], '♻️')} Сброс · /nick reset · бесплатно"
+            "♻️ Сброс · /nick reset · бесплатно"
         )
         return
 
     new_nick = validate_nickname(arg)
     if not new_nick:
         await message.reply(
-            f"{pe(PE['cross'], '❌')} <b>Неверный никнейм</b>\n\n"
+            f"{pe(PE.CROSS, '❌')} <b>Неверный никнейм</b>\n"
+            f"{sep()}\n\n"
             "2–32 символа, без ссылок и @."
         )
         return
@@ -1656,11 +1699,10 @@ async def nickname_cmd(
     balance = row["coins"] if row else 0
     if balance < NICKNAME_COST:
         await message.reply(
-            f"{pe(PE['cross'], '⚠️')} <b>Недостаточно монет</b>\n\n"
-            f"<blockquote>"
-            f"Нужно · <b>{fmt_num(NICKNAME_COST)}</b>\n"
-            f"У вас · <b>{fmt_num(balance)}</b>"
-            f"</blockquote>"
+            f"{pe(PE.CROSS, '⚠️')} <b>Недостаточно монет</b>\n"
+            f"{sep()}\n\n"
+            f"🪙 Нужно · <b>{fmt_num(NICKNAME_COST)}</b>\n"
+            f"🪙 У вас · <b>{fmt_num(balance)}</b>"
         )
         return
 
@@ -1669,24 +1711,23 @@ async def nickname_cmd(
         text="Подтвердить",
         callback_data=NickConfirmCallback(action="apply").pack(),
         style="success",
-        icon_custom_emoji_id=PE["check"],
+        icon_custom_emoji_id=PE.CHECK,
     )
     b.button(
         text="Отмена",
         callback_data=NickConfirmCallback(action="cancel").pack(),
         style="danger",
-        icon_custom_emoji_id=PE["cross"],
+        icon_custom_emoji_id=PE.CROSS,
     )
     b.adjust(2)
     await state.set_state(NicknameSG.pending)
     await state.update_data(pending_nick=new_nick, pending_action="apply")
     await message.reply(
-        f"{pe(PE['edit'], '✏️')} <b>Сменить никнейм?</b>\n\n"
-        f"<blockquote>"
-        f"{pe(PE['user'], '👤')} Новый ник · <b>{esc(new_nick)}</b>\n"
-        f"{pe(PE['star'], '🪙')} Стоимость · <b>{NICKNAME_COST}</b>\n"
-        f"Баланс · {fmt_num(balance)}"
-        f"</blockquote>",
+        f"{pe(PE.EDIT, '✏️')} <b>Сменить никнейм?</b>\n"
+        f"{sep()}\n\n"
+        f"👤 Новый ник · <b>{esc(new_nick)}</b>\n"
+        f"🪙 Стоимость · <b>{NICKNAME_COST}</b>\n\n"
+        f"🪙 У вас · {fmt_num(balance)}",
         reply_markup=b.as_markup(),
     )
 
@@ -1722,7 +1763,8 @@ async def nickname_confirm(
         await state.clear()
         shown = display_name(None, user_id, callback.from_user.full_name)
         await callback.message.edit_text(
-            "✓ <b>Никнейм сброшен</b>\n\n"
+            f"{pe(PE.CHECK, '✓')} <b>Никнейм сброшен</b>\n"
+            f"{sep()}\n\n"
             f"👤 Отображение · {esc(shown)}",
             reply_markup=get_ok_kb(),
         )
@@ -1755,7 +1797,8 @@ async def nickname_confirm(
 
         await state.clear()
         await callback.message.edit_text(
-            "✓ <b>Никнейм изменён</b>\n\n"
+            f"{pe(PE.CHECK, '✓')} <b>Никнейм изменён</b>\n"
+            f"{sep()}\n\n"
             f"👤 Ник · <b>{esc(new_nick)}</b>\n"
             f"🪙 Списано · {NICKNAME_COST}",
             reply_markup=get_ok_kb(),
@@ -1803,7 +1846,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
-            unit, title = "🃏", "🃏 Топ по карточкам"
+            unit, title = "🃏", f"{pe(PE.LIST, '🃏')} Топ по карточкам"
 
         elif kind == "streak":
             effective = (
@@ -1826,7 +1869,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
                 (now_ts, STREAK_EXPIRE_SECONDS, my_value),
             )
             my_rank = (await cur.fetchone())[0]
-            unit, title = "🔥", "🔥 Топ по стрику"
+            unit, title = "🔥", f"{pe(PE.FIRE, '🔥')} Топ по стрику"
 
         else:
             cur = await db.execute(
@@ -1845,7 +1888,7 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
                 (my_value,),
             )
             my_rank = (await cur.fetchone())[0]
-            unit, title = "🪙", "🪙 Топ по монетам"
+            unit, title = "🪙", f"{pe(PE.STAR, '🪙')} Топ по монетам"
 
         cur = await db.execute(
             "SELECT nickname FROM users WHERE user_id = ?", (current_user_id,)
@@ -1863,13 +1906,11 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
         lines.append(f"{medal} {esc(nick)} · <b>{fmt_num(row['value'])}</b> {unit}")
 
     text = (
-        f"{pe(PE['trophy'], '🏆')} <b>{title}</b>\n"
-        f"{'─' * 18}\n\n"
+        f"<b>{title}</b>\n"
+        f"{sep()}\n\n"
         f"{chr(10).join(lines)}\n\n"
-        f"<blockquote>"
-        f"Ваше место · <b>#{fmt_num(my_rank)}</b>\n"
-        f"{pe(PE['user'], '👤')} {esc(my_nick)} · <b>{fmt_num(my_value)}</b> {unit}"
-        f"</blockquote>"
+        f"{bq(f'📌 Ваше место · <b>#{fmt_num(my_rank)}</b>')}\n"
+        f"👤 {esc(my_nick)} · <b>{fmt_num(my_value)}</b> {unit}"
     )
     return text
 
@@ -1985,9 +2026,9 @@ async def get_collection_main_keyboard(user_id: int):
                     callback_data=RaritySelectCallback(
                         rarity=r_key, page=0, user_id=user_id
                     ).pack(),
+                    style="primary",
                 )
             )
-        # 2 колонки (3 ряда по 2 при 6 редкостях)
         grid = []
         for i in range(0, len(buttons), 2):
             grid.append(buttons[i : i + 2])
@@ -1995,7 +2036,7 @@ async def get_collection_main_keyboard(user_id: int):
             InlineKeyboardButton(
                 text="В профиль",
                 callback_data=BackToProfileCallback(user_id=user_id).pack(),
-                icon_custom_emoji_id=PE["back"],
+                icon_custom_emoji_id=PE.BACK,
             )
         ])
         return InlineKeyboardMarkup(inline_keyboard=grid), total_cards, total_in_game
@@ -2012,7 +2053,6 @@ async def process_rarity_view(
         await callback.answer("⚠️ Не ваша кнопка")
         return
 
-    # Flood control: не чаще 1 EditMessageMedia / 1.2 сек на пользователя
     if rate_limited(f"coll-flip:{callback.from_user.id}", limit=1, window=1.2):
         await callback.answer("⏳ Подождите…")
         return
@@ -2050,8 +2090,9 @@ async def process_rarity_view(
         rarity_line = f"💎{info.get('icon', '•')} {info.get('name', rarity)}"
         caption = (
             f"🃏 {name_str}\n"
-            f"{rarity_line}\n\n"
-            f"{reward_str}"
+            f"{rarity_line}\n"
+            f"{sep()}\n\n"
+            f"{bq(reward_str)}"
         )
 
         nav = []
@@ -2062,6 +2103,7 @@ async def process_rarity_view(
                     callback_data=RaritySelectCallback(
                         rarity=rarity, page=page - 1, user_id=user_id
                     ).pack(),
+                    icon_custom_emoji_id=PE.BACK,
                 )
             )
         nav.append(
@@ -2084,7 +2126,7 @@ async def process_rarity_view(
                     InlineKeyboardButton(
                         text="К редкостям",
                         callback_data=MainMenuCallback(user_id=user_id).pack(),
-                        icon_custom_emoji_id=PE["back"],
+                        icon_custom_emoji_id=PE.BACK,
                     )
                 ],
             ]
@@ -2163,7 +2205,6 @@ async def handle_card_action(
             photo, caption, keyboard, total = await render_collection(
                 callback.message.bot, user_id, callback.from_user.full_name
             )
-            # Редактируем сообщение о новой карточке, а не шлём новое
             await show_or_edit_photo(callback.message, photo, caption, keyboard)
             await callback.answer()
     except Exception as e:
@@ -2205,7 +2246,6 @@ async def main() -> None:
             await ensure_config_tables(db)
             if not await is_user_bot_enabled(db):
                 logger.warning("user_bot_enabled=0 — user-бот не стартует (только polling skip)")
-                # всё равно можно крутить admin/api ниже
         await refresh_rarities()
 
         try:
@@ -2234,15 +2274,13 @@ async def main() -> None:
                     logger.warning("default avatar: %s", e)
             dp = Dispatcher(storage=MemoryStorage())
             dp.include_router(router)
-            # Menu / — команды в меню бота (кнопка Menu рядом с полем ввода)
+            # Menu / — список команд
             await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
-            await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeAllPrivateChats())
-            logger.info("🤖 Пользовательский бот запущен")
+            logger.info("🤖 Пользовательский бот запущен (Menu / обновлён)")
             tasks.append(dp.start_polling(bot))
         else:
             logger.warning("🤖 User-бот выключен через admin (/userbot off)")
 
-        # admin: если не из main.py — поднимаем сами
         admin_token = (
             os.getenv("ADMIN_BOT_TOKEN") or os.getenv("BOT_TOKEN_ADMIN") or ""
         ).strip()
@@ -2254,7 +2292,6 @@ async def main() -> None:
             except Exception as e:
                 logger.error("admin_bot: %s", e)
         elif admin_token and from_main:
-            # main.py мог не поднять admin, если user включён — поднимем здесь
             try:
                 from admin_bot import run_admin_bot
                 tasks.append(run_admin_bot(admin_token))
