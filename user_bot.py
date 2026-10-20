@@ -23,6 +23,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     BotCommand,
+    BotCommandScopeAllPrivateChats,
     BotCommandScopeDefault,
     CallbackQuery,
     InlineKeyboardButton,
@@ -108,6 +109,43 @@ EFFECT_PARTY = "5046509860389126442"
 NEW_CARD_EMOJIS = ["✨", "🪄", "👏", "🎉", "🎊", "🥳"]
 NEGATIVE_CARD_EMOJIS = ["☠️", "⚰️", "💀", "😵", "🪦", "🔫"]
 WAIT_EMOJIS = ["⏳", "⌛️", "⏰", "🕓", "🕙", "🕒"]
+
+# ── Premium custom emoji IDs (Bot API 9.4+, pack tgiosicons & common) ──────
+# Требуется Premium у владельца бота (или Fragment username).
+# HTML: <tg-emoji emoji-id="ID">fallback</tg-emoji>
+# Кнопки: icon_custom_emoji_id="ID", style="primary|success|danger"
+PE = {
+    "star": "6028338546736107668",
+    "star_lock": "5767199127775481841",
+    "gift": "5773677501825945508",
+    "check": "5774022692642492953",
+    "cross": "5774077015388852135",
+    "info": "6028435952299413210",
+    "question": "6030848053177486888",
+    "back": "5960671702059848143",
+    "settings": "6032742198179532882",
+    "edit": "6039779802741739617",
+    "trash": "6039522349517115015",
+    "bell": "6039486778597970865",
+    "link": "6028171274939797252",
+    "bot": "6030400221232501136",
+    "msg": "6030784887093464891",
+    "idea": "5891120964468480450",
+    "clock": "5983150113483134607",
+    "zap": "5884428842780594914",
+    "sparkle": "5767244474040192942",
+    "trophy": "6037428784888549034",
+    "folder": "6039630677182254664",
+    "photo": "6030466823290360017",
+    "user": "5368324170671202286",
+    "megaphone": "6039422865189638057",
+}
+
+
+def pe(emoji_id: str, fallback: str = "•") -> str:
+    """HTML-тег премиум-эмодзи. Fallback виден без Premium."""
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
 
 RARITIES = {k: dict(v) for k, v in DEFAULT_RARITIES.items()}
 ROLES = _GC_ROLES
@@ -486,17 +524,26 @@ def get_app_kb(is_short: bool = False) -> Optional[InlineKeyboardMarkup]:
     app_url = get_app_url()
     if not app_url:
         return None
-    text = "📱 Открыть" if is_short else "📱 Мини-приложение"
+    text = "Открыть" if is_short else "Мини-приложение"
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=text, url=app_url)]]
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text=text,
+                url=app_url,
+                style="primary",
+                icon_custom_emoji_id=PE["link"],
+            )
+        ]]
     )
 
 
 def get_profile_kb(owner_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(
-        text="🃏 Мои карточки",
+        text="Мои карточки",
         callback_data=MainMenuCallback(user_id=owner_id).pack(),
+        style="primary",
+        icon_custom_emoji_id=PE["photo"],
     )
     b.adjust(1)
     return b.as_markup()
@@ -505,8 +552,14 @@ def get_profile_kb(owner_id: int) -> InlineKeyboardMarkup:
 def get_main_km() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🃏 Получить карточку"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="🏆 Топ"), KeyboardButton(text="📱 Мини-приложение")],
+            [
+                KeyboardButton(text="🃏 Получить карточку"),
+                KeyboardButton(text="👤 Профиль"),
+            ],
+            [
+                KeyboardButton(text="🏆 Топ"),
+                KeyboardButton(text="📱 Мини-приложение"),
+            ],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -515,7 +568,12 @@ def get_main_km() -> ReplyKeyboardMarkup:
 
 def get_ok_kb() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="Понятно", callback_data=OkDeleteCallback().pack())
+    b.button(
+        text="Понятно",
+        callback_data=OkDeleteCallback().pack(),
+        style="success",
+        icon_custom_emoji_id=PE["check"],
+    )
     return b.as_markup()
 
 
@@ -523,11 +581,18 @@ def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     app_url = get_app_url()
     builder.button(
-        text="🃏 Мои карточки",
+        text="Мои карточки",
         callback_data=CardActionCallback(action="collection", user_id=user_id).pack(),
+        style="primary",
+        icon_custom_emoji_id=PE["photo"],
     )
     if app_url:
-        builder.button(text="📱 Мини-приложение", url=app_url)
+        builder.button(
+            text="Мини-приложение",
+            url=app_url,
+            style="success",
+            icon_custom_emoji_id=PE["link"],
+        )
         builder.adjust(2)
     else:
         builder.adjust(1)
@@ -536,19 +601,30 @@ def get_after_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def get_top_keyboard(kind: str = "coins") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
+    # style=primary для активного таба
     b.button(
-        text=("● " if kind == "coins" else "○ ") + "🪙",
+        text=("● " if kind == "coins" else "○ ") + "Монеты",
         callback_data=TopCallback(kind="coins").pack(),
+        style="primary" if kind == "coins" else None,
+        icon_custom_emoji_id=PE["star"] if kind == "coins" else None,
     )
     b.button(
-        text=("● " if kind == "cards" else "○ ") + "🃏",
+        text=("● " if kind == "cards" else "○ ") + "Карты",
         callback_data=TopCallback(kind="cards").pack(),
+        style="primary" if kind == "cards" else None,
+        icon_custom_emoji_id=PE["photo"] if kind == "cards" else None,
     )
     b.button(
-        text=("● " if kind == "streak" else "○ ") + "🔥",
+        text=("● " if kind == "streak" else "○ ") + "Стрик",
         callback_data=TopCallback(kind="streak").pack(),
+        style="primary" if kind == "streak" else None,
+        icon_custom_emoji_id=PE["zap"] if kind == "streak" else None,
     )
-    b.button(text="↻ Обновить", callback_data=TopRefreshCallback(kind=kind).pack())
+    b.button(
+        text="Обновить",
+        callback_data=TopRefreshCallback(kind=kind).pack(),
+        icon_custom_emoji_id=PE["clock"],
+    )
     b.adjust(3, 1)
     return b.as_markup()
 
@@ -602,10 +678,10 @@ async def render_profile(
     streak = row["streak"] or 0
 
     caption = (
-        f"👤 <b>{esc(nickname)}</b>\n\n"
-        f"🃏 Карточки · <b>{fmt_num(cards_count)}</b> / {fmt_num(total_cards)}\n"
-        f"🪙 Монеты · <b>{fmt_num(coins)}</b>\n"
-        f"🔥 Стрик · <b>{fmt_days(streak)}</b>"
+        f"{pe(PE['user'], '👤')} <b>{esc(nickname)}</b>\n\n"
+        f"{pe(PE['photo'], '🃏')} Карточки · <b>{fmt_num(cards_count)}</b> / {fmt_num(total_cards)}\n"
+        f"{pe(PE['star'], '🪙')} Монеты · <b>{fmt_num(coins)}</b>\n"
+        f"{pe(PE['zap'], '🔥')} Стрик · <b>{fmt_days(streak)}</b>"
     )
     return await get_user_photo(bot, user_id), caption, get_profile_kb(user_id)
 
@@ -618,7 +694,8 @@ async def render_collection(
     keyboard, total, total_in_game = await get_collection_main_keyboard(user_id)
     photo = await get_user_photo(bot, user_id)
     caption = (
-        f"🃏 <b>Мои карточки</b> (<b>{fmt_num(total)}</b> / {fmt_num(total_in_game)})"
+        f"{pe(PE['photo'], '🃏')} <b>Мои карточки</b>\n"
+        f"<blockquote>{fmt_num(total)} / {fmt_num(total_in_game)}</blockquote>"
     )
     return photo, caption, keyboard, total
 
@@ -784,18 +861,24 @@ def _card_caption(card: dict) -> str:
     earned = int(card["coins_earned"])
     if earned < 0:
         title_emoji = random.choice(NEGATIVE_CARD_EMOJIS)
-        title = f"{title_emoji} <b>Негативная карточка!</b>"
-        reward_str = f"−<b>{fmt_num(abs(earned))}</b> 🪙 · всего <b>{fmt_num(card['balance'])}</b> 🪙"
+        title = f"{title_emoji} <b>Негативная карточка</b>"
+        reward_str = (
+            f"{pe(PE['cross'], '−')}<b>{fmt_num(abs(earned))}</b> 🪙"
+            f" · всего <b>{fmt_num(card['balance'])}</b>"
+        )
     else:
         title_emoji = random.choice(NEW_CARD_EMOJIS)
-        title = f"{title_emoji} <b>Новая карточка!</b>"
-        reward_str = f"+<b>{fmt_num(earned)}</b> 🪙 · всего <b>{fmt_num(card['balance'])}</b> 🪙"
-    rarity_line = f"💎{r.get('icon', '•')} {r.get('name', card['rarity'])}"
+        title = f"{pe(PE['sparkle'], title_emoji)} <b>Новая карточка</b>"
+        reward_str = (
+            f"{pe(PE['star'], '+')}<b>{fmt_num(earned)}</b> 🪙"
+            f" · всего <b>{fmt_num(card['balance'])}</b>"
+        )
+    rarity_line = f"{r.get('icon', '•')} <b>{r.get('name', card['rarity'])}</b>"
     return (
         f"{title}\n\n"
-        f"🃏 {name_str}\n"
+        f"{pe(PE['photo'], '🃏')} {name_str}\n"
         f"{rarity_line}\n\n"
-        f"{reward_str}"
+        f"<blockquote>{reward_str}</blockquote>"
     )
 
 
@@ -888,13 +971,19 @@ def _streak_message_text(streak: int, bonus: int, new_balance: int) -> str:
         return ""
     if streak == 1:
         return (
-            f"🔥 <b>Стрик · {fmt_days(streak)}</b>\n"
-            f"💡 Зайдите завтра, чтобы получить первый бонус"
+            f"{pe(PE['zap'], '🔥')} <b>Стрик · {fmt_days(streak)}</b>\n"
+            f"{pe(PE['idea'], '💡')} Зайдите завтра — получите первый бонус"
         )
-    text = f"🔥 <b>Стрик · {fmt_days(streak)}</b>\n"
-    text += "💡 Заходите каждый день, чтобы получать бонусы"
+    text = (
+        f"{pe(PE['zap'], '🔥')} <b>Стрик · {fmt_days(streak)}</b>\n"
+        f"{pe(PE['idea'], '💡')} Заходите каждый день за бонусами"
+    )
     if bonus > 0:
-        text += f"\n\n+{fmt_num(bonus)} 🪙 · всего {fmt_num(new_balance)} 🪙"
+        text += (
+            f"\n\n<blockquote>"
+            f"{pe(PE['star'], '+')}{fmt_num(bonus)} 🪙 · всего {fmt_num(new_balance)}"
+            f"</blockquote>"
+        )
     return text
 
 
@@ -973,7 +1062,7 @@ async def check_not_banned(message: Message) -> bool:
     if await is_banned(message.from_user.id):
         await reply_ephemeral(
             message,
-            "🚫 <b>Доступ ограничен</b>\n\n"
+            f"{pe(PE['cross'], '🚫')} <b>Доступ ограничен</b>\n\n"
             "Вы заблокированы. Обратитесь к администрации.",
         )
         return False
@@ -991,14 +1080,14 @@ async def check_not_banned_cb(callback: CallbackQuery) -> bool:
 # COMMANDS LIST
 # ═══════════════════════════════════════════════════════════════════════════
 USER_COMMANDS = [
-    BotCommand(command="start", description="👋 Начать"),
-    BotCommand(command="meow", description="🃏 Получить карточку"),
-    BotCommand(command="profile", description="👤 Профиль"),
-    BotCommand(command="top", description="🏆 Топ игроков"),
-    BotCommand(command="dice", description="🎲 Кубик"),
-    BotCommand(command="nick", description="✏️ Сменить ник"),
-    BotCommand(command="help", description="❓ Справка"),
-    BotCommand(command="miniapp", description="📱 Мини-приложение"),
+    BotCommand(command="start", description="Начать"),
+    BotCommand(command="meow", description="Получить карточку"),
+    BotCommand(command="profile", description="Профиль"),
+    BotCommand(command="top", description="Топ игроков"),
+    BotCommand(command="dice", description="Кубик"),
+    BotCommand(command="nick", description="Сменить ник"),
+    BotCommand(command="help", description="Справка"),
+    BotCommand(command="miniapp", description="Мини-приложение"),
 ]
 
 
@@ -1024,10 +1113,12 @@ async def cmd_start(message: Message) -> None:
             pass
 
         welcome = (
-            "👋 <b>Добро пожаловать!</b>\n\n"
+            f"{pe(PE['sparkle'], '👋')} <b>Добро пожаловать!</b>\n\n"
             "Собирайте коллекцию карточек, копите монеты и соревнуйтесь в топе.\n\n"
-            "🃏 Карточка · «мряу» или кнопка ниже\n"
-            "⏱ Кулдаун · раз в 3 часа"
+            f"<blockquote>"
+            f"{pe(PE['photo'], '🃏')} Карточка · «мряу» или кнопка ниже\n"
+            f"{pe(PE['clock'], '⏱')} Кулдаун · раз в 3 часа"
+            f"</blockquote>"
         )
         await message.reply(welcome, reply_markup=get_main_km())
     except Exception as e:
@@ -1115,10 +1206,13 @@ def get_help_keyboard(active: str) -> InlineKeyboardMarkup:
     for key in HELP_TAB_ORDER:
         label = HELP_TABS[key]["label"]
         mark = "✓ " if key == active else ""
-        b.button(
-            text=f"{mark}{label}",
-            callback_data=HelpCallback(tab=key).pack(),
-        )
+        kwargs: dict[str, Any] = {
+            "text": f"{mark}{label}",
+            "callback_data": HelpCallback(tab=key).pack(),
+        }
+        if key == active:
+            kwargs["style"] = "primary"
+        b.button(**kwargs)
     b.adjust(2, 2, 1)
     return b.as_markup()
 
@@ -1127,7 +1221,11 @@ def build_help_text(tab: str) -> str:
     if tab not in HELP_TABS:
         tab = "cards"
     p = HELP_TABS[tab]
-    return f"<b>{p['title']}</b>\n{'─' * 20}\n\n{p['body']}"
+    return (
+        f"{pe(PE['info'], 'ℹ️')} <b>{p['title']}</b>\n"
+        f"{'─' * 18}\n\n"
+        f"{p['body']}"
+    )
 
 
 @router.message(Command("help"))
@@ -1175,7 +1273,7 @@ async def cmd_miniapp(message: Message) -> None:
         )
         return
     await message.reply(
-        "📱 <b>Мини-приложение</b>\n\n"
+        f"{pe(PE['link'], '📱')} <b>Мини-приложение</b>\n\n"
         "Откройте прямо в Telegram — удобнее и быстрее.",
         reply_markup=app_kb,
     )
@@ -1219,7 +1317,10 @@ async def get_card_handler(message: Message) -> None:
             remaining = int(COOLDOWN_SECONDS - time_passed)
             time_str = fmt_remaining(remaining)
             wait_emoji = random.choice(WAIT_EMOJIS)
-            text = f"{wait_emoji} <b>Подождите {time_str}</b> для получения следующей карточки"
+            text = (
+                f"{pe(PE['clock'], wait_emoji)} <b>Подождите {time_str}</b>\n"
+                f"для следующей карточки"
+            )
             await reply_ephemeral(message, text)
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
             return
@@ -1230,7 +1331,7 @@ async def get_card_handler(message: Message) -> None:
         if status == "no_cards":
             await reply_ephemeral(
                 message,
-                "❌ <b>Карточек пока нет</b>\n\n"
+                f"{pe(PE['cross'], '❌')} <b>Карточек пока нет</b>\n\n"
                 "Обратитесь к администрации — база ещё пуста.",
             )
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
@@ -1239,7 +1340,7 @@ async def get_card_handler(message: Message) -> None:
         if status == "all_collected":
             await reply_ephemeral(
                 message,
-                "🎉 <b>Коллекция полная</b>\n\n"
+                f"{pe(PE['trophy'], '🎉')} <b>Коллекция полная</b>\n\n"
                 "Вы собрали все карточки. Новые появятся позже.",
             )
             await send_streak_notice(message, streak, bonus, new_balance, streak_updated)
@@ -1248,7 +1349,7 @@ async def get_card_handler(message: Message) -> None:
         if status != "success" or card is None:
             await reply_ephemeral(
                 message,
-                "❌ <b>Что-то пошло не так</b>\n\n"
+                f"{pe(PE['cross'], '❌')} <b>Что-то пошло не так</b>\n\n"
                 "Попробуйте ещё раз чуть позже.",
             )
             return
@@ -1376,19 +1477,22 @@ async def dice_handler(message: Message) -> None:
 
         if delta > 0:
             delta_str = f"+{fmt_num(delta)}"
-            title = "🎉 Выигрыш"
+            title = f"{pe(PE['check'], '🎉')} <b>Выигрыш</b>"
         elif delta < 0:
             delta_str = f"−{fmt_num(abs(delta))}"
-            title = "😔 Проигрыш"
+            title = f"{pe(PE['cross'], '😔')} <b>Проигрыш</b>"
         else:
             delta_str = "±0"
-            title = "Ничья"
+            title = f"{pe(PE['info'], '·')} <b>Ничья</b>"
 
         result = (
-            f"🎲 <b>{title}</b>\n\n"
+            f"{title}\n\n"
+            f"<blockquote>"
             f"🎲 Выпало · <b>{dice_value}</b>\n"
-            f"🪙 Итог · <b>{delta_str}</b>\n\n"
-            f"🪙 У вас · <b>{fmt_num(new_balance)}</b> {plural(new_balance, 'монета', 'монеты', 'монет')}"
+            f"{pe(PE['star'], '🪙')} Итог · <b>{delta_str}</b>\n"
+            f"Баланс · <b>{fmt_num(new_balance)}</b> "
+            f"{plural(new_balance, 'монета', 'монеты', 'монет')}"
+            f"</blockquote>"
         )
         try:
             await spin_msg.reply(result)
@@ -1507,31 +1611,43 @@ async def nickname_cmd(
 
     if arg.lower() == "reset":
         b = InlineKeyboardBuilder()
-        b.button(text="✓ Подтвердить", callback_data=NickConfirmCallback(action="reset").pack())
-        b.button(text="✕ Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
+        b.button(
+            text="Подтвердить",
+            callback_data=NickConfirmCallback(action="reset").pack(),
+            style="success",
+            icon_custom_emoji_id=PE["check"],
+        )
+        b.button(
+            text="Отмена",
+            callback_data=NickConfirmCallback(action="cancel").pack(),
+            style="danger",
+            icon_custom_emoji_id=PE["cross"],
+        )
         b.adjust(2)
         await state.set_state(NicknameSG.pending)
         await state.update_data(pending_nick=None, pending_action="reset")
         await message.reply(
-            "♻️ <b>Сбросить никнейм?</b>\n\n"
-            "ℹ️ Результат · имя из Telegram\n"
-            "🪙 Стоимость · бесплатно",
+            f"{pe(PE['trash'], '♻️')} <b>Сбросить никнейм?</b>\n\n"
+            f"<blockquote>"
+            f"{pe(PE['info'], 'ℹ️')} Результат · имя из Telegram\n"
+            f"{pe(PE['star'], '🪙')} Стоимость · бесплатно"
+            f"</blockquote>",
             reply_markup=b.as_markup(),
         )
         return
 
     if not arg:
         await message.reply(
-            "✏️ <b>Смена никнейма</b>\n\n"
+            f"{pe(PE['edit'], '✏️')} <b>Смена никнейма</b>\n\n"
             f"<code>/nick НовыйНик</code> · {NICKNAME_COST} 🪙\n\n"
-            "♻️ Сброс · /nick reset · бесплатно"
+            f"{pe(PE['trash'], '♻️')} Сброс · /nick reset · бесплатно"
         )
         return
 
     new_nick = validate_nickname(arg)
     if not new_nick:
         await message.reply(
-            "❌ <b>Неверный никнейм</b>\n\n"
+            f"{pe(PE['cross'], '❌')} <b>Неверный никнейм</b>\n\n"
             "2–32 символа, без ссылок и @."
         )
         return
@@ -1540,23 +1656,37 @@ async def nickname_cmd(
     balance = row["coins"] if row else 0
     if balance < NICKNAME_COST:
         await message.reply(
-            "⚠️ <b>Недостаточно монет</b>\n\n"
-            f"🪙 Нужно · <b>{fmt_num(NICKNAME_COST)}</b>\n"
-            f"🪙 У вас · <b>{fmt_num(balance)}</b>"
+            f"{pe(PE['cross'], '⚠️')} <b>Недостаточно монет</b>\n\n"
+            f"<blockquote>"
+            f"Нужно · <b>{fmt_num(NICKNAME_COST)}</b>\n"
+            f"У вас · <b>{fmt_num(balance)}</b>"
+            f"</blockquote>"
         )
         return
 
     b = InlineKeyboardBuilder()
-    b.button(text="✓ Подтвердить", callback_data=NickConfirmCallback(action="apply").pack())
-    b.button(text="✕ Отмена", callback_data=NickConfirmCallback(action="cancel").pack())
+    b.button(
+        text="Подтвердить",
+        callback_data=NickConfirmCallback(action="apply").pack(),
+        style="success",
+        icon_custom_emoji_id=PE["check"],
+    )
+    b.button(
+        text="Отмена",
+        callback_data=NickConfirmCallback(action="cancel").pack(),
+        style="danger",
+        icon_custom_emoji_id=PE["cross"],
+    )
     b.adjust(2)
     await state.set_state(NicknameSG.pending)
     await state.update_data(pending_nick=new_nick, pending_action="apply")
     await message.reply(
-        "✏️ <b>Сменить никнейм?</b>\n\n"
-        f"👤 Новый ник · <b>{esc(new_nick)}</b>\n"
-        f"🪙 Стоимость · <b>{NICKNAME_COST}</b>\n\n"
-        f"🪙 У вас · {fmt_num(balance)}",
+        f"{pe(PE['edit'], '✏️')} <b>Сменить никнейм?</b>\n\n"
+        f"<blockquote>"
+        f"{pe(PE['user'], '👤')} Новый ник · <b>{esc(new_nick)}</b>\n"
+        f"{pe(PE['star'], '🪙')} Стоимость · <b>{NICKNAME_COST}</b>\n"
+        f"Баланс · {fmt_num(balance)}"
+        f"</blockquote>",
         reply_markup=b.as_markup(),
     )
 
@@ -1733,11 +1863,13 @@ async def build_top_text(kind: str, current_user_id: int) -> str:
         lines.append(f"{medal} {esc(nick)} · <b>{fmt_num(row['value'])}</b> {unit}")
 
     text = (
-        f"<b>{title}</b>\n"
+        f"{pe(PE['trophy'], '🏆')} <b>{title}</b>\n"
         f"{'─' * 18}\n\n"
         f"{chr(10).join(lines)}\n\n"
-        f"📌 Ваше место · <b>#{fmt_num(my_rank)}</b>\n"
-        f"👤 {esc(my_nick)} · <b>{fmt_num(my_value)}</b> {unit}"
+        f"<blockquote>"
+        f"Ваше место · <b>#{fmt_num(my_rank)}</b>\n"
+        f"{pe(PE['user'], '👤')} {esc(my_nick)} · <b>{fmt_num(my_value)}</b> {unit}"
+        f"</blockquote>"
     )
     return text
 
@@ -1861,8 +1993,9 @@ async def get_collection_main_keyboard(user_id: int):
             grid.append(buttons[i : i + 2])
         grid.append([
             InlineKeyboardButton(
-                text="‹ В профиль",
+                text="В профиль",
                 callback_data=BackToProfileCallback(user_id=user_id).pack(),
+                icon_custom_emoji_id=PE["back"],
             )
         ])
         return InlineKeyboardMarkup(inline_keyboard=grid), total_cards, total_in_game
@@ -1949,8 +2082,9 @@ async def process_rarity_view(
                 nav,
                 [
                     InlineKeyboardButton(
-                        text="‹ К редкостям",
+                        text="К редкостям",
                         callback_data=MainMenuCallback(user_id=user_id).pack(),
+                        icon_custom_emoji_id=PE["back"],
                     )
                 ],
             ]
@@ -2100,7 +2234,9 @@ async def main() -> None:
                     logger.warning("default avatar: %s", e)
             dp = Dispatcher(storage=MemoryStorage())
             dp.include_router(router)
+            # Menu / — команды в меню бота (кнопка Menu рядом с полем ввода)
             await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
+            await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeAllPrivateChats())
             logger.info("🤖 Пользовательский бот запущен")
             tasks.append(dp.start_polling(bot))
         else:
